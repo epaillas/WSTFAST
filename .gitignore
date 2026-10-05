@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Measurements and run products (regenerate with scripts/)
+data/
+outputs/*
+!outputs/feasibility/
+outputs/feasibility/*
+# keep the figures and tables referenced by docs/wst_eft_feasibility.md
+!outputs/feasibility/*.png
+!outputs/feasibility/*.md

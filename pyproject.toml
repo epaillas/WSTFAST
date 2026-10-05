@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wstmodel"
+version = "0.1.0"
+description = "Perturbative (EFT) modelling of the wavelet scattering transform of the matter field"
+requires-python = ">=3.11"
+dependencies = ["numpy", "scipy", "jax", "h5py", "hdf5plugin", "cosmoprimo", "desilike", "matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["wstmodel*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: builds the full desilike graph with CLASS"]
