@@ -18,12 +18,12 @@ from pathlib import Path
 
 import numpy as np
 
-import wstmodel.theory  # noqa: F401  (enables JAX double precision)
+import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import setup_logging
 from desilike.base import Posterior
-from wstmodel.config import QUIJOTE_COSMOLOGY, select_coefficients
-from wstmodel.data import load_dataset, load_measurement
-from wstmodel.inference import (build_likelihood, covariance_for, plot_fit, profile, sample_mh,
+from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
+from wstfast.data import load_dataset, load_measurement
+from wstfast.inference import (build_likelihood, covariance_for, plot_fit, profile, sample_mh,
                                 summarize)
 
 

@@ -15,13 +15,13 @@ from pathlib import Path
 
 import numpy as np
 
-import wstmodel.theory  # noqa: F401  (enables JAX double precision)
+import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, setup_logging
 from desilike.emulators import Emulator, Space
-from wstmodel.calculators import WSTBasis, build_cosmology
-from wstmodel.config import QUIJOTE_COSMOLOGY, select_coefficients
-from wstmodel.data import load_measurement
-from wstmodel.theory import Assembly, all_coefficients
+from wstfast.calculators import WSTBasis, build_cosmology
+from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
+from wstfast.data import load_measurement
+from wstfast.theory import Assembly, all_coefficients
 
 #: Default emulation box: about +-15% around the Quijote fiducial (as in dsc-model).
 DEFAULT_BOUNDS = {"h": (0.6111, 0.7311), "omega_cdm": (0.0959, 0.1459), "logA": (2.761, 3.361),
@@ -64,7 +64,7 @@ def main():
     settings["vary"] = list(args.vary)
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings["bounds"] = bounds
-    basis = WSTBasis(cosmo=build_cosmology(args.vary), config=wstmodel.WSTConfig(**settings["config"]),
+    basis = WSTBasis(cosmo=build_cosmology(args.vary), config=wstfast.WSTConfig(**settings["config"]),
                      z=settings["z"], shotnoise=settings["shotnoise"])
 
     emulator = Emulator(basis, Space(bounds=bounds))
@@ -77,7 +77,7 @@ def main():
 
     # Validation of the predicted coefficients against the exact basis at random points of the box,
     # for all coefficients and for the default perturbative selection.
-    config = wstmodel.WSTConfig(**settings["config"])
+    config = wstfast.WSTConfig(**settings["config"])
     selections = {"all": all_coefficients(config), "default": select_coefficients(config)}
     assemblies = {name: Assembly(config, coefficients) for name, coefficients in selections.items()}
     emulated = emulator.to_calculator()

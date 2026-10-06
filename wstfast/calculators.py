@@ -43,7 +43,7 @@ def build_cosmology(varied=("omega_cdm", "logA"), engine="class") -> CosmoprimoC
 class WSTBasis(Calculator):
     """Cosmology-dependent band integrals of the WST model, for every coefficient of ``config``.
 
-    Outputs ``s1_terms`` (n_S1, 4) and ``s21_terms`` (n_S21, 2); see ``wstmodel.theory.model``.
+    Outputs ``s1_terms`` (n_S1, 4) and ``s21_terms`` (n_S21, 2); see ``wstfast.theory.model``.
     """
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), z: float = 0.5, shotnoise: float = 0.0,

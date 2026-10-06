@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Benchmark wstmodel's WST estimator against kymatio's HarmonicScattering3D on a Quijote snapshot.
+"""Benchmark wstfast's WST estimator against kymatio's HarmonicScattering3D on a Quijote snapshot.
 
 In a configuration both codes support (dyadic scales, same l in both layers), they must agree up to
 
@@ -16,7 +16,7 @@ holds for any per-l normalisation (other kymatio versions); K_l^q is printed for
     python scripts/benchmark_kymatio.py --filters                          # filter banks only, seconds
 
 On a cluster, point --snapshot-root at the Quijote fiducial snapshots; --device auto runs kymatio, and in
---timing also wstmodel's torch backend, on a GPU when torch sees one (wstmodel's numpy backend is CPU-only).
+--timing also wstfast's torch backend, on a GPU when torch sees one (wstfast's numpy backend is CPU-only).
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ import numpy as np
 import scipy.special
 from scipy.special import factorial
 
-from wstmodel import WSTConfig
-from wstmodel.measure import Lattice, measure_wst
-from wstmodel.quijote import SNAPSHOT_ROOT, load_density
+from wstfast import WSTConfig
+from wstfast.measure import Lattice, measure_wst
+from wstfast.quijote import SNAPSHOT_ROOT, load_density
 
 
 def _install_sph_harm_shim():
@@ -61,10 +61,10 @@ def torch_device(name: str):
 
 
 def describe_devices(device, threads=None):
-    """Print where each code runs: kymatio on the torch device, wstmodel always on the CPU."""
+    """Print where each code runs: kymatio on the torch device, wstfast always on the CPU."""
     import torch
 
-    import wstmodel.measure as measure
+    import wstfast.measure as measure
 
     if device.type == "cuda":
         index = device.index if device.index is not None else torch.cuda.current_device()
@@ -73,7 +73,7 @@ def describe_devices(device, threads=None):
         where = f"CPU ({torch.get_num_threads()} torch threads)"
     print(f"kymatio device: {where}; torch.cuda.is_available() = {torch.cuda.is_available()}, "
           f"visible GPUs = {torch.cuda.device_count()}")
-    print(f"wstmodel numpy backend: CPU ({threads or measure.WORKERS} FFT workers); torch backend: {where}", flush=True)
+    print(f"wstfast numpy backend: CPU ({threads or measure.WORKERS} FFT workers); torch backend: {where}", flush=True)
 
 
 def run_kymatio(delta, config, qs, device="auto"):
@@ -108,8 +108,8 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
     _install_sph_harm_shim()
     from kymatio.torch import HarmonicScattering3D
 
-    import wstmodel.measure as measure
-    from wstmodel.measure_torch import TorchLattice, measure_wst_torch
+    import wstfast.measure as measure
+    from wstfast.measure_torch import TorchLattice, measure_wst_torch
 
     torch.set_num_threads(threads)
     measure.WORKERS = threads
@@ -134,9 +134,9 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
                                                                    sigma_0=config.sigma0, max_order=2,
                                                                    integral_powers=list(qs)).to(device),
          run_and_wait),
-        ("wstmodel (numpy)", lambda: Lattice(delta.shape[0]),
+        ("wstfast (numpy)", lambda: Lattice(delta.shape[0]),
          lambda lattice: measure_wst(delta, config, qs=qs, lattice=lattice)),
-        (f"wstmodel ({device.type})", lambda: TorchLattice(delta.shape[0], device=device, lmax=config.L),
+        (f"wstfast ({device.type})", lambda: TorchLattice(delta.shape[0], device=device, lmax=config.L),
          lambda lattice: wait(measure_wst_torch(delta, config, qs=qs, lattice=lattice))),
     ):
         start = time.perf_counter()
@@ -207,7 +207,7 @@ def main():
         return
     start = time.time()
     ours = measure_wst(delta, config, qs=args.q, lattice=Lattice(args.nmesh))
-    print(f"wstmodel call (per realization, no reusable setup): {time.time() - start:.1f} s")
+    print(f"wstfast call (per realization, no reusable setup): {time.time() - start:.1f} s")
     s1_k, s2_k = run_kymatio(delta, config, args.q, args.device)
     print("(use --timing for warm per-realization timings of both codes)")
 

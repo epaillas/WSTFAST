@@ -14,8 +14,8 @@
 
 set -euo pipefail
 SNAPSHOT_ROOT=/CHANGE/ME/Quijote/Snapshots/fiducial   # contains <id>/snapdir_003/snap_003.*.hdf5
-OUTPUT_DIR=/CHANGE/ME/wst-model/data/quijote/z0.5
-REPO=/CHANGE/ME/wst-model
+OUTPUT_DIR=/CHANGE/ME/wstfast/data/quijote/z0.5
+REPO=/CHANGE/ME/wstfast
 REALIZATIONS=$REPO/scripts/slurm/quijote_dsc_realizations.txt   # the 1500 ids of the DSC P(k) run
 PER_TASK=50
 

@@ -1,4 +1,4 @@
-"""GPU (torch) backend of the WST estimator; same algorithm and outputs as ``wstmodel.measure``.
+"""GPU (torch) backend of the WST estimator; same algorithm and outputs as ``wstfast.measure``.
 
 The spherical harmonics of every l are computed once (on the CPU, with scipy) and kept on the
 device, so that a configuration is set up once and then applied to many realizations, as with
@@ -80,7 +80,7 @@ def _moments(field, qs) -> np.ndarray:
 
 def measure_wst_torch(delta, config: WSTConfig, qs=None, lattice: TorchLattice | None = None,
                       spectra: TorchPowerMultipoles | None = None) -> dict:
-    """Same outputs as ``wstmodel.measure.measure_wst``, computed on ``lattice.device``."""
+    """Same outputs as ``wstfast.measure.measure_wst``, computed on ``lattice.device``."""
     qs = np.atleast_1d(config.q if qs is None else qs).astype(float)
     nmesh = delta.shape[0]
     lattice = lattice or TorchLattice(nmesh)
@@ -119,7 +119,7 @@ def measure_wst_torch(delta, config: WSTConfig, qs=None, lattice: TorchLattice |
 
 
 def paint_cic_torch(chunks, nmesh: int, boxsize: float, device="auto") -> np.ndarray:
-    """Cloud-in-cell density contrast on the device; same result as ``wstmodel.quijote.paint_cic``."""
+    """Cloud-in-cell density contrast on the device; same result as ``wstfast.quijote.paint_cic``."""
     device = default_device(device) if isinstance(device, str) else device
     grid = torch.zeros(nmesh**3, dtype=torch.float64, device=device)
     for pos in chunks:

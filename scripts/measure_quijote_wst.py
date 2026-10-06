@@ -26,10 +26,10 @@ import argparse
 import time
 from pathlib import Path
 
-from wstmodel.config import SUPERSET, WSTConfig
-from wstmodel.data import save_measurement
-from wstmodel.measure import Lattice, PowerMultipoles, measure_wst
-from wstmodel.quijote import SNAPSHOT_ROOT, load_density
+from wstfast.config import SUPERSET, WSTConfig
+from wstfast.data import save_measurement
+from wstfast.measure import Lattice, PowerMultipoles, measure_wst
+from wstfast.quijote import SNAPSHOT_ROOT, load_density
 
 SUPERSET_QS = [0.5, 0.8, 1.0, 2.0]
 
@@ -76,7 +76,7 @@ def make_backend(args):
     """(device, lattice, spectra factory, estimator) for the chosen backend; set up once per run."""
     if args.backend == "numpy":
         return None, Lattice(args.nmesh), PowerMultipoles, measure_wst
-    from wstmodel.measure_torch import (TorchLattice, TorchPowerMultipoles, default_device,
+    from wstfast.measure_torch import (TorchLattice, TorchPowerMultipoles, default_device,
                                         measure_wst_torch)
 
     device = default_device(args.device)

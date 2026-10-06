@@ -74,7 +74,7 @@ def load_density(realization: int | str, redshift: float = 0.5, nmesh: int = 256
                  los: int = 2, root: Path = SNAPSHOT_ROOT, device=None):
     """CIC density contrast of one Quijote fiducial snapshot, and its header.
 
-    With a torch ``device`` the particles are painted there (see ``wstmodel.measure_torch``).
+    With a torch ``device`` the particles are painted there (see ``wstfast.measure_torch``).
     """
     snapdir = Path(root) / str(realization) / f"snapdir_{SNAPNUM[redshift]}"
     files = snapshot_files(snapdir)

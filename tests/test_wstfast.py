@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 from scipy.special import gammaln
 
-import wstmodel  # noqa: F401
-from wstmodel import WSTConfig, select_coefficients
-from wstmodel.measure import Lattice, PowerMultipoles, measure_wst
-from wstmodel.theory import Assembly, all_coefficients
-from wstmodel.theory.perturbation import OneLoopMatter, log_interpolator
+import wstfast  # noqa: F401
+from wstfast import WSTConfig, select_coefficients
+from wstfast.measure import Lattice, PowerMultipoles, measure_wst
+from wstfast.theory import Assembly, all_coefficients
+from wstfast.theory.perturbation import OneLoopMatter, log_interpolator
 
 
 def gaussian_field(nmesh=64, seed=1):
@@ -67,7 +67,7 @@ def test_assembly_keeps_selection_order():
 def test_likelihood_graph_evaluates():
     from desilike import build
 
-    from wstmodel.calculators import WSTLikelihood, WSTTheory, build_cosmology
+    from wstfast.calculators import WSTLikelihood, WSTTheory, build_cosmology
 
     config = WSTConfig()
     coefficients = select_coefficients(config)
@@ -94,8 +94,8 @@ def test_half_octave_superset_contains_dyadic_configuration():
 
 def test_torch_backend_matches_numpy():
     torch = pytest.importorskip("torch")
-    from wstmodel.measure_torch import TorchLattice, TorchPowerMultipoles, measure_wst_torch, paint_cic_torch
-    from wstmodel.quijote import paint_cic
+    from wstfast.measure_torch import TorchLattice, TorchPowerMultipoles, measure_wst_torch, paint_cic_torch
+    from wstfast.quijote import paint_cic
 
     delta, lattice = gaussian_field(nmesh=32)
     config = WSTConfig(J=3, L=3, L2=2, min_dj=2, sigma0=0.8, step=2**0.5, cellsize=1.0)

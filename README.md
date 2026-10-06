@@ -1,3 +1,5 @@
+# WSTFAST
+
 Perturbative modelling of the 3D solid-harmonic wavelet scattering transform (WST)
 of the matter field, following the approach of the sibling `dsc-model` project.
 The motivation and the numbers behind every modelling choice are in
@@ -60,7 +62,7 @@ pip install -e . --no-deps
 
 ## Model
 
-The model is in `wstmodel/theory/model.py`, for real-space matter only. Its data vector has two
+The model is in `wstfast/theory/model.py`, for real-space matter only. Its data vector has two
 parts:
 
 - **S1(j, l)** at Gaussian order.
@@ -87,7 +89,7 @@ Not yet included:
 
 ## Layout
 
-- `wstmodel/`
+- `wstfast/`
   - `config.py`: WST settings and coefficient selection.
   - `measure.py`: the WST estimator.
   - `quijote.py`: snapshot reading and CIC painting.
