@@ -65,14 +65,17 @@ pip install -e . --no-deps
 The model is in `wstfast/theory/model.py`, for real-space matter only. Its data vector has two
 parts:
 
-- **S1(j, l)** at Gaussian order.
-  - The variance uses the linear plus one-loop SPT power spectrum.
+- **S1(j, l)** at one-loop order.
+  - The Gaussian-limit expression uses the linear plus one-loop SPT variance.
   - A counterterm `cs2`, the CIC window and the particle shot noise are included.
+  - The next-to-leading Edgeworth correction uses the zero-lag tree trispectrum and squared tree
+    bispectrum of the wavelet vector (`wstfast/theory/cumulants.py`), with no free parameter.
 - **Reduced second-order coefficients S2(j1, j2, l) / S1(j1, l)**, for l ≥ 1.
   - The first-layer modulus field is a biased tracer.
   - Its scale-dependent response is computed from the tree-level bispectrum, with no free
     parameter.
-  - Its noise is (1 + `noise_l`) times the Gaussian-chaos value.
+  - Its noise is (1 + `noise_j{j1}_l{l}`) times the Gaussian-chaos value, one amplitude per
+    first-layer field.
   - The second layer is taken to be Gaussian.
 
 Default scale cuts keep S1 at σ_j ≥ 25 Mpc/h and S2/S1 at σ_j1 ≥ 12.5 Mpc/h. That gives 22
@@ -82,7 +85,6 @@ The cosmology-dependent band integrals (`WSTBasis`) are what the emulator replac
 parameters stay exact in `WSTTheory`, as in the DSC model.
 
 Not yet included:
-- Edgeworth corrections to S1 (these need the zero-lag tree trispectrum);
 - one-loop responses;
 - redshift-space distortions;
 - galaxies.
@@ -94,7 +96,7 @@ Not yet included:
   - `measure.py`: the WST estimator.
   - `quijote.py`: snapshot reading and CIC painting.
   - `data.py`: storage, data vectors and covariance.
-  - `theory/`: SPT loops, modulus-field responses and model assembly (JAX).
+  - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and model assembly (JAX).
   - `calculators.py`: desilike calculators and likelihood.
   - `inference.py`: profiling, MH sampling, summaries and plots.
 - `scripts/`: the three pipeline steps. `scripts/feasibility/` holds the diagnostics of the

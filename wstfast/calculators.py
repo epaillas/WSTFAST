@@ -43,7 +43,7 @@ def build_cosmology(varied=("omega_cdm", "logA"), engine="class") -> CosmoprimoC
 class WSTBasis(Calculator):
     """Cosmology-dependent band integrals of the WST model, for every coefficient of ``config``.
 
-    Outputs ``s1_terms`` (n_S1, 4) and ``s21_terms`` (n_S21, 2); see ``wstfast.theory.model``.
+    Outputs ``s1_terms`` (n_S1, 6) and ``s21_terms`` (n_S21, 2); see ``wstfast.theory.model``.
     """
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), z: float = 0.5, shotnoise: float = 0.0,
@@ -76,10 +76,11 @@ class WSTTheory(Calculator):
 
     Nuisance parameters: ``cs2`` (counterterm, (Mpc/h)^2) and one second-layer noise amplitude
     ``noise_j{j1}_l{l}`` per first-layer field used in S21 (the noise of U_{j1,l} is (1 + noise) times
-    its Gaussian-chaos value).
+    its Gaussian-chaos value). ``edgeworth=False`` drops the NLO Edgeworth correction to S1.
     """
 
-    def __init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, **basis_kwargs):
+    def __init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
+                 **basis_kwargs):
         self.basis = WSTBasis(config=config, **basis_kwargs) if basis is None else basis
         self.cs2 = Parameter("cs2", value=0.0, prior=dict(limits=[-20.0, 20.0]),
                              ref=dict(dist="norm", loc=0.0, scale=1.0), latex="c_s^2")
@@ -88,8 +89,9 @@ class WSTTheory(Calculator):
                                      ref=dict(dist="norm", loc=0.0, scale=0.1), latex=rf"a_{{N,{key[0]},{key[1]}}}")
                       for key in fields}
 
-    def __post_init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, **basis_kwargs):
-        self.assembly = Assembly(config, coefficients)
+    def __post_init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
+                      **basis_kwargs):
+        self.assembly = Assembly(config, coefficients, edgeworth=edgeworth)
 
     def __call__(self):
         noise = jnp.stack([self.noise[key].value for key in self.assembly.noise_keys]) if self.noise else jnp.zeros(0)

@@ -51,7 +51,7 @@ def test_assembly_keeps_selection_order():
     assembly = Assembly(config, selected)
     basis = all_coefficients(config)
     n1 = sum(c.kind == "S1" for c in basis)
-    s1_terms = np.tile(np.arange(1.0, n1 + 1.0)[:, None], (1, 4)) * np.array([1.0, 0.0, 0.0, 0.0])
+    s1_terms = np.tile(np.arange(1.0, n1 + 1.0)[:, None], (1, 6)) * np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     s21_terms = np.ones((len(basis) - n1, 2))
     out = np.asarray(assembly(s1_terms, s21_terms, 0.0, np.zeros(len(assembly.noise_keys))))
     s1_rows = {c: i for i, c in enumerate(c for c in basis if c.kind == "S1")}
@@ -112,3 +112,22 @@ def test_torch_backend_matches_numpy():
     positions = [np.random.default_rng(2).uniform(0, 100.0, (5000, 3))]
     np.testing.assert_allclose(paint_cic_torch(positions, 16, 100.0, device="cpu"), paint_cic(positions, 16, 100.0),
                                atol=1e-5)
+
+
+def test_tree_trispectrum_is_symmetric_and_f3_conserves_momentum():
+    import jax.numpy as jnp
+
+    from wstfast.theory.cumulants import _f3, tree_trispectrum
+
+    rng = np.random.default_rng(3)
+    k = list(rng.normal(size=(3, 5, 3)) * 0.1)
+    k.append(-sum(k))
+    pk = log_interpolator(np.geomspace(1e-4, 10, 512), 2e4 / (1 + (np.geomspace(1e-4, 10, 512) / 0.02) ** 2))
+    reference = np.asarray(tree_trispectrum([jnp.asarray(x) for x in k], pk))
+    for order in ((1, 0, 2, 3), (2, 3, 0, 1), (3, 1, 2, 0)):
+        np.testing.assert_allclose(np.asarray(tree_trispectrum([jnp.asarray(k[i]) for i in order], pk)), reference,
+                                   rtol=1e-10)
+    # F3(q1, q2, q3) ~ |q1 + q2 + q3|^2 as the total momentum vanishes.
+    q1, q2 = jnp.asarray([[0.1, 0.02, 0.0]]), jnp.asarray([[-0.03, 0.08, 0.05]])
+    small = [float(_f3(q1, q2, -q1 - q2 + jnp.asarray([[eps, 0.0, 0.0]]))[0]) for eps in (1e-3, 2e-3)]
+    assert small[1] / small[0] == pytest.approx(4.0, rel=0.05)

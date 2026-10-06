@@ -6,10 +6,14 @@ Split in two, as in the density-split EFT:
   coefficients. This is what the Taylor emulator replaces.
 * ``assemble(...)``: closed-form combination with the nuisance parameters, exact and cheap.
 
-First order (Gaussian limit, Sec. 2.1 of docs/wst_eft_feasibility.md):
-    S1(j, l) = (2 s^2)^{q/2} Gamma((n + q) / 2) / Gamma(n / 2),  n = 2l + 1,
+S1 at one-loop order (Secs. 2.1-2.2 of docs/wst_eft_feasibility.md):
+    S1(j, l) = (2 s^2)^{q/2} Gamma((n + q) / 2) / Gamma(n / 2) [1 + E],  n = 2l + 1,
     n s^2 = int_k W^2(k) w_{j,l}(k) [P_L + P_1loop - 2 c_s^2 k^2 P_L + P_shot],
-with the mass-assignment window W^2 ~ exp(-k^2 H^2 / 6) (CIC) and the particle shot noise.
+with the mass-assignment window W^2 ~ exp(-k^2 H^2 / 6) (CIC) and the particle shot noise. The
+next-to-leading Edgeworth correction
+    E = q (q - 2) / (8 n (n + 2)) K4 + q (q - 2) (q - 4) / (72 n (n + 2) (n + 4)) (6 K33 + 9 K3v)
+uses the zero-lag tree trispectrum and squared tree bispectrum of the wavelet vector (cumulants.py),
+normalised by the linear variance.
 
 Reduced second order (Sec. 2.3 and 3.3), S21 = S2(j1, j2, l) / S1(j1, l) for 1 <= l <= L2:
     S21 = [m_n (R + (1 + a_l) G) / n]^{q/2},  m_n = 2 [Gamma((n + 1) / 2) / Gamma(n / 2)]^2,
@@ -18,8 +22,7 @@ with the tree-level modulus response r and its Gaussian-chaos noise g (moduli.py
 noise amplitude a_{j1,l} per first-layer field U_{j1,l} (as each density-split quantile has its own
 stochastic amplitude). The second layer is taken Gaussian.
 
-Not yet included: Edgeworth corrections (zero-lag tree trispectrum) to S1, one-loop responses,
-redshift-space distortions.
+Not yet included: one-loop responses, redshift-space distortions.
 """
 
 from __future__ import annotations
@@ -29,11 +32,13 @@ import numpy as np
 from scipy.special import gammaln
 
 from ..config import Coefficient, WSTConfig
+from .cumulants import ZeroLagCumulants
 from .moduli import ModulusClustering
 from .perturbation import OneLoopMatter, log_interpolator, log_weights
 
-#: Columns of the S1 basis: linear, one-loop, counterterm (k^2 P_L) and shot-noise variances.
-S1_TERMS = ("linear", "loop", "counterterm", "shotnoise")
+#: Columns of the S1 basis: linear, one-loop, counterterm (k^2 P_L) and shot-noise variances (n s^2), and the
+#: Edgeworth numerators sum_ab kappa_aabb and 6 K33 s^6 + 9 K3v s^6 (cumulants.py).
+S1_TERMS = ("linear", "loop", "counterterm", "shotnoise", "trispectrum", "bispectrum")
 #: Columns of the S21 basis: response (R) and Gaussian-noise (G) band powers.
 S21_TERMS = ("response", "noise")
 
@@ -75,6 +80,9 @@ class WSTMatterBasis:
         else:
             raise ValueError(f"unknown mass-assignment window {window!r}")
         self.shotnoise = float(shotnoise)
+        sigmas = [config.sigma(j) for j in range(config.J + 1)]
+        self.cumulants = [ZeroLagCumulants(sigmas, ell, cellsize=config.cellsize if window == "cic" else 0.0)
+                          for ell in range(config.L + 1)]
         # The second layer probes k <~ 6 / sigma_j2 for the smallest sigma_j2 paired with sigma_j1.
         self.moduli = {}
         for c in self.s21:
@@ -83,13 +91,16 @@ class WSTMatterBasis:
                 self.moduli[c.j, c.ell] = ModulusClustering(kgrid, config.sigma(c.j), c.ell)
 
     def terms(self, pklin):
-        """Return (s1_terms[n_s1, 4], s21_terms[n_s21, 2]) for the linear spectrum tabulated on ``klin``."""
+        """Return (s1_terms[n_s1, 6], s21_terms[n_s21, 2]) for the linear spectrum tabulated on ``klin``."""
         pk = log_interpolator(jnp.asarray(self.klin), pklin)
         k = self.kout
         plin = pk(jnp.asarray(k))
         spectra = (plin, self.loop(pk), k**2 * plin, jnp.full_like(plin, self.shotnoise))
-        s1_terms = jnp.stack([jnp.stack([band(p, k, self.config.sigma(c.j), c.ell, self.window2) for p in spectra])
-                              for c in self.s1])
+        variances = jnp.stack([jnp.stack([band(p, k, self.config.sigma(c.j), c.ell, self.window2) for p in spectra])
+                               for c in self.s1])
+        cumulants = [cumulant(pk) for cumulant in self.cumulants]  # (2, J + 1) per l
+        edgeworth = jnp.stack([cumulants[c.ell][:, c.j] for c in self.s1])
+        s1_terms = jnp.concatenate([variances, edgeworth], axis=1)
         clustering = {key: modulus(pk) for key, modulus in self.moduli.items()}
         s21_terms = []
         for c in self.s21:
@@ -104,7 +115,8 @@ class WSTMatterBasis:
 class Assembly:
     """Map basis terms and nuisance parameters to a selected data vector (all static indexing)."""
 
-    def __init__(self, config: WSTConfig, coefficients):
+    def __init__(self, config: WSTConfig, coefficients, edgeworth: bool = True):
+        self.edgeworth = edgeworth
         basis_coefficients = all_coefficients(config)
         s1_index = {c: i for i, c in enumerate(c for c in basis_coefficients if c.kind == "S1")}
         s21_index = {c: i for i, c in enumerate(c for c in basis_coefficients if c.kind == "S21")}
@@ -119,6 +131,11 @@ class Assembly:
         s21_n = np.array([2 * c.ell + 1 for c in self.coefficients if c.kind == "S21"], dtype="f8")
         self.s1_n, self.s21_n = s1_n, s21_n
         self.s1_gamma = np.exp(gammaln((s1_n + self.q) / 2) - gammaln(s1_n / 2))
+        # Edgeworth coefficients in terms of the basis columns, with s^2 = linear / n:
+        # K4 = trispectrum n^2 / linear^2 and 6 K33 + 9 K3v = bispectrum n^3 / linear^3.
+        q, n = self.q, s1_n
+        self.s1_c4 = q * (q - 2) * n / (8 * (n + 2))
+        self.s1_c6 = q * (q - 2) * (q - 4) * n**2 / (72 * (n + 2) * (n + 4))
         self.s21_mean2 = 2 * np.exp(2 * (gammaln((s21_n + 1) / 2) - gammaln(s21_n / 2)))
         #: First-layer fields (j1, l) of the S21 coefficients, one noise amplitude each.
         self.noise_keys = sorted({(c.j, c.ell) for c in self.coefficients if c.kind == "S21"})
@@ -133,6 +150,9 @@ class Assembly:
         t1 = s1_terms[self.s1_rows]
         variance = (t1[:, 0] + t1[:, 1] - 2 * cs2 * t1[:, 2] + t1[:, 3]) / self.s1_n
         s1 = self.s1_gamma * (2 * variance) ** (q / 2)
+        if self.edgeworth:
+            linear = t1[:, 0]
+            s1 = s1 * (1 + self.s1_c4 * t1[:, 4] / linear**2 + self.s1_c6 * t1[:, 5] / linear**3)
         t21 = s21_terms[self.s21_rows]
         amplitude = 1.0 + jnp.asarray(noise_amplitudes)[self.s21_noise_index]
         s21 = (self.s21_mean2 * (t21[:, 0] + amplitude * t21[:, 1]) / self.s21_n) ** (q / 2)
