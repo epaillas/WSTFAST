@@ -84,9 +84,13 @@ def run_kymatio(delta, config, qs, device="auto"):
 
     device = torch_device(device)
     describe_devices(device)
+    start = time.perf_counter()
     scattering = HarmonicScattering3D(J=config.J, shape=delta.shape, L=config.L, sigma_0=config.sigma0,
                                       max_order=2, integral_powers=list(qs)).to(device)
+    print(f"kymatio instantiation (once per configuration): {time.perf_counter() - start:.1f} s")
+    start = time.perf_counter()
     out = scattering(torch.from_numpy(delta.astype(np.float32)).to(device)).cpu().numpy()  # (paths, L+1, nq)
+    print(f"kymatio call (per realization, first call): {time.perf_counter() - start:.1f} s")
     nj = config.J + 1
     s1 = np.transpose(out[:nj], (2, 0, 1))
     s2 = np.full((len(qs), nj, nj, config.L + 1), np.nan)
@@ -195,10 +199,9 @@ def main():
         return
     start = time.time()
     ours = measure_wst(delta, config, qs=args.q, lattice=Lattice(args.nmesh))
-    print(f"wstmodel: {time.time() - start:.0f} s")
-    start = time.time()
+    print(f"wstmodel call (per realization, no reusable setup): {time.time() - start:.1f} s")
     s1_k, s2_k = run_kymatio(delta, config, args.q, args.device)
-    print(f"kymatio:  {time.time() - start:.0f} s")
+    print("(use --timing for warm per-realization timings of both codes)")
 
     report_versions()
     ncells = args.nmesh**3
