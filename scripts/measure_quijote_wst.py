@@ -13,6 +13,9 @@ and existing files are skipped, so interrupted jobs can simply be resubmitted. E
     # the half-octave superset of docs/wst_eft_feasibility.md on the 10 local fiducial boxes
     python scripts/measure_quijote_wst.py --superset --realizations 0 1 10 100 1000 10000-10004
 
+    # the same on a GPU
+    python scripts/measure_quijote_wst.py --superset --backend torch --realizations 0-1499
+
     # a single dyadic configuration
     python scripts/measure_quijote_wst.py --realizations 0-1499 --J 4 --L 4 --sigma0 0.8 --q 0.8
 """
@@ -57,6 +60,9 @@ def parse_args():
     parser.add_argument("--sigma0", type=float, nargs="+", default=[0.8], help="smallest wavelet width(s) in cells")
     parser.add_argument("--q", type=float, nargs="+", default=[0.8], help="exponents, all stored in each file")
     parser.add_argument("--kmax", type=float, default=0.4, help="largest k [h/Mpc] of the stored spectra")
+    parser.add_argument("--backend", choices=("numpy", "torch"), default="numpy",
+                        help="torch runs painting and the WST on --device (e.g. a GPU)")
+    parser.add_argument("--device", default="auto", help="torch device: auto, cpu or cuda")
     parser.add_argument("--snapshot-root", type=Path, default=SNAPSHOT_ROOT)
     parser.add_argument("--output-dir", type=Path, default=Path("data/quijote/z0.5"))
     args = parser.parse_args()
@@ -66,9 +72,22 @@ def parse_args():
     return args
 
 
+def make_backend(args):
+    """(device, lattice, spectra factory, estimator) for the chosen backend; set up once per run."""
+    if args.backend == "numpy":
+        return None, Lattice(args.nmesh), PowerMultipoles, measure_wst
+    from wstmodel.measure_torch import (TorchLattice, TorchPowerMultipoles, default_device,
+                                        measure_wst_torch)
+
+    device = default_device(args.device)
+    print(f"torch backend on {device}" + (f" ({__import__('torch').cuda.get_device_name(device)})"
+                                          if device.type == "cuda" else ""), flush=True)
+    return device, TorchLattice(args.nmesh, device=device, lmax=args.L), TorchPowerMultipoles, measure_wst_torch
+
+
 def main():
     args = parse_args()
-    lattice = Lattice(args.nmesh)
+    device, lattice, multipoles, estimator = make_backend(args)
     spectra = None
     configs = [WSTConfig(J=args.J, L=args.L, L2=args.L2, min_dj=args.min_dj, step=args.step, sigma0=sigma0,
                          q=args.q[0]) for sigma0 in args.sigma0]
@@ -83,14 +102,14 @@ def main():
                 continue
             start = time.time()
             delta, header = load_density(realization, redshift=args.redshift, nmesh=args.nmesh,
-                                         rsd=space == "rsd", root=args.snapshot_root)
-            spectra = spectra or PowerMultipoles(lattice, header["boxsize"], kmax=args.kmax)
+                                         rsd=space == "rsd", root=args.snapshot_root, device=device)
+            spectra = spectra or multipoles(lattice, header["boxsize"], kmax=args.kmax)
             metadata = dict(realization=realization, space=space, los="z" if space == "rsd" else None,
                             redshift=round(header["redshift"], 6), boxsize=header["boxsize"], nmesh=args.nmesh,
-                            nparticles=header["nparticles"], mass_assignment="cic")
+                            nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend)
             for config, path in pending.items():
                 config = WSTConfig(**{**config.to_dict(), "cellsize": header["boxsize"] / args.nmesh})
-                result = measure_wst(delta, config, qs=args.q, lattice=lattice, spectra=spectra)
+                result = estimator(delta, config, qs=args.q, lattice=lattice, spectra=spectra)
                 save_measurement(path, result, config, metadata)
                 print(f"wrote {path} ({time.time() - start:.0f} s)", flush=True)
 

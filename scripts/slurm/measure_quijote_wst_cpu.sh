@@ -1,7 +1,7 @@
 #!/bin/bash
 # Half-octave WST superset of Quijote fiducial snapshots (z = 0.5, real + redshift space) as a SLURM
 # job array: 30 tasks x 50 realizations, one node per task. Fill in the CHANGE_ME settings, then
-#     sbatch scripts/slurm/measure_quijote_wst.sh
+#     sbatch scripts/slurm/measure_quijote_wst_cpu.sh
 # Resubmitting is safe: finished files are skipped. About 6 min per realization on 18 cores.
 #SBATCH --job-name=wst-quijote
 #SBATCH --account=CHANGE_ME

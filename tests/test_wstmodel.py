@@ -90,3 +90,25 @@ def test_half_octave_superset_contains_dyadic_configuration():
         np.testing.assert_allclose(b["S2"][:, 2 * j1, 2 * j2], a["S2"][:, j1, j2], rtol=1e-5)
     # First-layer auto-spectra are stored and positive.
     assert np.all(b["PUU"][:, :, 0] > 0)
+
+
+def test_torch_backend_matches_numpy():
+    torch = pytest.importorskip("torch")
+    from wstmodel.measure_torch import TorchLattice, TorchPowerMultipoles, measure_wst_torch, paint_cic_torch
+    from wstmodel.quijote import paint_cic
+
+    delta, lattice = gaussian_field(nmesh=32)
+    config = WSTConfig(J=3, L=3, L2=2, min_dj=2, sigma0=0.8, step=2**0.5, cellsize=1.0)
+    qs = [0.5, 0.8, 2.0]
+    reference = measure_wst(delta, config, qs=qs, lattice=lattice, spectra=PowerMultipoles(lattice, 32.0, kmax=1.5))
+    tlattice = TorchLattice(32, device=torch.device("cpu"))
+    result = measure_wst_torch(delta, config, qs=qs, lattice=tlattice,
+                               spectra=TorchPowerMultipoles(tlattice, 32.0, kmax=1.5))
+    assert set(result) == set(reference)
+    for name in ("S0", "S1", "S2", "Umean", "Pdd", "PUU"):
+        np.testing.assert_allclose(result[name], reference[name], rtol=2e-4, atol=1e-9)
+    np.testing.assert_allclose(result["PUd"], reference["PUd"], rtol=2e-3, atol=1e-6 * np.abs(reference["PUU"]).max())
+
+    positions = [np.random.default_rng(2).uniform(0, 100.0, (5000, 3))]
+    np.testing.assert_allclose(paint_cic_torch(positions, 16, 100.0, device="cpu"), paint_cic(positions, 16, 100.0),
+                               atol=1e-5)

@@ -15,8 +15,8 @@ holds for any per-l normalisation (other kymatio versions); K_l^q is printed for
     python scripts/benchmark_kymatio.py --timing --repeats 3 --threads 8   # warm timings only
     python scripts/benchmark_kymatio.py --filters                          # filter banks only, seconds
 
-On a cluster, point --snapshot-root at the Quijote fiducial snapshots; --device auto runs kymatio on a
-GPU when torch sees one (wstmodel always runs on the CPU).
+On a cluster, point --snapshot-root at the Quijote fiducial snapshots; --device auto runs kymatio, and in
+--timing also wstmodel's torch backend, on a GPU when torch sees one (wstmodel's numpy backend is CPU-only).
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def describe_devices(device, threads=None):
         where = f"CPU ({torch.get_num_threads()} torch threads)"
     print(f"kymatio device: {where}; torch.cuda.is_available() = {torch.cuda.is_available()}, "
           f"visible GPUs = {torch.cuda.device_count()}")
-    print(f"wstmodel device: CPU ({threads or measure.WORKERS} FFT workers)", flush=True)
+    print(f"wstmodel numpy backend: CPU ({threads or measure.WORKERS} FFT workers); torch backend: {where}", flush=True)
 
 
 def run_kymatio(delta, config, qs, device="auto"):
@@ -109,12 +109,18 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
     from kymatio.torch import HarmonicScattering3D
 
     import wstmodel.measure as measure
+    from wstmodel.measure_torch import TorchLattice, measure_wst_torch
 
     torch.set_num_threads(threads)
     measure.WORKERS = threads
     device = torch_device(device)
     describe_devices(device, threads)
     x = torch.from_numpy(delta.astype(np.float32)).to(device)
+
+    def wait(out):
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        return out
 
     def run_and_wait(engine):
         out = engine(x)
@@ -128,8 +134,10 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
                                                                    sigma_0=config.sigma0, max_order=2,
                                                                    integral_powers=list(qs)).to(device),
          run_and_wait),
-        ("wstmodel", lambda: Lattice(delta.shape[0]),
+        ("wstmodel (numpy)", lambda: Lattice(delta.shape[0]),
          lambda lattice: measure_wst(delta, config, qs=qs, lattice=lattice)),
+        (f"wstmodel ({device.type})", lambda: TorchLattice(delta.shape[0], device=device, lmax=config.L),
+         lambda lattice: wait(measure_wst_torch(delta, config, qs=qs, lattice=lattice))),
     ):
         start = time.perf_counter()
         engine = init()

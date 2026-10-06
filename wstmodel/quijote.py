@@ -71,10 +71,19 @@ def paint_cic(chunks, nmesh: int, boxsize: float) -> np.ndarray:
 
 
 def load_density(realization: int | str, redshift: float = 0.5, nmesh: int = 256, rsd: bool = False,
-                 los: int = 2, root: Path = SNAPSHOT_ROOT):
-    """CIC density contrast of one Quijote fiducial snapshot, and its header."""
+                 los: int = 2, root: Path = SNAPSHOT_ROOT, device=None):
+    """CIC density contrast of one Quijote fiducial snapshot, and its header.
+
+    With a torch ``device`` the particles are painted there (see ``wstmodel.measure_torch``).
+    """
     snapdir = Path(root) / str(realization) / f"snapdir_{SNAPNUM[redshift]}"
     files = snapshot_files(snapdir)
     header = read_header(files)
-    delta = paint_cic(iter_positions(files, header, rsd=rsd, los=los), nmesh, header["boxsize"])
+    positions = iter_positions(files, header, rsd=rsd, los=los)
+    if device is None:
+        delta = paint_cic(positions, nmesh, header["boxsize"])
+    else:
+        from .measure_torch import paint_cic_torch
+
+        delta = paint_cic_torch(positions, nmesh, header["boxsize"], device=device)
     return delta, header
