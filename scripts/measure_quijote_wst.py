@@ -8,13 +8,16 @@ Output files are
 
     {output-dir}/{tag}/{space}/wst_r{realization:05d}.npz,   tag = e.g. J4_L4_sigma0.8_n256
 
-and existing files are skipped, so interrupted jobs can simply be resubmitted. Examples:
+and existing files are skipped, so interrupted runs can simply be restarted. Without --realizations,
+every realization found under --snapshot-root (numeric folders with the snapshot of --redshift) is
+measured. Examples:
 
-    # the half-octave superset of docs/wst_eft_feasibility.md on the 10 local fiducial boxes
-    python scripts/measure_quijote_wst.py --superset --realizations 0 1 10 100 1000 10000-10004
+    # the half-octave superset of docs/wst_eft_feasibility.md on every local fiducial box
+    python scripts/measure_quijote_wst.py --superset
 
-    # the same on a GPU
-    python scripts/measure_quijote_wst.py --superset --backend torch --realizations 0-1499
+    # the same on a node with 4 GPUs: one process per GPU, each on a quarter of the realizations
+    for g in 0 1 2 3; do CUDA_VISIBLE_DEVICES=$g python scripts/measure_quijote_wst.py --superset \
+        --backend torch --shard $g 4 > wst-gpu$g.log 2>&1 & done
 
     # a single dyadic configuration
     python scripts/measure_quijote_wst.py --realizations 0-1499 --J 4 --L 4 --sigma0 0.8 --q 0.8
@@ -29,7 +32,7 @@ from pathlib import Path
 from wstfast.config import SUPERSET, WSTConfig
 from wstfast.data import save_measurement
 from wstfast.measure import Lattice, PowerMultipoles, measure_wst
-from wstfast.quijote import SNAPSHOT_ROOT, load_density
+from wstfast.quijote import SNAPNUM, SNAPSHOT_ROOT, load_density
 
 SUPERSET_QS = [0.5, 0.8, 1.0, 2.0]
 
@@ -43,9 +46,22 @@ def parse_realizations(items: list[str]) -> list[int]:
     return out
 
 
+def discover_realizations(root: Path, redshift: float) -> list[int]:
+    """Numeric sub-folders of ``root`` that contain the snapshot directory of ``redshift``."""
+    snapdir = f"snapdir_{SNAPNUM[redshift]}"
+    found = sorted(int(path.name) for path in Path(root).iterdir()
+                   if path.name.isdigit() and (path / snapdir).is_dir())
+    if not found:
+        raise FileNotFoundError(f"no realizations with {snapdir} under {root}")
+    return found
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--realizations", nargs="+", required=True, help="ids and inclusive ranges, e.g. 0-1499")
+    parser.add_argument("--realizations", nargs="+", default=None,
+                        help="ids and inclusive ranges, e.g. 0-1499 (default: all found under --snapshot-root)")
+    parser.add_argument("--shard", type=int, nargs=2, metavar=("INDEX", "COUNT"), default=(0, 1),
+                        help="only process every COUNT-th realization starting at INDEX (e.g. one shard per GPU)")
     parser.add_argument("--spaces", nargs="+", choices=("real", "rsd"), default=["real", "rsd"])
     parser.add_argument("--redshift", type=float, default=0.5)
     parser.add_argument("--nmesh", type=int, default=256)
@@ -91,7 +107,14 @@ def main():
     spectra = None
     configs = [WSTConfig(J=args.J, L=args.L, L2=args.L2, min_dj=args.min_dj, step=args.step, sigma0=sigma0,
                          q=args.q[0]) for sigma0 in args.sigma0]
-    for realization in parse_realizations(args.realizations):
+    if args.realizations is None:
+        realizations = discover_realizations(args.snapshot_root, args.redshift)
+    else:
+        realizations = parse_realizations(args.realizations)
+    index, count = args.shard
+    realizations = realizations[index::count]
+    print(f"{len(realizations)} realizations to process (shard {index + 1}/{count})", flush=True)
+    for realization in realizations:
         for space in args.spaces:
             paths = {config: args.output_dir / config.tag(args.nmesh) / space / f"wst_r{realization:05d}.npz"
                      for config in configs}
