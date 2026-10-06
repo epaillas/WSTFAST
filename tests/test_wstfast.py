@@ -53,7 +53,7 @@ def test_assembly_keeps_selection_order():
     n1 = sum(c.kind == "S1" for c in basis)
     s1_terms = np.tile(np.arange(1.0, n1 + 1.0)[:, None], (1, 4)) * np.array([1.0, 0.0, 0.0, 0.0])
     s21_terms = np.ones((len(basis) - n1, 2))
-    out = np.asarray(assembly(s1_terms, s21_terms, 0.0, np.zeros(len(assembly.noise_ells))))
+    out = np.asarray(assembly(s1_terms, s21_terms, 0.0, np.zeros(len(assembly.noise_keys))))
     s1_rows = {c: i for i, c in enumerate(c for c in basis if c.kind == "S1")}
     for value, c in zip(out, selected):
         if c.kind == "S1":

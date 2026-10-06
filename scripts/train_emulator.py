@@ -42,7 +42,7 @@ def basis_settings(data_dir: Path, space: str, q: float | None = None) -> dict:
 def predict(basis, assembly, point):
     """WST coefficients (nuisance parameters at zero) from an exact or emulated basis."""
     build(basis)(point)
-    noise = np.zeros(len(assembly.noise_ells))
+    noise = np.zeros(len(assembly.noise_keys))
     return np.asarray(assembly(basis.s1_terms, basis.s21_terms, 0.0, noise))
 
 

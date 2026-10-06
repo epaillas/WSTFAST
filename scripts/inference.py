@@ -36,6 +36,8 @@ def parse_args():
     parser.add_argument("--s1-ells", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--s21-min-scale", type=float, default=12.5, help="smallest sigma_j1 [Mpc/h] for S2/S1")
     parser.add_argument("--s21-ells", type=int, nargs="+", default=[1, 2, 3, 4])
+    parser.add_argument("--scale-stride", type=int, default=1,
+                        help="keep scales j divisible by this (2 on the half-octave superset = the dyadic subset)")
     parser.add_argument("--covariance", choices=("auto", "sample", "diagonal"), default="auto")
     parser.add_argument("--covariance-of-mean", action="store_true",
                         help="errors of the realization mean (default: one 1 (Gpc/h)^3 box)")
@@ -59,6 +61,8 @@ def main():
     config = load_measurement(first, q=args.q)["config"]
     coefficients = select_coefficients(config, s1_min_scale=args.s1_min_scale, s1_ells=args.s1_ells,
                                        s21_min_scale=args.s21_min_scale, s21_ells=args.s21_ells)
+    coefficients = [c for c in coefficients
+                    if c.j % args.scale_stride == 0 and (c.j2 is None or c.j2 % args.scale_stride == 0)]
     dataset = load_dataset(args.data_dir, args.space, coefficients, q=config.q)
     covariance, kind = covariance_for(dataset, args.covariance, of_mean=args.covariance_of_mean)
     print(f"{len(coefficients)} coefficients, {dataset.vectors.shape[0]} realizations, {kind} covariance")

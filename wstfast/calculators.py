@@ -75,23 +75,24 @@ class WSTTheory(Calculator):
     """WST data-vector prediction for selected coefficients.
 
     Nuisance parameters: ``cs2`` (counterterm, (Mpc/h)^2) and one second-layer noise amplitude
-    ``noise_l{l}`` per multipole used in S21 (the noise is (1 + noise_l) times its Gaussian-chaos value).
+    ``noise_j{j1}_l{l}`` per first-layer field used in S21 (the noise of U_{j1,l} is (1 + noise) times
+    its Gaussian-chaos value).
     """
 
     def __init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, **basis_kwargs):
         self.basis = WSTBasis(config=config, **basis_kwargs) if basis is None else basis
         self.cs2 = Parameter("cs2", value=0.0, prior=dict(limits=[-20.0, 20.0]),
                              ref=dict(dist="norm", loc=0.0, scale=1.0), latex="c_s^2")
-        ells = sorted({c.ell for c in coefficients if c.kind == "S21"})
-        self.noise = {ell: Parameter(f"noise_l{ell}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
-                                     ref=dict(dist="norm", loc=0.0, scale=0.1), latex=rf"a_{{N,{ell}}}")
-                      for ell in ells}
+        fields = sorted({(c.j, c.ell) for c in coefficients if c.kind == "S21"})
+        self.noise = {key: Parameter(f"noise_j{key[0]}_l{key[1]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
+                                     ref=dict(dist="norm", loc=0.0, scale=0.1), latex=rf"a_{{N,{key[0]},{key[1]}}}")
+                      for key in fields}
 
     def __post_init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, **basis_kwargs):
         self.assembly = Assembly(config, coefficients)
 
     def __call__(self):
-        noise = jnp.stack([self.noise[ell].value for ell in self.assembly.noise_ells]) if self.noise else jnp.zeros(0)
+        noise = jnp.stack([self.noise[key].value for key in self.assembly.noise_keys]) if self.noise else jnp.zeros(0)
         self.flattheory = self.assembly(self.basis.s1_terms, self.basis.s21_terms, self.cs2.value, noise)
         return self.flattheory
 

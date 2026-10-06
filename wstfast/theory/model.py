@@ -15,7 +15,8 @@ Reduced second order (Sec. 2.3 and 3.3), S21 = S2(j1, j2, l) / S1(j1, l) for 1 <
     S21 = [m_n (R + (1 + a_l) G) / n]^{q/2},  m_n = 2 [Gamma((n + 1) / 2) / Gamma(n / 2)]^2,
     R = int_k w_{j2,l} r_{j1,l}(k)^2 P_L(k),  G = int_k w_{j2,l} g_{j1,l}(k),
 with the tree-level modulus response r and its Gaussian-chaos noise g (moduli.py), and a free
-noise amplitude a_l per l. The second layer is taken Gaussian.
+noise amplitude a_{j1,l} per first-layer field U_{j1,l} (as each density-split quantile has its own
+stochastic amplitude). The second layer is taken Gaussian.
 
 Not yet included: Edgeworth corrections (zero-lag tree trispectrum) to S1, one-loop responses,
 redshift-space distortions.
@@ -119,8 +120,9 @@ class Assembly:
         self.s1_n, self.s21_n = s1_n, s21_n
         self.s1_gamma = np.exp(gammaln((s1_n + self.q) / 2) - gammaln(s1_n / 2))
         self.s21_mean2 = 2 * np.exp(2 * (gammaln((s21_n + 1) / 2) - gammaln(s21_n / 2)))
-        self.noise_ells = sorted({c.ell for c in self.coefficients if c.kind == "S21"})
-        self.s21_noise_index = np.array([self.noise_ells.index(c.ell) for c in self.coefficients if c.kind == "S21"],
+        #: First-layer fields (j1, l) of the S21 coefficients, one noise amplitude each.
+        self.noise_keys = sorted({(c.j, c.ell) for c in self.coefficients if c.kind == "S21"})
+        self.s21_noise_index = np.array([self.noise_keys.index((c.j, c.ell)) for c in self.coefficients if c.kind == "S21"],
                                         dtype=int)
         # Position of each output in the selected order.
         self.order = np.argsort([i for i, c in enumerate(self.coefficients) if c.kind == "S1"]
