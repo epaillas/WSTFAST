@@ -13,6 +13,7 @@ holds for any per-l normalisation (other kymatio versions); K_l^q is printed for
 
     python scripts/benchmark_kymatio.py --realization 0 --nmesh 128
     python scripts/benchmark_kymatio.py --timing --repeats 3 --threads 8   # warm timings only
+    python scripts/benchmark_kymatio.py --filters                          # filter banks only, seconds
 
 On a cluster, point --snapshot-root at the Quijote fiducial snapshots; --device auto runs kymatio on a
 GPU when torch sees one (wstmodel always runs on the CPU).
@@ -142,6 +143,31 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
         print(f"{name:16s} {t_init:9.2f} {first:9.2f} {mean:8.2f} ± {std:4.2f}")
 
 
+def compare_filters(nmesh: int, config: WSTConfig, device="auto"):
+    """Compare kymatio's stored filter bank with ours: sum_m |psi_{j,l}^m(k)|^2 on the full FFT grid.
+
+    This isolates the filters from FFTs, backends and devices. They must agree up to K_l^2.
+    """
+    _install_sph_harm_shim()
+    from kymatio.torch import HarmonicScattering3D
+
+    device = torch_device(device)
+    scattering = HarmonicScattering3D(J=config.J, shape=(nmesh,) * 3, L=config.L, sigma_0=config.sigma0,
+                                      max_order=2, integral_powers=[config.q]).to(device)
+    k = 2 * np.pi * np.fft.fftfreq(nmesh)
+    kmag = np.sqrt(sum(x**2 for x in np.meshgrid(k, k, k, indexing="ij")))
+    print(f"filter bank on {nmesh}^3 (kymatio stores {len(scattering.filters)} l-blocks)")
+    print("   l  j   max |kymatio / (K_l^2 ours) - 1| where ours > 1e-6 max")
+    for ell, block in enumerate(scattering.filters):
+        block = block.detach().cpu().numpy()
+        power = (block[..., 0] ** 2 + block[..., 1] ** 2).sum(axis=1)  # (J+1, n, n, n), sum over m
+        for j in range(config.J + 1):
+            x = config.sigma0 * 2**j * kmag
+            ours = kymatio_normalisation(ell) ** 2 * x ** (2 * ell) * np.exp(-(x**2))
+            mask = ours > 1e-6 * ours.max()
+            print(f"   {ell}  {j}   {np.max(np.abs(power[j][mask] / ours[mask] - 1)):.2e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--realization", type=int, default=0)
@@ -155,7 +181,12 @@ def main():
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--device", default="auto", help="kymatio device: auto, cpu or cuda")
     parser.add_argument("--snapshot-root", type=Path, default=SNAPSHOT_ROOT)
+    parser.add_argument("--filters", action="store_true", help="only compare the filter banks (no snapshot needed)")
     args = parser.parse_args()
+    if args.filters:
+        compare_filters(32, WSTConfig(J=args.J, L=args.L, sigma0=args.sigma0), args.device)
+        report_versions()
+        return
 
     delta, header = load_density(args.realization, nmesh=args.nmesh, root=args.snapshot_root)
     config = WSTConfig(J=args.J, L=args.L, sigma0=args.sigma0, cellsize=header["boxsize"] / args.nmesh)
@@ -191,7 +222,9 @@ def report_versions():
     import torch
 
     print(f"kymatio {kymatio.__version__}, scipy {scipy.__version__}, torch {torch.__version__}, numpy {np.__version__}")
-    print(f"scipy has native sph_harm: {'sph_harm' in dir(scipy.special) and not getattr(scipy.special.sph_harm, '__name__', '') == '<lambda>'}")
+    shim = getattr(scipy.special.sph_harm, "__name__", "") == "<lambda>"
+    print(f"kymatio from {kymatio.__file__}")
+    print(f"spherical harmonics: {'compatibility shim over sph_harm_y' if shim else 'scipy.special.sph_harm (native)'}")
 
 
 if __name__ == "__main__":
