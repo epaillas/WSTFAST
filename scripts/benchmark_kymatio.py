@@ -222,9 +222,24 @@ def report_versions():
     import torch
 
     print(f"kymatio {kymatio.__version__}, scipy {scipy.__version__}, torch {torch.__version__}, numpy {np.__version__}")
-    shim = getattr(scipy.special.sph_harm, "__name__", "") == "<lambda>"
     print(f"kymatio from {kymatio.__file__}")
-    print(f"spherical harmonics: {'compatibility shim over sph_harm_y' if shim else 'scipy.special.sph_harm (native)'}")
+    print(f"spherical harmonics used by kymatio's filter bank: {kymatio_harmonics()}")
+
+
+def kymatio_harmonics() -> str:
+    """Which spherical-harmonic function kymatio.scattering3d.filter_bank actually calls."""
+    import inspect
+
+    from kymatio.scattering3d import filter_bank
+
+    source = inspect.getsource(filter_bank.solid_harmonic_3d)
+    if "sph_harm_y(" in source:
+        call = next(line.strip() for line in source.splitlines() if "sph_harm_y(" in line)
+        return f"scipy.special.sph_harm_y, called as `{call}` (expected argument order: l, m, polar, azimuthal)"
+    function = getattr(filter_bank, "sph_harm", None)
+    if getattr(function, "__name__", "") == "<lambda>":
+        return "scipy.special.sph_harm via this script's compatibility shim over sph_harm_y"
+    return "scipy.special.sph_harm (native, scipy < 1.17)"
 
 
 if __name__ == "__main__":
