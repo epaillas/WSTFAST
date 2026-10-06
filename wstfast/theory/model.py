@@ -127,8 +127,21 @@ class WSTMatterBasis:
         return s1_terms, jnp.stack(s21_terms)
 
 
+def edgeworth(q, n, terms):
+    """NLO Edgeworth correction E(q) of E|X|^q from S1 basis rows (s^2 = linear / n):
+    K4 = trispectrum n^2 / linear^2 and 6 K33 + 9 K3v = bispectrum n^3 / linear^3."""
+    k4 = terms[:, 4] * n**2 / terms[:, 0] ** 2
+    k6 = terms[:, 5] * n**3 / terms[:, 0] ** 3
+    return q * (q - 2) * k4 / (8 * n * (n + 2)) + q * (q - 2) * (q - 4) * k6 / (72 * n * (n + 2) * (n + 4))
+
+
 class Assembly:
-    """Map basis terms and nuisance parameters to a selected data vector (all static indexing)."""
+    """Map basis terms and nuisance parameters to a selected data vector (all static indexing).
+
+    With ``edgeworth``, S1 gets its NLO Edgeworth factor 1 + E(q), and S21 = S2 / S1(j1) the one-point
+    factor (1 + E(1))^q / (1 + E(q)) of its first-layer field: the Gaussian relation <U>^2 = m_n s^2 behind
+    the S21 formula becomes <U>^2 = m_n s^2 (1 + E(1))^2, and S1(j1) = (Gaussian) (1 + E(q)).
+    """
 
     def __init__(self, config: WSTConfig, coefficients, edgeworth: bool = True):
         self.edgeworth = edgeworth
@@ -142,15 +155,12 @@ class Assembly:
             raise ValueError(f"coefficients not modelled: {unknown}")
         self.s1_rows = np.array([s1_index[c] for c in self.coefficients if c.kind == "S1"], dtype=int)
         self.s21_rows = np.array([s21_index[c] for c in self.coefficients if c.kind == "S21"], dtype=int)
+        self.s21_s1_rows = np.array([s1_index[Coefficient("S1", c.ell, c.j)] for c in self.coefficients
+                                     if c.kind == "S21"], dtype=int)
         s1_n = np.array([2 * c.ell + 1 for c in self.coefficients if c.kind == "S1"], dtype="f8")
         s21_n = np.array([2 * c.ell + 1 for c in self.coefficients if c.kind == "S21"], dtype="f8")
         self.s1_n, self.s21_n = s1_n, s21_n
         self.s1_gamma = np.exp(gammaln((s1_n + self.q) / 2) - gammaln(s1_n / 2))
-        # Edgeworth coefficients in terms of the basis columns, with s^2 = linear / n:
-        # K4 = trispectrum n^2 / linear^2 and 6 K33 + 9 K3v = bispectrum n^3 / linear^3.
-        q, n = self.q, s1_n
-        self.s1_c4 = q * (q - 2) * n / (8 * (n + 2))
-        self.s1_c6 = q * (q - 2) * (q - 4) * n**2 / (72 * (n + 2) * (n + 4))
         self.s21_mean2 = 2 * np.exp(2 * (gammaln((s21_n + 1) / 2) - gammaln(s21_n / 2)))
         #: First-layer fields (j1, l) of the S21 coefficients, one noise amplitude each.
         self.noise_keys = sorted({(c.j, c.ell) for c in self.coefficients if c.kind == "S21"})
@@ -165,10 +175,11 @@ class Assembly:
         t1 = s1_terms[self.s1_rows]
         variance = (t1[:, 0] + t1[:, 1] - 2 * cs2 * t1[:, 2] + t1[:, 3]) / self.s1_n
         s1 = self.s1_gamma * (2 * variance) ** (q / 2)
-        if self.edgeworth:
-            linear = t1[:, 0]
-            s1 = s1 * (1 + self.s1_c4 * t1[:, 4] / linear**2 + self.s1_c6 * t1[:, 5] / linear**3)
         t21 = s21_terms[self.s21_rows]
         amplitude = 1.0 + jnp.asarray(noise_amplitudes)[self.s21_noise_index]
         s21 = (self.s21_mean2 * (t21[:, 0] + amplitude * t21[:, 1] + t21[:, 2]) / self.s21_n) ** (q / 2)
+        if self.edgeworth:
+            s1 = s1 * (1 + edgeworth(q, self.s1_n, t1))
+            first = s1_terms[self.s21_s1_rows]
+            s21 = s21 * (1 + q * edgeworth(1.0, self.s21_n, first) - edgeworth(q, self.s21_n, first))
         return jnp.concatenate([s1, s21])[self.order]
