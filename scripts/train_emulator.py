@@ -5,6 +5,10 @@ The WST configuration, redshift and particle shot noise are read from the measur
 emulator matches the data it will be compared with. Example:
 
     python scripts/train_emulator.py --data-dir data/quijote/fiducial/z0.5/J4_L4_sigma0.8_n256 --vary omega_cdm logA
+
+    # five parameters: --budget 2 keeps the pure cubic terms and needs 51 nodes (821 at full order 3)
+    python scripts/train_emulator.py --data-dir data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256 \
+        --vary omega_cdm logA n_s h omega_b --budget 2 --output outputs/emulators/wst_basis_taylor_superset_5p.h5
 """
 
 from __future__ import annotations
@@ -55,6 +59,8 @@ def main():
     parser.add_argument("--bounds", type=json.loads, default={}, help='JSON overrides, e.g. \'{"logA": [2.9, 3.2]}\'')
     parser.add_argument("--order", type=int, default=3)
     parser.add_argument("--accuracy", type=int, default=2)
+    parser.add_argument("--budget", type=int, default=None,
+                        help="cap on the total degree of mixed terms (2 keeps 5-parameter training at 51 nodes)")
     parser.add_argument("--nvalidation", type=int, default=8)
     parser.add_argument("--output", type=Path, default=Path("outputs/emulators/wst_basis_taylor.h5"))
     args = parser.parse_args()
@@ -69,7 +75,7 @@ def main():
 
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy,
+    emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
                    checkpoint=str(args.output.with_suffix(".checkpoint.npz")))
     emulator.write(str(args.output))
     args.output.with_suffix(".json").write_text(json.dumps(settings, indent=2))
@@ -89,7 +95,7 @@ def main():
         for name, assembly in assemblies.items():
             exact, approx = predict(exact_graph, assembly, point), predict(emulated_graph, assembly, point)
             errors[name].append(np.max(np.abs(approx / exact - 1)))
-    report = dict(npoints=args.nvalidation, order=args.order, accuracy=args.accuracy,
+    report = dict(npoints=args.nvalidation, order=args.order, accuracy=args.accuracy, budget=args.budget,
                   max_relative_error={name: float(np.max(value)) for name, value in errors.items()},
                   median_relative_error={name: float(np.median(value)) for name, value in errors.items()})
     args.output.with_suffix(".validation.json").write_text(json.dumps(report, indent=2))

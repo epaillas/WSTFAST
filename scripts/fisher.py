@@ -8,6 +8,7 @@ parameters are marginalised: cs2 and the noise amplitudes for the WST, cs2 for P
 shot noise V / N of matter is known; a free amplitude would be degenerate with A_s). Example:
 
     python scripts/fisher.py --q 0.8 --kmax 0.1 0.15 0.2
+    python scripts/fisher.py --vary omega_cdm logA n_s h omega_b --emulator outputs/emulators/wst_basis_taylor_superset_5p.h5
 """
 
 from __future__ import annotations
@@ -27,8 +28,7 @@ from wstfast.data import load_dataset, load_measurement
 from wstfast.inference import load_emulated_basis
 from wstfast.theory.perturbation import OneLoopMatter, log_interpolator
 
-COSMOLOGY = ("omega_cdm", "logA")
-STEPS = {"omega_cdm": 0.002, "logA": 0.01, "cs2": 0.5, "noise": 0.02}
+STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "omega_b": 0.0005, "cs2": 0.5, "noise": 0.02}
 
 
 def load_power(files, kmax, rebin):
@@ -54,8 +54,8 @@ class PowerModel:
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         self.loop = OneLoopMatter(k)
 
-    def __call__(self, omega_cdm, logA, cs2=0.0):
-        params = dict(QUIJOTE_COSMOLOGY, omega_cdm=omega_cdm, logA=logA)
+    def __call__(self, cs2=0.0, **cosmology):
+        params = dict(QUIJOTE_COSMOLOGY, **cosmology)
         cosmo = Cosmology(engine="class", m_ncdm=0.0, **params)
         pklin = cosmo.get_fourier().pk_interpolator(of="delta_m")(self.klin, z=self.z)
         pk = log_interpolator(self.klin, pklin)
@@ -91,10 +91,14 @@ def main():
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--kmax", type=float, nargs="+", default=[0.1, 0.15, 0.2])
     parser.add_argument("--rebin", type=int, default=2, help="P(k) bins of rebin x k_f")
+    parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY),
+                        help="cosmological parameters (must match the emulator's)")
     parser.add_argument("--fix-noise", action="store_true",
                         help="keep the WST noise amplitudes fixed (they fit to ~0 with the tree-level noise)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/fisher.json"))
     args = parser.parse_args()
+    cosmology = tuple(args.vary)
+    ncosmo = len(cosmology)
 
     first = sorted((args.data_dir / "real").glob("wst_r*.npz"))[0]
     config = load_measurement(first, q=args.q)["config"]
@@ -102,7 +106,7 @@ def main():
                                  if c.j % 2 == 0 and (c.j2 is None or c.j2 % 2 == 0)],
                   "WST half-octave": select_coefficients(config),
                   "WST half-octave, s21 >= 17.7": select_coefficients(config, s21_min_scale=17.6)}
-    fiducial = {name: QUIJOTE_COSMOLOGY[name] for name in COSMOLOGY}
+    fiducial = {name: QUIJOTE_COSMOLOGY[name] for name in cosmology}
 
     # Fix the realizations once: measurements may still be arriving while this runs.
     files = [str(path) for path in sorted((args.data_dir / "real").glob("wst_r*.npz"))]
@@ -111,9 +115,9 @@ def main():
         dataset = load_dataset(args.data_dir, "real", coefficients, q=args.q)
         rows = {path: i for i, path in enumerate(dataset.files)}
         dataset.vectors, dataset.files = dataset.vectors[[rows[path] for path in files]], files
-        basis, _ = load_emulated_basis(args.emulator, dataset, COSMOLOGY)
+        basis, _ = load_emulated_basis(args.emulator, dataset, cosmology)
         graph = build(WSTTheory(coefficients, config=dataset.config, basis=basis))
-        names = list(COSMOLOGY) + ["cs2"]
+        names = list(cosmology) + ["cs2"]  # cosmology first: marginalised_errors keeps the leading rows
         if not args.fix_noise:
             names += sorted({f"noise_j{c.j}_l{c.ell}" for c in coefficients if c.kind == "S21"})
         center = dict(fiducial, **{name: 0.0 for name in names[2:]})
@@ -122,31 +126,31 @@ def main():
     meta = datasets["WST dyadic"].metadata
     nreal = len(files)
 
-    results = dict(q=args.q, nrealizations=nreal, volume="1 (Gpc/h)^3", parameters=list(COSMOLOGY),
+    results = dict(q=args.q, nrealizations=nreal, volume="1 (Gpc/h)^3", parameters=list(cosmology),
                    fix_noise=args.fix_noise, cases={})
 
     def record(label, jacobian, vectors):
-        errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, len(COSMOLOGY))
+        errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, len(cosmology))
         correlation = covariance[0, 1] / np.sqrt(covariance[0, 0] * covariance[1, 1])
-        results["cases"][label] = dict(ndata=int(vectors.shape[1]), sigma=dict(zip(COSMOLOGY, errors.tolist())),
+        results["cases"][label] = dict(ndata=int(vectors.shape[1]), sigma=dict(zip(cosmology, errors.tolist())),
                                        correlation=float(correlation))
         print(f"{label:46s} n={vectors.shape[1]:3d}  " + "  ".join(
-            f"sigma({name})={value:.4g}" for name, value in zip(COSMOLOGY, errors)) + f"  r={correlation:+.2f}")
+            f"sigma({name})={value:.4g}" for name, value in zip(cosmology, errors)) + f"  r={correlation:+.2f}")
 
     for label, (jacobian, vectors) in wst.items():
         record(label, jacobian, vectors)
     for kmax in args.kmax:
         k, power = load_power(files, kmax, args.rebin)
         model = PowerModel(k, config.cellsize, meta["boxsize"] ** 3 / meta["nparticles"], meta["redshift"])
-        jac_p = derivatives(lambda p: model(**p), dict(fiducial, cs2=0.0), list(COSMOLOGY) + ["cs2"])
+        jac_p = derivatives(lambda p: model(**p), dict(fiducial, cs2=0.0), list(cosmology) + ["cs2"])
         record(f"P(k), kmax={kmax}", jac_p, power)
         for label, (jac_w, vectors) in wst.items():
             # Block-diagonal Jacobian: cosmology shared, nuisance parameters separate.
-            nw, npw = jac_w.shape[0] - 2, jac_p.shape[0] - 2
-            joint = np.zeros((2 + nw + npw, jac_w.shape[1] + jac_p.shape[1]))
-            joint[:2] = np.concatenate([jac_w[:2], jac_p[:2]], axis=1)
-            joint[2:2 + nw, :jac_w.shape[1]] = jac_w[2:]
-            joint[2 + nw:, jac_w.shape[1]:] = jac_p[2:]
+            nw, npw = jac_w.shape[0] - ncosmo, jac_p.shape[0] - ncosmo
+            joint = np.zeros((ncosmo + nw + npw, jac_w.shape[1] + jac_p.shape[1]))
+            joint[:ncosmo] = np.concatenate([jac_w[:ncosmo], jac_p[:ncosmo]], axis=1)
+            joint[ncosmo:ncosmo + nw, :jac_w.shape[1]] = jac_w[ncosmo:]
+            joint[ncosmo + nw:, jac_w.shape[1]:] = jac_p[ncosmo:]
             record(f"P(k), kmax={kmax} + {label}", joint, np.concatenate([vectors, power], axis=1))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
