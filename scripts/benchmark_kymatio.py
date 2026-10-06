@@ -6,8 +6,10 @@ In a configuration both codes support (dyadic scales, same l in both layers), th
     S1_kymatio(j, l) = N^3 K_l^q S1_ours(j, l),   S2_kymatio(j1, j2, l) = N^3 K_l^(2q) S2_ours(j1, j2, l),
 
 where N^3 converts kymatio's lattice sums to our means and K_l is the ratio of the per-l filter
-normalisations: kymatio uses N_l (2 pi)^(3/2) (with N_l from its solid_harmonic_3d), we use
-sqrt(4 pi / (2l + 1)), and both use a plain Gaussian for l = 0.
+normalisations: kymatio 0.3.0 uses N_l (2 pi)^(3/2) (with N_l from its solid_harmonic_3d), we use
+sqrt(4 pi / (2l + 1)), and both use a plain Gaussian for l = 0. The report does not rely on K_l:
+for each l, S1 ratios must be the same constant at every scale and S2 ratios its square, which
+holds for any per-l normalisation (other kymatio versions); K_l^q is printed for comparison.
 
     python scripts/benchmark_kymatio.py --realization 0 --nmesh 128
     python scripts/benchmark_kymatio.py --timing --repeats 3 --threads 8   # warm timings only
@@ -149,14 +151,29 @@ def main():
     s1_k, s2_k = run_kymatio(delta, config, args.q, args.device)
     print(f"kymatio:  {time.time() - start:.0f} s")
 
+    report_versions()
     ncells = args.nmesh**3
     kl = np.array([kymatio_normalisation(ell) for ell in range(config.L + 1)])
     for iq, q in enumerate(args.q):
-        r1 = s1_k[iq] / (ncells * kl**q * ours["S1"][iq]) - 1
-        r2 = s2_k[iq] / (ncells * kl ** (2 * q) * ours["S2"][iq]) - 1
-        print(f"q = {q}: max |S1 ratio - 1| = {np.nanmax(np.abs(r1)):.2e}, max |S2 ratio - 1| = {np.nanmax(np.abs(r2)):.2e}")
+        r1 = s1_k[iq] / (ncells * ours["S1"][iq])
+        r2 = s2_k[iq] / (ncells * ours["S2"][iq])
+        print(f"q = {q}")
+        print("   l   K_l^q expected   S1 ratio (median)   S1 spread   S2 ratio / S1 ratio^2 - 1 (max)")
         for ell in range(config.L + 1):
-            print(f"   l={ell}: S1 {np.abs(r1[:, ell]).max():.1e}  S2 {np.nanmax(np.abs(r2[..., ell])):.1e}")
+            # Normalisation-free test: S1 ratios must be the same for every j, and S2 ratios their square.
+            c1 = np.median(r1[:, ell])
+            spread = np.max(np.abs(r1[:, ell] / c1 - 1))
+            square = np.nanmax(np.abs(r2[..., ell] / c1**2 - 1))
+            print(f"   {ell}   {kl[ell]**q:14.6g}   {c1:17.6g}   {spread:9.1e}   {square:9.1e}")
+
+
+def report_versions():
+    import kymatio
+    import scipy
+    import torch
+
+    print(f"kymatio {kymatio.__version__}, scipy {scipy.__version__}, torch {torch.__version__}, numpy {np.__version__}")
+    print(f"scipy has native sph_harm: {'sph_harm' in dir(scipy.special) and not getattr(scipy.special.sph_harm, '__name__', '') == '<lambda>'}")
 
 
 if __name__ == "__main__":
