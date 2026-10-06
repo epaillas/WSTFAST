@@ -36,7 +36,8 @@ def parse_args():
     parser.add_argument("--s1-ells", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--s21-min-scale", type=float, default=12.5, help="smallest sigma_j1 [Mpc/h] for S2/S1")
     parser.add_argument("--s21-ells", type=int, nargs="+", default=[1, 2, 3, 4])
-    parser.add_argument("--s21-min-ratio", type=float, default=2.0, help="smallest sigma_j2 / sigma_j1 for S2/S1")
+    parser.add_argument("--s21-min-ratio", type=float, default=2.8,
+                        help="smallest sigma_j2 / sigma_j1 for S2/S1 (2.8 drops adjacent pairs)")
     parser.add_argument("--scale-stride", type=int, default=1,
                         help="keep scales j divisible by this (2 on the half-octave superset = the dyadic subset)")
     parser.add_argument("--covariance", choices=("auto", "sample", "diagonal"), default="auto")

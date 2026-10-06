@@ -94,10 +94,12 @@ class Coefficient:
 
 
 def select_coefficients(config: WSTConfig, s1_min_scale: float = 25.0, s1_ells=(0, 1, 2, 3, 4),
-                        s21_min_scale: float = 12.5, s21_ells=(1, 2, 3, 4), s21_min_ratio: float = 2.0):
+                        s21_min_scale: float = 12.5, s21_ells=(1, 2, 3, 4), s21_min_ratio: float = 2.8):
     """Coefficients inside the perturbative regime (scales in Mpc/h, see docs/wst_eft_feasibility.md).
 
-    ``s21_min_ratio`` is the smallest sigma_j2 / sigma_j1 kept in the second layer.
+    ``s21_min_ratio`` is the smallest sigma_j2 / sigma_j1 kept in the second layer. The default 2.8 drops
+    adjacent pairs (sigma_j2 = 2 sigma_j1), whose second-layer non-Gaussianity is not perturbative at
+    sigma_j1 ~ 12.5 Mpc/h: tree level overshoots the N-body value by ~2x.
     """
     out = [Coefficient("S1", ell, j) for ell in s1_ells if ell <= config.L for j in range(config.J + 1)
            if config.sigma(j) >= s1_min_scale - 1e-6]

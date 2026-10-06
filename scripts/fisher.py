@@ -91,6 +91,8 @@ def main():
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--kmax", type=float, nargs="+", default=[0.1, 0.15, 0.2])
     parser.add_argument("--rebin", type=int, default=2, help="P(k) bins of rebin x k_f")
+    parser.add_argument("--fix-noise", action="store_true",
+                        help="keep the WST noise amplitudes fixed (they fit to ~0 with the tree-level noise)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/fisher.json"))
     args = parser.parse_args()
 
@@ -98,7 +100,8 @@ def main():
     config = load_measurement(first, q=args.q)["config"]
     selections = {"WST dyadic": [c for c in select_coefficients(config)
                                  if c.j % 2 == 0 and (c.j2 is None or c.j2 % 2 == 0)],
-                  "WST half-octave": select_coefficients(config)}
+                  "WST half-octave": select_coefficients(config),
+                  "WST half-octave, s21 >= 17.7": select_coefficients(config, s21_min_scale=17.6)}
     fiducial = {name: QUIJOTE_COSMOLOGY[name] for name in COSMOLOGY}
 
     # Fix the realizations once: measurements may still be arriving while this runs.
@@ -110,21 +113,24 @@ def main():
         dataset.vectors, dataset.files = dataset.vectors[[rows[path] for path in files]], files
         basis, _ = load_emulated_basis(args.emulator, dataset, COSMOLOGY)
         graph = build(WSTTheory(coefficients, config=dataset.config, basis=basis))
-        names = list(COSMOLOGY) + ["cs2"] + sorted({f"noise_j{c.j}_l{c.ell}" for c in coefficients if c.kind == "S21"})
+        names = list(COSMOLOGY) + ["cs2"]
+        if not args.fix_noise:
+            names += sorted({f"noise_j{c.j}_l{c.ell}" for c in coefficients if c.kind == "S21"})
         center = dict(fiducial, **{name: 0.0 for name in names[2:]})
         datasets[label] = dataset
         wst[label] = (derivatives(lambda p: np.asarray(graph(p)), center, names), dataset.vectors)
     meta = datasets["WST dyadic"].metadata
     nreal = len(files)
 
-    results = dict(q=args.q, nrealizations=nreal, volume="1 (Gpc/h)^3", parameters=list(COSMOLOGY), cases={})
+    results = dict(q=args.q, nrealizations=nreal, volume="1 (Gpc/h)^3", parameters=list(COSMOLOGY),
+                   fix_noise=args.fix_noise, cases={})
 
     def record(label, jacobian, vectors):
         errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, len(COSMOLOGY))
         correlation = covariance[0, 1] / np.sqrt(covariance[0, 0] * covariance[1, 1])
         results["cases"][label] = dict(ndata=int(vectors.shape[1]), sigma=dict(zip(COSMOLOGY, errors.tolist())),
                                        correlation=float(correlation))
-        print(f"{label:34s} n={vectors.shape[1]:3d}  " + "  ".join(
+        print(f"{label:46s} n={vectors.shape[1]:3d}  " + "  ".join(
             f"sigma({name})={value:.4g}" for name, value in zip(COSMOLOGY, errors)) + f"  r={correlation:+.2f}")
 
     for label, (jacobian, vectors) in wst.items():

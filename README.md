@@ -81,8 +81,10 @@ parts:
     absorbs what is beyond tree level.
   - The second layer is taken to be Gaussian.
 
-Default scale cuts keep S1 at σ_j ≥ 25 Mpc/h and S2/S1 at σ_j1 ≥ 12.5 Mpc/h. That gives 22
-coefficients; set the cuts with `--s1-min-scale` and `--s21-min-scale`.
+Default scale cuts keep S1 at σ_j ≥ 25 Mpc/h and S2/S1 at σ_j1 ≥ 12.5 Mpc/h with σ_j2 / σ_j1 ≥ 2.8
+(adjacent pairs, whose second-layer non-Gaussianity is not perturbative, are left out). On the
+half-octave superset that gives 44 coefficients; set the cuts with `--s1-min-scale`, `--s21-min-scale`
+and `--s21-min-ratio`.
 
 The cosmology-dependent band integrals (`WSTBasis`) are what the emulator replaces. The nuisance
 parameters stay exact in `WSTTheory`, as in the DSC model.
