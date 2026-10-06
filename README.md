@@ -27,7 +27,7 @@ pip install -e . --no-deps
      - Every dyadic configuration with σ0 = 0.8 cells (including J = L = 4) is the subset of even j.
      - It is used to choose the configuration offline, by Fisher information and model validity.
    - Single configurations: `--J --L --L2 --min-dj --step --sigma0 --q`.
-   - Files go to `data/quijote/z0.5/<tag>/{real,rsd}/` (e.g. `J9_L6_L2-4_dj2_sigma0.8_step1.414_n256`). Existing files are skipped.
+   - Files go to `data/quijote/fiducial/z0.5/<tag>/{real,rsd}/` (e.g. `J9_L6_L2-4_dj2_sigma0.8_step1.414_n256`). Existing files are skipped.
    - `--backend torch` runs painting and the WST with torch, on a GPU when available (`--device`).
      It reproduces the numpy backend to about 1e-7 and caches the spherical harmonics once per run.
    - For the 1500 boxes of the DSC P(k) run (ids in `scripts/slurm/quijote_dsc_realizations.txt`), use

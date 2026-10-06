@@ -64,7 +64,7 @@ def parse_args():
                         help="torch runs painting and the WST on --device (e.g. a GPU)")
     parser.add_argument("--device", default="auto", help="torch device: auto, cpu or cuda")
     parser.add_argument("--snapshot-root", type=Path, default=SNAPSHOT_ROOT)
-    parser.add_argument("--output-dir", type=Path, default=Path("data/quijote/z0.5"))
+    parser.add_argument("--output-dir", type=Path, default=Path("data/quijote/fiducial/z0.5"))
     args = parser.parse_args()
     if args.superset:
         args.J, args.L, args.L2, args.min_dj, args.step = SUPERSET.J, SUPERSET.L, SUPERSET.L2, SUPERSET.min_dj, SUPERSET.step

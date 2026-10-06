@@ -29,7 +29,7 @@ from wstfast.inference import (build_likelihood, covariance_for, plot_fit, profi
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", type=Path, default=Path("data/quijote/z0.5/J4_L4_sigma0.8_n256"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/quijote/fiducial/z0.5/J4_L4_sigma0.8_n256"))
     parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")
     parser.add_argument("--q", type=float, default=None, help="WST exponent (default: the measurement's first q)")
     parser.add_argument("--s1-min-scale", type=float, default=25.0, help="smallest sigma_j [Mpc/h] for S1")
