@@ -59,6 +59,22 @@ def torch_device(name: str):
     return torch.device(name)
 
 
+def describe_devices(device, threads=None):
+    """Print where each code runs: kymatio on the torch device, wstmodel always on the CPU."""
+    import torch
+
+    import wstmodel.measure as measure
+
+    if device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        where = f"GPU {index} ({torch.cuda.get_device_name(index)})"
+    else:
+        where = f"CPU ({torch.get_num_threads()} torch threads)"
+    print(f"kymatio device: {where}; torch.cuda.is_available() = {torch.cuda.is_available()}, "
+          f"visible GPUs = {torch.cuda.device_count()}")
+    print(f"wstmodel device: CPU ({threads or measure.WORKERS} FFT workers)", flush=True)
+
+
 def run_kymatio(delta, config, qs, device="auto"):
     """kymatio coefficients reshaped to S1 (nq, J+1, L+1) and S2 (nq, J+1, J+1, L+1)."""
     _install_sph_harm_shim()
@@ -66,6 +82,7 @@ def run_kymatio(delta, config, qs, device="auto"):
     from kymatio.torch import HarmonicScattering3D
 
     device = torch_device(device)
+    describe_devices(device)
     scattering = HarmonicScattering3D(J=config.J, shape=delta.shape, L=config.L, sigma_0=config.sigma0,
                                       max_order=2, integral_powers=list(qs)).to(device)
     out = scattering(torch.from_numpy(delta.astype(np.float32)).to(device)).cpu().numpy()  # (paths, L+1, nq)
@@ -91,6 +108,7 @@ def timing(delta, config, qs, repeats: int, threads: int, device="auto"):
     torch.set_num_threads(threads)
     measure.WORKERS = threads
     device = torch_device(device)
+    describe_devices(device, threads)
     x = torch.from_numpy(delta.astype(np.float32)).to(device)
 
     def run_and_wait(engine):
