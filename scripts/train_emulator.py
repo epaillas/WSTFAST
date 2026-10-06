@@ -39,9 +39,9 @@ def basis_settings(data_dir: Path, space: str, q: float | None = None) -> dict:
                 shotnoise=meta["boxsize"] ** 3 / meta["nparticles"])
 
 
-def predict(basis, assembly, point):
-    """WST coefficients (nuisance parameters at zero) from an exact or emulated basis."""
-    build(basis)(point)
+def predict(graph, assembly, point):
+    """WST coefficients (nuisance parameters at zero) from a built exact or emulated basis."""
+    basis = graph(point)
     noise = np.zeros(len(assembly.noise_keys))
     return np.asarray(assembly(basis.s1_terms, basis.s21_terms, 0.0, noise))
 
@@ -80,13 +80,14 @@ def main():
     config = wstfast.WSTConfig(**settings["config"])
     selections = {"all": all_coefficients(config), "default": select_coefficients(config)}
     assemblies = {name: Assembly(config, coefficients) for name, coefficients in selections.items()}
-    emulated = emulator.to_calculator()
+    # Build each graph once: rebuilding recompiles the exact basis (minutes) at every point.
+    exact_graph, emulated_graph = build(basis), build(emulator.to_calculator())
     rng = np.random.default_rng(0)
     errors = {name: [] for name in selections}
     for _ in range(args.nvalidation):
         point = {name: float(rng.uniform(*bounds[name])) for name in args.vary}
         for name, assembly in assemblies.items():
-            exact, approx = predict(basis, assembly, point), predict(emulated, assembly, point)
+            exact, approx = predict(exact_graph, assembly, point), predict(emulated_graph, assembly, point)
             errors[name].append(np.max(np.abs(approx / exact - 1)))
     report = dict(npoints=args.nvalidation, order=args.order, accuracy=args.accuracy,
                   max_relative_error={name: float(np.max(value)) for name, value in errors.items()},

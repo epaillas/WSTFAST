@@ -52,7 +52,7 @@ def test_assembly_keeps_selection_order():
     basis = all_coefficients(config)
     n1 = sum(c.kind == "S1" for c in basis)
     s1_terms = np.tile(np.arange(1.0, n1 + 1.0)[:, None], (1, 6)) * np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    s21_terms = np.ones((len(basis) - n1, 2))
+    s21_terms = np.ones((len(basis) - n1, 3))
     out = np.asarray(assembly(s1_terms, s21_terms, 0.0, np.zeros(len(assembly.noise_keys))))
     s1_rows = {c: i for i, c in enumerate(c for c in basis if c.kind == "S1")}
     for value, c in zip(out, selected):
@@ -131,3 +131,19 @@ def test_tree_trispectrum_is_symmetric_and_f3_conserves_momentum():
     q1, q2 = jnp.asarray([[0.1, 0.02, 0.0]]), jnp.asarray([[-0.03, 0.08, 0.05]])
     small = [float(_f3(q1, q2, -q1 - q2 + jnp.asarray([[eps, 0.0, 0.0]]))[0]) for eps in (1e-3, 2e-3)]
     assert small[1] / small[0] == pytest.approx(4.0, rel=0.05)
+
+
+def test_leg_sampler_integrates_gaussian():
+    import jax.numpy as jnp
+
+    from wstfast.theory.modulus_noise import LegSampler
+
+    # Legs u1, u2, u1 + u2 - U, u1, u2: the integrand exp(-sum |leg|^2 / 2) = exp(-(v.M v - 2 b.v + U^2) / 2)
+    # per Cartesian component, with M = [[3, 1], [1, 3]] and b = (U, U) for the z component only.
+    sampler = LegSampler([[1, 0], [0, 1], [1, 1], [1, 0], [0, 1]], [0, 0, -1, 0, 0], 1.0, 2**14, 0)
+    unode = 0.7
+    value = sampler.integrate(lambda legs: jnp.exp(-0.5 * sum(jnp.sum(x**2, axis=-1) for x in legs)),
+                              np.array([unode]), 1.0)[0]
+    M, b = np.array([[3.0, 1.0], [1.0, 3.0]]), np.full(2, unode)
+    exact = np.exp(0.5 * (b @ np.linalg.solve(M, b) - unode**2)) / (np.linalg.det(M) ** 1.5 * (2 * np.pi) ** 3)
+    assert float(value) == pytest.approx(exact, rel=1e-3)

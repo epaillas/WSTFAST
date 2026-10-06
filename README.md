@@ -74,8 +74,11 @@ parts:
   - The first-layer modulus field is a biased tracer.
   - Its scale-dependent response is computed from the tree-level bispectrum, with no free
     parameter.
-  - Its noise is (1 + `noise_j{j1}_l{l}`) times the Gaussian-chaos value, one amplitude per
-    first-layer field.
+  - Its noise is the Gaussian-chaos value plus its tree-level non-Gaussian correction
+    (`wstfast/theory/modulus_noise.py`), checked against the exact tree level measured on
+    perturbation-theory fields (`scripts/feasibility/pt_modulus_noise.py`).
+  - A free amplitude `noise_j{j1}_l{l}` per first-layer field scales the Gaussian-chaos part and
+    absorbs what is beyond tree level.
   - The second layer is taken to be Gaussian.
 
 Default scale cuts keep S1 at σ_j ≥ 25 Mpc/h and S2/S1 at σ_j1 ≥ 12.5 Mpc/h. That gives 22
@@ -96,7 +99,7 @@ Not yet included:
   - `measure.py`: the WST estimator.
   - `quijote.py`: snapshot reading and CIC painting.
   - `data.py`: storage, data vectors and covariance.
-  - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and model assembly (JAX).
+  - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and noise, and model assembly (JAX).
   - `calculators.py`: desilike calculators and likelihood.
   - `inference.py`: profiling, MH sampling, summaries and plots.
 - `scripts/`: the three pipeline steps. `scripts/feasibility/` holds the diagnostics of the

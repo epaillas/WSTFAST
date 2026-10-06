@@ -16,11 +16,13 @@ uses the zero-lag tree trispectrum and squared tree bispectrum of the wavelet ve
 normalised by the linear variance.
 
 Reduced second order (Sec. 2.3 and 3.3), S21 = S2(j1, j2, l) / S1(j1, l) for 1 <= l <= L2:
-    S21 = [m_n (R + (1 + a_l) G) / n]^{q/2},  m_n = 2 [Gamma((n + 1) / 2) / Gamma(n / 2)]^2,
-    R = int_k w_{j2,l} r_{j1,l}(k)^2 P_L(k),  G = int_k w_{j2,l} g_{j1,l}(k),
-with the tree-level modulus response r and its Gaussian-chaos noise g (moduli.py), and a free
-noise amplitude a_{j1,l} per first-layer field U_{j1,l} (as each density-split quantile has its own
-stochastic amplitude). The second layer is taken Gaussian.
+    S21 = [m_n (R + (1 + a_l) G + N) / n]^{q/2},  m_n = 2 [Gamma((n + 1) / 2) / Gamma(n / 2)]^2,
+    R = int_k w_{j2,l} r_{j1,l}(k)^2 P_L(k),  G = int_k w_{j2,l} g_{j1,l}(k),  N = int_k w_{j2,l} dN_{j1,l}(k),
+with the tree-level modulus response r and its Gaussian-chaos noise g (moduli.py), the tree-level
+non-Gaussian and fourth-chaos correction dN to that noise (modulus_noise.py), and a free noise
+amplitude a_{j1,l} per first-layer field U_{j1,l} that absorbs what is beyond tree level. dN is
+computed for first-layer scales sigma_j1 >= ``noise_min_scale`` only (zero below, where the model is
+not used). The second layer is taken Gaussian.
 
 Not yet included: one-loop responses, redshift-space distortions.
 """
@@ -34,13 +36,14 @@ from scipy.special import gammaln
 from ..config import Coefficient, WSTConfig
 from .cumulants import ZeroLagCumulants
 from .moduli import ModulusClustering
+from .modulus_noise import ModulusNoise
 from .perturbation import OneLoopMatter, log_interpolator, log_weights
 
 #: Columns of the S1 basis: linear, one-loop, counterterm (k^2 P_L) and shot-noise variances (n s^2), and the
 #: Edgeworth numerators sum_ab kappa_aabb and 6 K33 s^6 + 9 K3v s^6 (cumulants.py).
 S1_TERMS = ("linear", "loop", "counterterm", "shotnoise", "trispectrum", "bispectrum")
-#: Columns of the S21 basis: response (R) and Gaussian-noise (G) band powers.
-S21_TERMS = ("response", "noise")
+#: Columns of the S21 basis: response (R), Gaussian-noise (G) and tree-level noise-correction (N) band powers.
+S21_TERMS = ("response", "noise", "noise_correction")
 
 
 def all_coefficients(config: WSTConfig) -> list[Coefficient]:
@@ -65,7 +68,8 @@ def band(values, k, sigma, ell, window2=1.0):
 class WSTMatterBasis:
     """Cosmology-dependent band integrals for every coefficient of a WST configuration."""
 
-    def __init__(self, config: WSTConfig, shotnoise: float = 0.0, window: str | None = "cic", nk=160, nk_moduli=64):
+    def __init__(self, config: WSTConfig, shotnoise: float = 0.0, window: str | None = "cic", nk=160, nk_moduli=64,
+                 noise_min_scale: float = 12.0):
         self.config = config
         self.coefficients = all_coefficients(config)
         self.s1 = [c for c in self.coefficients if c.kind == "S1"]
@@ -89,26 +93,37 @@ class WSTMatterBasis:
             if (c.j, c.ell) not in self.moduli:
                 kgrid = np.geomspace(1e-3, 6.0 / config.sigma(c.j + config.min_dj), nk_moduli)
                 self.moduli[c.j, c.ell] = ModulusClustering(kgrid, config.sigma(c.j), c.ell)
+        self.noise = {key: ModulusNoise(config.sigma(key[0]), key[1]) for key in self.moduli
+                      if config.sigma(key[0]) >= noise_min_scale - 1e-6}
 
     def terms(self, pklin):
-        """Return (s1_terms[n_s1, 6], s21_terms[n_s21, 2]) for the linear spectrum tabulated on ``klin``."""
+        """Return (s1_terms[n_s1, 6], s21_terms[n_s21, 3]) for the linear spectrum tabulated on ``klin``."""
         pk = log_interpolator(jnp.asarray(self.klin), pklin)
         k = self.kout
         plin = pk(jnp.asarray(k))
-        spectra = (plin, self.loop(pk), k**2 * plin, jnp.full_like(plin, self.shotnoise))
+        loop = self.loop(pk)
+        spectra = (plin, loop, k**2 * plin, jnp.full_like(plin, self.shotnoise))
         variances = jnp.stack([jnp.stack([band(p, k, self.config.sigma(c.j), c.ell, self.window2) for p in spectra])
                                for c in self.s1])
         cumulants = [cumulant(pk) for cumulant in self.cumulants]  # (2, J + 1) per l
         edgeworth = jnp.stack([cumulants[c.ell][:, c.j] for c in self.s1])
         s1_terms = jnp.concatenate([variances, edgeworth], axis=1)
         clustering = {key: modulus(pk) for key, modulus in self.moduli.items()}
+        dpk = lambda x: jnp.interp(jnp.log(x), jnp.log(jnp.asarray(k)), loop)  # noqa: E731  (one-loop correction)
+        corrections = {key: noise(pk, dpk) for key, noise in self.noise.items()}
         s21_terms = []
         for c in self.s21:
             modulus = self.moduli[c.j, c.ell]
-            response, noise = clustering[c.j, c.ell]
+            r_long, r_short, noise = clustering[c.j, c.ell]
+            response = r_long + r_short
             kgrid, sigma2 = modulus.kout, self.config.sigma(c.j2)
+            if (c.j, c.ell) in corrections:
+                correction = band(self.noise[c.j, c.ell].interpolate(corrections[c.j, c.ell], kgrid), kgrid, sigma2,
+                                  c.ell)
+            else:
+                correction = 0.0 * band(noise, kgrid, sigma2, c.ell)
             s21_terms.append(jnp.stack([band(response**2 * pk(jnp.asarray(kgrid)), kgrid, sigma2, c.ell),
-                                        band(noise, kgrid, sigma2, c.ell)]))
+                                        band(noise, kgrid, sigma2, c.ell), correction]))
         return s1_terms, jnp.stack(s21_terms)
 
 
@@ -155,5 +170,5 @@ class Assembly:
             s1 = s1 * (1 + self.s1_c4 * t1[:, 4] / linear**2 + self.s1_c6 * t1[:, 5] / linear**3)
         t21 = s21_terms[self.s21_rows]
         amplitude = 1.0 + jnp.asarray(noise_amplitudes)[self.s21_noise_index]
-        s21 = (self.s21_mean2 * (t21[:, 0] + amplitude * t21[:, 1]) / self.s21_n) ** (q / 2)
+        s21 = (self.s21_mean2 * (t21[:, 0] + amplitude * t21[:, 1] + t21[:, 2]) / self.s21_n) ** (q / 2)
         return jnp.concatenate([s1, s21])[self.order]

@@ -16,6 +16,8 @@ with the mass-assignment window W, so that n s^2 = int_k P(k) R(k)^2:
   scrambled-Sobol quasi-Monte Carlo with fixed points in u = sigma k, so it is a smooth, deterministic function
   of the linear spectrum (as the emulator needs).
 
+``tree_trispectrum`` is also used by modulus_noise.py for the noise of the first-layer moduli.
+
 Shot-noise contributions to the cumulants are neglected (Quijote has V / N = 7.5 (Mpc/h)^3).
 """
 
@@ -68,8 +70,12 @@ def _f3(q1, q2, q3):
     return total / 54.0
 
 
-def tree_trispectrum(k, pk):
-    """Tree-level matter trispectrum T(k1, k2, k3, k4) for wavevectors k[i] (i = 0..3, summing to zero)."""
+def tree_trispectrum(k, pk, skip_internal=()):
+    """Tree-level matter trispectrum T(k1, k2, k3, k4) for wavevectors k[i] (i = 0..3, summing to zero).
+
+    ``skip_internal`` lists leg pairs (i, j): the 2211 terms whose internal propagator is P(|k_i + k_j|) are left out.
+    """
+    skip = {frozenset(pair) for pair in skip_internal}
     norms = [jnp.sqrt(_dot(ki, ki)) for ki in k]
     power = [pk(x) for x in norms]
     total = 0.0
@@ -81,6 +87,8 @@ def tree_trispectrum(k, pk):
         for j in range(i + 1, 4):
             c, d = (x for x in legs if x not in (i, j))
             for c, d in ((c, d), (d, c)):
+                if frozenset((i, c)) in skip:
+                    continue
                 s = k[i] + k[c]
                 total = total + 4.0 * power[c] * power[d] * pk(jnp.sqrt(_dot(s, s))) \
                     * _f2(-k[c], s) * _f2(-k[d], -s)
@@ -161,3 +169,4 @@ class ZeroLagCumulants:
             return jnp.stack([self._trispectrum(pk, sigma), self._bispectrum(pk, sigma)])
 
         return jax.lax.map(one, jnp.asarray(self.sigmas)).T
+
