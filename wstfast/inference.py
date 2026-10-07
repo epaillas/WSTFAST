@@ -9,9 +9,10 @@ from pathlib import Path
 import numpy as np
 from desilike import build, get_params
 
-from .calculators import WSTBasis, WSTLikelihood, WSTTheory, build_cosmology
+from .calculators import PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory, build_cosmology
 from .config import WSTConfig
-from .data import WSTDataset
+from .data import PowerDataset, WSTDataset
+from .theory.power import LatticeBinning, default_knodes
 
 
 def covariance_for(dataset: WSTDataset, kind: str = "auto", of_mean: bool = False) -> tuple[np.ndarray, str]:
@@ -30,6 +31,8 @@ def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     from desilike.emulators import Emulator
 
     settings = json.loads(Path(path).with_suffix(".json").read_text())
+    if settings.get("stat", "wst") != "wst":
+        raise ValueError(f"emulator {path} is for {settings['stat']}, not the WST")
     # The basis does not depend on q, which only enters the exact assembly.
     trained = WSTConfig(**settings["config"]).with_q(dataset.config.q)
     if trained != dataset.config:
@@ -50,11 +53,54 @@ def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_c
                          shotnoise=dataset.shotnoise)
     else:
         basis, bounds = load_emulated_basis(emulator, dataset, vary)
-        # Keep the chains inside the emulated box.
-        params = get_params(basis)
-        for name, (low, high) in bounds.items():
-            params[name].update(prior=dict(limits=[low, high]))
+        _bound_to_emulator(basis, bounds)
     theory = WSTTheory(dataset.coefficients, config=dataset.config, basis=basis)
+    return WSTLikelihood(theory, dataset.mean, covariance)
+
+
+def _bound_to_emulator(basis, bounds):
+    """Keep the chains inside the emulated box."""
+    params = get_params(basis)
+    for name, (low, high) in bounds.items():
+        params[name].update(prior=dict(limits=[low, high]))
+
+
+def load_emulated_power_basis(path: Path, dataset: PowerDataset, vary, order: str, cutoff: float | None):
+    """Trained Taylor emulator of PowerBasis, checked against the data and model it will be used with.
+
+    Returns the emulated basis, its emulation bounds and the k nodes it was trained on.
+    """
+    from desilike.emulators import Emulator
+
+    settings = json.loads(Path(path).with_suffix(".json").read_text())
+    if settings.get("stat") != "pk":
+        raise ValueError(f"emulator {path} is not a P(k) emulator")
+    knodes = np.asarray(settings["knodes"])
+    checks = dict(order=(settings["order"] == order), cutoff=(settings["cutoff"] == cutoff),
+                  z=np.isclose(settings["z"], dataset.metadata["redshift"]), vary=sorted(settings["vary"]) == sorted(vary),
+                  kmax=knodes[-1] >= dataset.edges[-1])
+    for key, ok in checks.items():
+        if not ok:
+            raise ValueError(f"emulator {path} does not match the requested {key} "
+                             f"(trained: order={settings['order']}, cutoff={settings['cutoff']}, z={settings['z']}, "
+                             f"vary={settings['vary']}, kmax={knodes[-1]:.3f})")
+    return Emulator.read(str(path)).to_calculator(), settings["bounds"], knodes
+
+
+def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
+                           order: str = "one-loop", cutoff: float | None = 0.5, emulator: Path | None = None,
+                           counterterm: bool | None = None, window: str | None = "cic") -> WSTLikelihood:
+    """Real-space matter P(k) likelihood with an exact (CLASS + loop) or Taylor-emulated basis."""
+    if emulator is None:
+        knodes = default_knodes(dataset.edges[-1], boxsize=dataset.metadata["boxsize"])
+        basis = PowerBasis(cosmo=build_cosmology(vary), knodes=knodes, z=dataset.metadata["redshift"], order=order,
+                           cutoff=cutoff)
+    else:
+        basis, bounds, knodes = load_emulated_power_basis(emulator, dataset, vary, order, cutoff)
+        _bound_to_emulator(basis, bounds)
+    binning = LatticeBinning(dataset.edges, dataset.metadata["boxsize"], dataset.metadata["nmesh"], knodes,
+                             window=window)
+    theory = PowerTheory(binning, basis=basis, shotnoise=dataset.shotnoise, order=order, counterterm=counterterm)
     return WSTLikelihood(theory, dataset.mean, covariance)
 
 
@@ -97,7 +143,7 @@ def sample_mh(posterior, profiles, output_dir: Path, chains: int = 4, seed: int 
                        max_steps=max_steps)
 
 
-def summarize(likelihood, profiles, samples, dataset: WSTDataset, covariance_kind: str) -> dict:
+def summarize(likelihood, profiles, samples, dataset: WSTDataset | PowerDataset, covariance_kind: str) -> dict:
     best = bestfit_values(profiles)
     build(likelihood)({name: value for name, value in best.items()
                        if name in get_params(likelihood).select(varied=True, derived=False).names()})
@@ -105,8 +151,11 @@ def summarize(likelihood, profiles, samples, dataset: WSTDataset, covariance_kin
     chi2 = float(residual @ np.asarray(likelihood.precision) @ residual)
     nvaried = len(get_params(likelihood).select(varied=True, derived=False))
     summary = dict(bestfit=best, chi2=chi2, ndata=int(residual.size), nvaried=nvaried,
-                   nrealizations=int(dataset.vectors.shape[0]), covariance=covariance_kind,
-                   coefficients=[c.label for c in dataset.coefficients])
+                   nrealizations=int(dataset.vectors.shape[0]), covariance=covariance_kind)
+    if isinstance(dataset, PowerDataset):
+        summary["k"] = dataset.k.tolist()
+    else:
+        summary["coefficients"] = [c.label for c in dataset.coefficients]
     if samples is not None:
         names = [name for name in best if name in samples]
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
@@ -137,6 +186,30 @@ def plot_fit(path: Path, likelihood, dataset: WSTDataset, covariance: np.ndarray
     axes[1].set_ylabel(r"$\Delta / \sigma$")
     axes[1].set_xticks(x, labels, rotation=90, fontsize=7)
     fig.suptitle(f"WST fit (q = {config.q}, cells {config.cellsize:.2f} Mpc/h)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def plot_power_fit(path: Path, likelihood, dataset: PowerDataset, covariance: np.ndarray, title: str = ""):
+    """k P(k) of the data versus the best-fit theory, and residuals in units of the error."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data, theory = np.asarray(likelihood.flatdata), np.asarray(likelihood.flattheory)
+    error, k = np.sqrt(np.diag(covariance)), dataset.k
+    fig, axes = plt.subplots(2, 1, figsize=(6, 6), sharex=True, gridspec_kw=dict(height_ratios=(2, 1)))
+    axes[0].errorbar(k, k * data, k * error, fmt="o", ms=3, label="data")
+    axes[0].plot(k, k * theory, "-", label="best fit")
+    axes[0].set_ylabel(r"$k P(k)$ [$(\mathrm{Mpc}/h)^2$]")
+    axes[0].legend()
+    axes[1].axhspan(-1, 1, color="0.9")
+    axes[1].plot(k, (data - theory) / error, "o", ms=3)
+    axes[1].set_ylabel(r"$\Delta / \sigma$")
+    axes[1].set_xlabel(r"$k$ [$h/\mathrm{Mpc}$]")
+    fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)

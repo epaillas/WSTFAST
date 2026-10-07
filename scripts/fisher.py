@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """Fisher information of WST coefficients versus the matter power spectrum, on one Quijote box.
 
-Derivatives come from the theory models (the emulated WST basis, and linear + one-loop SPT with a
-counterterm for P(k)); the covariance is the joint sample covariance of the measured data vectors,
+Derivatives come from the theory models (the emulated WST basis, and dsc-model's one-loop EFT with a
+counterterm for P(k), as fitted by fit_power.py); the covariance is the joint sample covariance of the measured data vectors,
 which are stored in the same files, so P(k) + WST includes their cross-covariance. Nuisance
 parameters are marginalised: cs2 and the noise amplitudes for the WST, cs2 for P(k) (the particle
 shot noise V / N of matter is known; a free amplitude would be degenerate with A_s). Example:
 
     python scripts/fisher.py --q 0.8 --kmax 0.1 0.15 0.2
-    python scripts/fisher.py --vary omega_cdm logA n_s h omega_b --emulator outputs/emulators/wst_basis_taylor_superset_5p.h5
+    python scripts/fisher.py --vary omega_cdm logA n_s h omega_b --emulator outputs/emulators/wst_basis_taylor_superset_5p.h5 \
+        --prior omega_b=0.00055 n_s=0.042
 """
 
 from __future__ import annotations
@@ -20,48 +21,36 @@ from pathlib import Path
 import numpy as np
 
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
-from cosmoprimo import Cosmology
 from desilike import build
-from wstfast.calculators import WSTTheory
+from wstfast.calculators import PowerBasis, WSTTheory, build_cosmology, power_rows
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
-from wstfast.data import load_dataset, load_measurement
+from wstfast.data import load_dataset, load_measurement, load_power_dataset
 from wstfast.inference import load_emulated_basis
-from wstfast.theory.perturbation import OneLoopMatter, log_interpolator
+from wstfast.theory.power import ORDERS, LatticeBinning, default_knodes
 
 STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "omega_b": 0.0005, "cs2": 0.5, "noise": 0.02}
 
 
-def load_power(files, kmax, rebin):
-    """Monopole of delta (shot noise included, no window deconvolution) for k <= kmax, rebinned by modes."""
-    with np.load(files[0]) as data:
-        k, nmodes = data["k"], data["nmodes"]
-    nk = (np.searchsorted(k, kmax, side="right") // rebin) * rebin
-    weights = nmodes[:nk].reshape(-1, rebin)
-    kbin = (k[:nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
-    power = []
-    for path in files:
-        with np.load(path) as data:
-            power.append((data["Pdd"][0, :nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1))
-    return kbin, np.array(power)
+class PowerJacobian:
+    """Derivatives of the P(k) of fit_power.py (PowerBasis + PowerTheory, cs2_pk = 0) for any binning.
 
+    The binned model is linear in the basis rows, binning.matrix @ (P_L + L - 2 cs2_pk k^2 P_L) + noise,
+    so the cosmology derivatives are taken once on the k nodes (exact CLASS + loop) and binned per kmax.
+    """
 
-class PowerModel:
-    """W^2(k) [P_L + P_1loop - 2 cs2 k^2 P_L] + V / N at the measured bin centres."""
+    def __init__(self, cosmology, kmax, z, order, cutoff):
+        self.knodes = default_knodes(kmax)
+        basis = build(PowerBasis(cosmo=build_cosmology(cosmology), knodes=self.knodes, z=z, order=order, cutoff=cutoff))
+        center = {name: QUIJOTE_COSMOLOGY[name] for name in cosmology}
+        self.order = order
+        terms = lambda p: np.array(power_rows(basis(p)))
+        self.d_cosmology = derivatives(lambda p: terms(p).sum(axis=0) if order == "one-loop" else terms(p)[0],
+                                       center, list(cosmology))
+        self.d_cs2 = -2 * self.knodes**2 * terms(center)[0]
 
-    def __init__(self, k, cellsize, shotnoise, z):
-        self.k, self.shotnoise, self.z = k, shotnoise, z
-        self.window2 = np.exp(-(k * cellsize) ** 2 / 6.0)
-        self.klin = np.geomspace(1e-4, 10.0, 1024)
-        self.loop = OneLoopMatter(k)
-
-    def __call__(self, cs2=0.0, **cosmology):
-        params = dict(QUIJOTE_COSMOLOGY, **cosmology)
-        cosmo = Cosmology(engine="class", m_ncdm=0.0, **params)
-        pklin = cosmo.get_fourier().pk_interpolator(of="delta_m")(self.klin, z=self.z)
-        pk = log_interpolator(self.klin, pklin)
-        plin = np.asarray(pk(self.k))
-        return self.window2 * (plin + np.asarray(self.loop(pk)) - 2 * cs2 * self.k**2 * plin) \
-            + self.shotnoise
+    def __call__(self, binning):
+        rows = list(self.d_cosmology) + ([self.d_cs2] if self.order == "one-loop" else [])
+        return np.array([binning.matrix @ row for row in rows])
 
 
 def derivatives(model, center, names):
@@ -74,11 +63,16 @@ def derivatives(model, center, names):
     return np.array(out)
 
 
-def marginalised_errors(jacobian, covariance, nreal, keep):
-    """1-sigma errors on the first ``keep`` parameters, with the Hartlap-corrected precision."""
+def marginalised_errors(jacobian, covariance, nreal, keep, prior=None):
+    """1-sigma errors on the first ``keep`` parameters, with the Hartlap-corrected precision.
+
+    ``prior`` holds the inverse variances of independent Gaussian priors on those parameters (0 for none).
+    """
     ndata = covariance.shape[0]
     precision = np.linalg.inv(covariance) * (nreal - ndata - 2.0) / (nreal - 1.0)
     fisher = jacobian @ precision @ jacobian.T
+    if prior is not None:
+        fisher[:keep, :keep] += np.diag(prior)
     inverse = np.linalg.inv(fisher)
     return np.sqrt(np.diag(inverse)[:keep]), inverse[:keep, :keep]
 
@@ -91,14 +85,25 @@ def main():
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--kmax", type=float, nargs="+", default=[0.1, 0.15, 0.2])
     parser.add_argument("--rebin", type=int, default=2, help="P(k) bins of rebin x k_f")
+    parser.add_argument("--pk-order", choices=ORDERS, default="one-loop",
+                        help="P(k) model; at tree level no counterterm is marginalised")
+    parser.add_argument("--pk-cutoff", type=lambda v: None if v.lower() == "none" else float(v), default=0.5,
+                        help="P(k) loop regulator in h/Mpc (dsc-model: 0.5), or 'none' for unregulated SPT")
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY),
                         help="cosmological parameters (must match the emulator's)")
+    parser.add_argument("--prior", nargs="+", default=[], metavar="NAME=SIGMA",
+                        help="Gaussian priors on cosmological parameters, e.g. omega_b=0.00055 n_s=0.042")
     parser.add_argument("--fix-noise", action="store_true",
                         help="keep the WST noise amplitudes fixed (they fit to ~0 with the tree-level noise)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/fisher.json"))
     args = parser.parse_args()
     cosmology = tuple(args.vary)
     ncosmo = len(cosmology)
+    priors = {name: float(sigma) for name, sigma in (item.split("=") for item in args.prior)}
+    unknown = set(priors) - set(cosmology)
+    if unknown:
+        raise ValueError(f"priors on {sorted(unknown)}, which are not varied")
+    prior = np.array([priors[name] ** -2 if name in priors else 0.0 for name in cosmology])
 
     first = sorted((args.data_dir / "real").glob("wst_r*.npz"))[0]
     config = load_measurement(first, q=args.q)["config"]
@@ -127,10 +132,10 @@ def main():
     nreal = len(files)
 
     results = dict(q=args.q, nrealizations=nreal, volume="1 (Gpc/h)^3", parameters=list(cosmology),
-                   fix_noise=args.fix_noise, cases={})
+                   fix_noise=args.fix_noise, priors=priors, cases={})
 
     def record(label, jacobian, vectors):
-        errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, len(cosmology))
+        errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, ncosmo, prior)
         correlation = covariance[0, 1] / np.sqrt(covariance[0, 0] * covariance[1, 1])
         results["cases"][label] = dict(ndata=int(vectors.shape[1]), sigma=dict(zip(cosmology, errors.tolist())),
                                        correlation=float(correlation))
@@ -139,10 +144,12 @@ def main():
 
     for label, (jacobian, vectors) in wst.items():
         record(label, jacobian, vectors)
+    pk_jacobian = PowerJacobian(cosmology, max(args.kmax) + 0.02, meta["redshift"], args.pk_order, args.pk_cutoff)
+    results.update(pk_order=args.pk_order, pk_cutoff=args.pk_cutoff)
     for kmax in args.kmax:
-        k, power = load_power(files, kmax, args.rebin)
-        model = PowerModel(k, config.cellsize, meta["boxsize"] ** 3 / meta["nparticles"], meta["redshift"])
-        jac_p = derivatives(lambda p: model(**p), dict(fiducial, cs2=0.0), list(cosmology) + ["cs2"])
+        pk = load_power_dataset(args.data_dir, "real", kmax=kmax, rebin=args.rebin, files=files)
+        binning = LatticeBinning(pk.edges, meta["boxsize"], meta["nmesh"], pk_jacobian.knodes)
+        jac_p, power = pk_jacobian(binning), pk.vectors
         record(f"P(k), kmax={kmax}", jac_p, power)
         for label, (jac_w, vectors) in wst.items():
             # Block-diagonal Jacobian: cosmology shared, nuisance parameters separate.

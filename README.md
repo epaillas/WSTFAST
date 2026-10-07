@@ -60,6 +60,35 @@ pip install -e . --no-deps
      a diagonal covariance and warns. A usable full covariance needs the WST of many more Quijote
      boxes, measured on a cluster.
 
+## Matter power spectrum fits
+
+The real-space matter P(k) of the same boxes (`Pdd`, stored in the WST files) can be fitted with
+the same machinery, so P(k) and WST posteriors can be compared on equal footing. The model is the
+one of `dsc-model`.
+
+```bash
+python scripts/train_emulator.py --stat pk --data-dir data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256 \
+    --vary omega_cdm logA --output outputs/emulators/pk_taylor.h5
+python scripts/fit_power.py --kmax 0.15 --output-dir outputs/inference/pk/kmax0.15
+python scripts/fit_power.py --kmax 0.15 --emulator none --method profile   # exact model
+```
+
+- **Model**: P = P_L + L_Λ − 2 `cs2_pk` k² P_L.
+  - The one-loop L_Λ uses dsc-model's code, vendored in `wstfast/theory/eft_loop.py`: EdS kernels
+    with the exp4 loop regulator at Λ = 0.5 h/Mpc.
+  - `--cutoff none` gives unregulated SPT, the loop of the WST model. The two differ mainly by a
+    shift of `cs2_pk` (≈ 0.5 (Mpc/h)²).
+  - `--order tree` is linear theory, with no free parameter by default (`--counterterm` adds one).
+  - Train a separate emulator with matching `--pk-order` / `--cutoff` for those variants.
+- **Binning** (`wstfast/theory/power.py`): the prediction is averaged over the lattice modes of each
+  bin. It includes the CIC window, which is not deconvolved in the data, and the known aliased particle
+  shot noise. This replaces dsc-model's window matrix.
+- **Emulator**: the basis is normalised to the fiducial A_s (P_L ∝ A_s, L ∝ A_s²), so the Taylor
+  emulator is exact in logA. It is trained on k nodes up to `--kmax` (0.3 by default) and serves any
+  fit with a smaller kmax.
+- `scripts/fisher.py` uses the same P(k) model (`--pk-order`, `--pk-cutoff`). Its P(k) errors agree
+  with the MH posteriors to a few per cent for kmax ≥ 0.15.
+
 ## Model
 
 The model is in `wstfast/theory/model.py`, for real-space matter only. Its data vector has two
@@ -101,9 +130,10 @@ Not yet included:
   - `measure.py`: the WST estimator.
   - `quijote.py`: snapshot reading and CIC painting.
   - `data.py`: storage, data vectors and covariance.
-  - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and noise, and model assembly (JAX).
+  - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and noise, and model assembly (JAX);
+    `eft_loop.py` (vendored from dsc-model) and `power.py` for the matter P(k).
   - `calculators.py`: desilike calculators and likelihood.
   - `inference.py`: profiling, MH sampling, summaries and plots.
-- `scripts/`: the three pipeline steps. `scripts/feasibility/` holds the diagnostics of the
+- `scripts/`: the three pipeline steps, `fit_power.py` for P(k) fits and `fisher.py`. `scripts/feasibility/` holds the diagnostics of the
   feasibility study.
 - `tests/`: run with `python -m pytest`.
