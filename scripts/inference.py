@@ -49,6 +49,8 @@ def parse_args():
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=50000)
+    parser.add_argument("--proposal-from", type=Path, default=None,
+                        help="samples.h5 of an earlier run: use its chain covariance as the MH proposal")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/inference/fiducial"))
     return parser.parse_args()
@@ -78,7 +80,12 @@ def main():
     print(profiles.to_stats(tablefmt="pretty"))
     samples = None
     if args.method == "sample":
-        samples = sample_mh(posterior, profiles, args.output_dir / "chains", chains=args.chains,
+        proposal = None
+        if args.proposal_from is not None:
+            from desilike.samples import Samples
+
+            proposal = Samples.read(str(args.proposal_from))
+        samples = sample_mh(posterior, profiles, args.output_dir / "chains", chains=args.chains, proposal=proposal,
                             seed=args.seed, max_steps=args.max_steps)
         samples.write(str(args.output_dir / "samples.h5"))
         print(samples.to_stats(tablefmt="pretty"))

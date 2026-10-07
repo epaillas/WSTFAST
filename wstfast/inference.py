@@ -124,15 +124,23 @@ def bestfit_values(profiles) -> dict[str, float]:
 
 
 def sample_mh(posterior, profiles, output_dir: Path, chains: int = 4, seed: int = 42, max_steps: int = 50000,
-              gelman_rubin: float = 1.03, ess: float = 300.0, check_every: int = 500):
-    """Metropolis-Hastings chains started at the best fit, with the profile covariance as proposal."""
+              gelman_rubin: float = 1.03, ess: float = 300.0, check_every: int = 500, proposal=None):
+    """Metropolis-Hastings chains started at the best fit, with the profile covariance as proposal.
+
+    ``proposal`` (samples of an earlier run of the same posterior) replaces the profile covariance by the
+    covariance of those chains (first 30% dropped as burn-in), for posteriors where Minuit's Hessian is a poor
+    proposal.
+    """
     from desilike.conditioning import AffineConditioner
     from desilike.samplers import MH, Sampler
     from desilike.samplers.proposals import GaussianProposal
 
     graph = build(posterior)
     varied = graph.params.select(varied=True, derived=False)
-    covariance = profiles.covariance.select(varied)
+    if proposal is None:
+        covariance = profiles.covariance.select(varied)
+    else:
+        covariance = proposal.remove_burnin(0.3).covariance().select(varied)
     center = {name: value for name, value in bestfit_values(profiles).items() if name in varied.names()}
     ndim = len(varied)
     # desilike's MH multiplies the proposal by 2.38^2 / sqrt(ndim); this gives 2.38^2 / ndim in whitened units.
