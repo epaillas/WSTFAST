@@ -120,7 +120,7 @@ def main():
         names = list(cosmology) + ["cs2"]  # cosmology first: marginalised_errors keeps the leading rows
         if not args.fix_noise:
             names += sorted({f"noise_j{c.j}_l{c.ell}" for c in coefficients if c.kind == "S21"})
-        center = dict(fiducial, **{name: 0.0 for name in names[2:]})
+        center = dict(fiducial, **{name: 0.0 for name in names[ncosmo:]})
         datasets[label] = dataset
         wst[label] = (derivatives(lambda p: np.asarray(graph(p)), center, names), dataset.vectors)
     meta = datasets["WST dyadic"].metadata
