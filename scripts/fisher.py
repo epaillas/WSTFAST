@@ -138,7 +138,7 @@ def main():
         errors, covariance = marginalised_errors(jacobian, np.cov(vectors, rowvar=False), nreal, ncosmo, prior)
         correlation = covariance[0, 1] / np.sqrt(covariance[0, 0] * covariance[1, 1])
         results["cases"][label] = dict(ndata=int(vectors.shape[1]), sigma=dict(zip(cosmology, errors.tolist())),
-                                       correlation=float(correlation))
+                                       correlation=float(correlation), covariance=covariance.tolist())
         print(f"{label:46s} n={vectors.shape[1]:3d}  " + "  ".join(
             f"sigma({name})={value:.4g}" for name, value in zip(cosmology, errors)) + f"  r={correlation:+.2f}")
 

@@ -10,7 +10,7 @@ import numpy as np
 from desilike import build, get_params
 
 from .calculators import PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory, build_cosmology
-from .config import WSTConfig
+from .config import QUIJOTE_COSMOLOGY, WSTConfig
 from .data import PowerDataset, WSTDataset
 from .theory.power import LatticeBinning, default_knodes
 
@@ -27,7 +27,10 @@ def covariance_for(dataset: WSTDataset, kind: str = "auto", of_mean: bool = Fals
 
 
 def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
-    """Trained Taylor emulator of WSTBasis, checked against the data it will be compared with."""
+    """Trained Taylor emulator of WSTBasis, checked against the data it will be compared with.
+
+    ``vary`` may be a subset of the emulated parameters: the others are fixed at the Quijote fiducial.
+    """
     from desilike.emulators import Emulator
 
     settings = json.loads(Path(path).with_suffix(".json").read_text())
@@ -40,9 +43,14 @@ def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     for key, value in dict(z=dataset.metadata["redshift"], shotnoise=dataset.shotnoise).items():
         if not np.isclose(settings[key], value):
             raise ValueError(f"emulator {path} was trained with {key}={settings[key]}, the data have {value}")
-    if sorted(settings["vary"]) != sorted(vary):
-        raise ValueError(f"emulator {path} varies {settings['vary']}, requested {list(vary)}")
-    return Emulator.read(str(path)).to_calculator(), settings["bounds"]
+    unknown = set(vary) - set(settings["vary"])
+    if unknown:
+        raise ValueError(f"emulator {path} varies {settings['vary']}, not {sorted(unknown)}")
+    basis = Emulator.read(str(path)).to_calculator()
+    params = get_params(basis)
+    for name in set(settings["vary"]) - set(vary):
+        params[name].update(value=QUIJOTE_COSMOLOGY[name], fixed=True)
+    return basis, {name: bounds for name, bounds in settings["bounds"].items() if name in vary}
 
 
 def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
