@@ -26,6 +26,17 @@ def covariance_for(dataset: WSTDataset, kind: str = "auto", of_mean: bool = Fals
     return dataset.covariance(kind=kind, of_mean=of_mean), kind
 
 
+def _fix_unvaried(basis, settings: dict, vary, path) -> dict:
+    """Fix the emulated parameters not in ``vary`` at the Quijote fiducial; return the bounds of the others."""
+    unknown = set(vary) - set(settings["vary"])
+    if unknown:
+        raise ValueError(f"emulator {path} varies {settings['vary']}, not {sorted(unknown)}")
+    params = get_params(basis)
+    for name in set(settings["vary"]) - set(vary):
+        params[name].update(value=QUIJOTE_COSMOLOGY[name], fixed=True)
+    return {name: bounds for name, bounds in settings["bounds"].items() if name in vary}
+
+
 def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     """Trained Taylor emulator of WSTBasis, checked against the data it will be compared with.
 
@@ -43,14 +54,8 @@ def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     for key, value in dict(z=dataset.metadata["redshift"], shotnoise=dataset.shotnoise).items():
         if not np.isclose(settings[key], value):
             raise ValueError(f"emulator {path} was trained with {key}={settings[key]}, the data have {value}")
-    unknown = set(vary) - set(settings["vary"])
-    if unknown:
-        raise ValueError(f"emulator {path} varies {settings['vary']}, not {sorted(unknown)}")
     basis = Emulator.read(str(path)).to_calculator()
-    params = get_params(basis)
-    for name in set(settings["vary"]) - set(vary):
-        params[name].update(value=QUIJOTE_COSMOLOGY[name], fixed=True)
-    return basis, {name: bounds for name, bounds in settings["bounds"].items() if name in vary}
+    return basis, _fix_unvaried(basis, settings, vary, path)
 
 
 def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
@@ -76,7 +81,8 @@ def _bound_to_emulator(basis, bounds):
 def load_emulated_power_basis(path: Path, dataset: PowerDataset, vary, order: str, cutoff: float | None):
     """Trained Taylor emulator of PowerBasis, checked against the data and model it will be used with.
 
-    Returns the emulated basis, its emulation bounds and the k nodes it was trained on.
+    Returns the emulated basis, its emulation bounds and the k nodes it was trained on. ``vary`` may be a
+    subset of the emulated parameters: the others are fixed at the Quijote fiducial.
     """
     from desilike.emulators import Emulator
 
@@ -85,14 +91,14 @@ def load_emulated_power_basis(path: Path, dataset: PowerDataset, vary, order: st
         raise ValueError(f"emulator {path} is not a P(k) emulator")
     knodes = np.asarray(settings["knodes"])
     checks = dict(order=(settings["order"] == order), cutoff=(settings["cutoff"] == cutoff),
-                  z=np.isclose(settings["z"], dataset.metadata["redshift"]), vary=sorted(settings["vary"]) == sorted(vary),
-                  kmax=knodes[-1] >= dataset.edges[-1])
+                  z=np.isclose(settings["z"], dataset.metadata["redshift"]), kmax=knodes[-1] >= dataset.edges[-1])
     for key, ok in checks.items():
         if not ok:
             raise ValueError(f"emulator {path} does not match the requested {key} "
                              f"(trained: order={settings['order']}, cutoff={settings['cutoff']}, z={settings['z']}, "
                              f"vary={settings['vary']}, kmax={knodes[-1]:.3f})")
-    return Emulator.read(str(path)).to_calculator(), settings["bounds"], knodes
+    basis = Emulator.read(str(path)).to_calculator()
+    return basis, _fix_unvaried(basis, settings, vary, path), knodes
 
 
 def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
