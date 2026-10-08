@@ -41,6 +41,8 @@ def parse_args():
     parser.add_argument("--scale-stride", type=int, default=1,
                         help="keep scales j divisible by this (2 on the half-octave superset = the dyadic subset)")
     parser.add_argument("--covariance", choices=("auto", "sample", "diagonal"), default="auto")
+    parser.add_argument("--volume", type=float, default=None,
+                        help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true",
                         help="errors of the realization mean (default: one 1 (Gpc/h)^3 box)")
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY))
@@ -70,6 +72,11 @@ def main():
                     if c.j % args.scale_stride == 0 and (c.j2 is None or c.j2 % args.scale_stride == 0)]
     dataset = load_dataset(args.data_dir, args.space, coefficients, q=config.q)
     covariance, kind = covariance_for(dataset, args.covariance, of_mean=args.covariance_of_mean)
+    if args.volume is not None:
+        if args.covariance_of_mean:
+            raise SystemExit("--volume and --covariance-of-mean are exclusive")
+        box_volume = (dataset.metadata["boxsize"] / 1000.0) ** 3  # (Gpc/h)^3
+        covariance = covariance * box_volume / args.volume
     print(f"{len(coefficients)} coefficients, {dataset.vectors.shape[0]} realizations, {kind} covariance")
 
     emulator = None if args.emulator == "none" else Path(args.emulator)
@@ -91,7 +98,7 @@ def main():
         print(samples.to_stats(tablefmt="pretty"))
 
     summary = summarize(likelihood, profiles, samples, dataset, kind)
-    summary.update(vary=args.vary, emulator=str(emulator), covariance_of_mean=args.covariance_of_mean,
+    summary.update(vary=args.vary, emulator=str(emulator), covariance_of_mean=args.covariance_of_mean, volume=args.volume,
                    data_dir=str(args.data_dir), space=args.space)
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     plot_fit(args.output_dir / "bestfit.png", likelihood, dataset, covariance, config)
