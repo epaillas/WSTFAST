@@ -101,7 +101,12 @@ def main():
     summary.update(vary=args.vary, emulator=str(emulator), covariance_of_mean=args.covariance_of_mean, volume=args.volume,
                    data_dir=str(args.data_dir), space=args.space)
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    plot_fit(args.output_dir / "bestfit.png", likelihood, dataset, covariance, config)
+    volume = (f"errors for V = {args.volume:g} (Gpc/h)$^3$" if args.volume else
+              "errors of the mean" if args.covariance_of_mean else "errors of one box")
+    plot_fit(args.output_dir / "bestfit.png", likelihood, dataset, covariance, config, bestfit=summary["bestfit"],
+             nvaried=summary["nvaried"],
+             title=f"WST best fit ({', '.join(args.vary)} varied), mean of {dataset.vectors.shape[0]} boxes, "
+                   f"{volume}, q = {config.q}")
     print(f"chi2 = {summary['chi2']:.1f} for {summary['ndata']} data points and {summary['nvaried']} parameters")
     print(f"wrote {args.output_dir}")
 

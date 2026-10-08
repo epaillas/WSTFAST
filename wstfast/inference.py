@@ -185,29 +185,64 @@ def summarize(likelihood, profiles, samples, dataset: WSTDataset | PowerDataset,
     return summary
 
 
-def plot_fit(path: Path, likelihood, dataset: WSTDataset, covariance: np.ndarray, config: WSTConfig):
-    """Data versus best-fit theory, as residuals in units of the error."""
+def plot_fit(path: Path, likelihood, dataset: WSTDataset, covariance: np.ndarray, config: WSTConfig,
+             bestfit: dict | None = None, nvaried: int | None = None, title: str = ""):
+    """Data versus the best-fit model, S1 and S2/S1 side by side, grouped by l, with (data - model) / sigma below.
+
+    ``likelihood`` must have been evaluated at the best fit; sigma is the square root of the diagonal of
+    ``covariance`` (the errors of the fitted volume). The chi^2 uses the full covariance.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    data, theory = np.asarray(likelihood.flatdata), np.asarray(likelihood.flattheory)
+    data, model = np.asarray(likelihood.flatdata), np.asarray(likelihood.flattheory)
     error = np.sqrt(np.diag(covariance))
-    labels = [c.label for c in dataset.coefficients]
-    fig, axes = plt.subplots(2, 1, figsize=(max(6, 0.35 * len(labels)), 6), sharex=True,
-                             gridspec_kw=dict(height_ratios=(2, 1)))
-    x = np.arange(len(labels))
-    axes[0].errorbar(x, data, error, fmt="o", ms=3, label="data")
-    axes[0].plot(x, theory, "x", label="best fit")
-    axes[0].set_yscale("log")
-    axes[0].set_ylabel("coefficient")
-    axes[0].legend()
-    axes[1].axhspan(-1, 1, color="0.9")
-    axes[1].plot(x, (data - theory) / error, "o", ms=3)
-    axes[1].set_ylabel(r"$\Delta / \sigma$")
-    axes[1].set_xticks(x, labels, rotation=90, fontsize=7)
-    fig.suptitle(f"WST fit (q = {config.q}, cells {config.cellsize:.2f} Mpc/h)", fontsize=10)
+    residual = data - model
+    chi2 = float(residual @ np.linalg.solve(covariance, residual))
+    coefficients = dataset.coefficients
+    kinds = [kind for kind in ("S1", "S21") if any(c.kind == kind for c in coefficients)]
+    counts = [sum(c.kind == kind for c in coefficients) for kind in kinds]
+    fig, axes = plt.subplots(2, len(kinds), figsize=(7 + 0.25 * len(coefficients), 6.5), sharex="col", squeeze=False,
+                             gridspec_kw=dict(height_ratios=(2.2, 1), width_ratios=counts))
+    for col, kind in enumerate(kinds):
+        index = np.array([i for i, c in enumerate(coefficients) if c.kind == kind])
+        ells = np.array([coefficients[i].ell for i in index])
+        x = np.arange(index.size)
+        ax, axr = axes[0, col], axes[1, col]
+        for ell in np.unique(ells):
+            mask = ells == ell
+            line = ax.errorbar(x[mask], data[index[mask]], error[index[mask]], fmt="o", ms=4, label=f"l = {ell}")
+            color = line[0].get_color()
+            ax.plot(x[mask], model[index[mask]], "-", color=color, lw=1.2, alpha=0.8)
+            axr.plot(x[mask], residual[index[mask]] / error[index[mask]], "o", ms=4, color=color)
+        ax.plot([], [], "k-", lw=1.2, label="best-fit model")
+        ax.set_yscale("log")
+        ax.legend(fontsize=9, ncol=2)
+        axr.axhspan(-1, 1, color="0.9")
+        axr.axhline(0, color="k", lw=0.8)
+        axr.set_ylim(-3, 3)
+        if kind == "S1":
+            ticks = [f"{config.sigma(coefficients[i].j):.0f}" for i in index]
+            ax.set_title(r"$S_1(j, l)$")
+            axr.set_xlabel(r"$\sigma_j$ [Mpc/h]  (grouped by $l$)")
+        else:
+            ticks = [f"{config.sigma(coefficients[i].j):.0f}→{config.sigma(coefficients[i].j2):.0f}" for i in index]
+            ax.set_title(r"$S_2(j_1, j_2, l)\,/\,S_1(j_1, l)$")
+            axr.set_xlabel(r"$\sigma_{j_1}\to\sigma_{j_2}$ [Mpc/h]  (grouped by $l$)")
+        axr.set_xticks(x, ticks, rotation=60, fontsize=8)
+    axes[0, 0].set_ylabel("coefficient")
+    axes[1, 0].set_ylabel(r"(data − model) / $\sigma$")
+    header = title or f"WST best fit, q = {config.q}"
+    dof = f"{data.size} − {nvaried} = {data.size - nvaried} dof" if nvaried else f"{data.size} data points"
+    summary = f"$\\chi^2$ = {chi2:.1f} for {dof} (full covariance)"
+    if bestfit:
+        latex = {"omega_cdm": r"$\omega_{\rm cdm}$", "logA": r"$\ln 10^{10}A_s$", "n_s": "$n_s$", "h": "$h$",
+                 "omega_b": r"$\omega_{\rm b}$"}
+        summary += ";  best fit: " + ", ".join(f"{label}={bestfit[name]:.4f}" for name, label in latex.items()
+                                               if name in bestfit)
+    fig.suptitle(f"{header}\n{summary}", fontsize=11)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
