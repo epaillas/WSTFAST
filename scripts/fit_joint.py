@@ -25,8 +25,8 @@ from desilike import setup_logging
 from desilike.base import Posterior
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_dataset, load_measurement, load_power_dataset, sample_covariance
-from wstfast.inference import (bestfit_values, build_joint_likelihood, joint_vectors, plot_fit, plot_power_fit,
-                                profile, sample_mh)
+from wstfast.inference import (bestfit_values, build_joint_likelihood, fix_parameters, joint_vectors,
+                                parse_fixed, plot_fit, plot_power_fit, profile, sample_mh)
 
 
 def parse_args():
@@ -49,6 +49,8 @@ def parse_args():
     parser.add_argument("--covariance-of-mean", action="store_true", help="errors of the realization mean")
     parser.add_argument("--layer2", action="store_true",
                         help="free second-layer non-Gaussianity constants C_l (needed for sigma_j1 = 12.5 Mpc/h)")
+    parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE",
+                        help="fix parameters at these values (e.g. nuisances, for an upper bound on the information)")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200000)
@@ -82,6 +84,7 @@ def main():
 
     likelihood = build_joint_likelihood(wst, power, covariance, vary=args.vary, wst_emulator=args.wst_emulator,
                                         power_emulator=args.pk_emulator, cutoff=args.cutoff, layer2=args.layer2)
+    fix_parameters(likelihood, parse_fixed(args.fix))
     posterior = Posterior(likelihood)
     profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed)
     print(profiles.to_stats(tablefmt="pretty"))

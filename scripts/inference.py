@@ -23,8 +23,8 @@ from desilike import setup_logging
 from desilike.base import Posterior
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_dataset, load_measurement
-from wstfast.inference import (build_likelihood, covariance_for, plot_fit, profile, sample_mh,
-                                summarize)
+from wstfast.inference import (build_likelihood, covariance_for, fix_parameters, parse_fixed, plot_fit,
+                                profile, sample_mh, summarize)
 
 
 def parse_args():
@@ -50,6 +50,8 @@ def parse_args():
                         help="trained basis emulator, or 'none' for the exact model")
     parser.add_argument("--layer2", action="store_true",
                         help="free second-layer non-Gaussianity constants C_l (needed for sigma_j1 = 12.5 Mpc/h)")
+    parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE",
+                        help="fix parameters at these values (e.g. nuisances, for an upper bound on the information)")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=50000)
@@ -83,6 +85,7 @@ def main():
 
     emulator = None if args.emulator == "none" else Path(args.emulator)
     likelihood = build_likelihood(dataset, covariance, vary=args.vary, emulator=emulator, layer2=args.layer2)
+    fix_parameters(likelihood, parse_fixed(args.fix))
     posterior = Posterior(likelihood)
 
     profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed)

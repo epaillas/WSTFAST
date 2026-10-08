@@ -148,6 +148,27 @@ def build_joint_likelihood(wst: WSTDataset, power: PowerDataset, covariance: np.
     return WSTLikelihood(theory, joint_vectors(wst, power).mean(axis=0), covariance)
 
 
+def fix_parameters(likelihood, values: dict[str, float]):
+    """Fix the named parameters of ``likelihood`` at the given values (e.g. nuisances, for bounds on information)."""
+    params = get_params(likelihood)
+    unknown = sorted(set(values) - set(params.names()))
+    if unknown:
+        raise ValueError(f"unknown parameters {unknown}")
+    for name, value in values.items():
+        params[name].update(value=float(value), fixed=True)
+
+
+def parse_fixed(items) -> dict[str, float]:
+    """['a=1', 'b=2.5'] -> {'a': 1.0, 'b': 2.5}."""
+    out = {}
+    for item in items or []:
+        name, _, value = item.partition("=")
+        if not value:
+            raise ValueError(f"--fix expects NAME=VALUE, got {item!r}")
+        out[name] = float(value)
+    return out
+
+
 def profile(posterior, output: Path, seed: int = 42, nstarts: int = 4):
     """Minuit maximisation from several starting points; the best is refined and saved."""
     from desilike.profilers import Minuit, Profiler
