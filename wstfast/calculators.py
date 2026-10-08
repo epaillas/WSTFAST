@@ -202,6 +202,29 @@ class PowerTheory(Calculator):
         return obj
 
 
+class JointTheory(Calculator):
+    """Concatenated predictions of several theories (e.g. WST and P(k)) that share the cosmological parameters.
+
+    Parameters with the same name (the emulated cosmology) are shared; nuisance parameters stay separate.
+    """
+
+    def __init__(self, theories):
+        self.theories = list(theories)
+
+    def __call__(self):
+        self.flattheory = jnp.concatenate([theory.flattheory for theory in self.theories])
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
 class WSTLikelihood(GaussianLikelihood):
     """Gaussian likelihood of a data vector (WST or P(k)) with a fixed covariance."""
 

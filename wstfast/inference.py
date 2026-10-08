@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 from desilike import build, get_params
 
-from .calculators import PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory, build_cosmology
+from .calculators import (JointTheory, PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory,
+                          build_cosmology)
 from .config import QUIJOTE_COSMOLOGY, WSTConfig
 from .data import PowerDataset, WSTDataset
 from .theory.power import LatticeBinning, default_knodes
@@ -58,17 +59,21 @@ def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     return basis, _fix_unvaried(basis, settings, vary, path)
 
 
-def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
-                     emulator: Path | None = None) -> WSTLikelihood:
-    """WST likelihood with an exact (CLASS) or Taylor-emulated cosmology-dependent basis."""
+def build_wst_theory(dataset: WSTDataset, vary=("omega_cdm", "logA"), emulator: Path | None = None) -> WSTTheory:
+    """WST theory with an exact (CLASS) or Taylor-emulated cosmology-dependent basis."""
     if emulator is None:
         basis = WSTBasis(cosmo=build_cosmology(vary), config=dataset.config, z=dataset.metadata["redshift"],
                          shotnoise=dataset.shotnoise)
     else:
         basis, bounds = load_emulated_basis(emulator, dataset, vary)
         _bound_to_emulator(basis, bounds)
-    theory = WSTTheory(dataset.coefficients, config=dataset.config, basis=basis)
-    return WSTLikelihood(theory, dataset.mean, covariance)
+    return WSTTheory(dataset.coefficients, config=dataset.config, basis=basis)
+
+
+def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
+                     emulator: Path | None = None) -> WSTLikelihood:
+    """WST likelihood with an exact (CLASS) or Taylor-emulated cosmology-dependent basis."""
+    return WSTLikelihood(build_wst_theory(dataset, vary, emulator), dataset.mean, covariance)
 
 
 def _bound_to_emulator(basis, bounds):
@@ -101,10 +106,10 @@ def load_emulated_power_basis(path: Path, dataset: PowerDataset, vary, order: st
     return basis, _fix_unvaried(basis, settings, vary, path), knodes
 
 
-def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
-                           order: str = "one-loop", cutoff: float | None = 0.5, emulator: Path | None = None,
-                           counterterm: bool | None = None, window: str | None = "cic") -> WSTLikelihood:
-    """Real-space matter P(k) likelihood with an exact (CLASS + loop) or Taylor-emulated basis."""
+def build_power_theory(dataset: PowerDataset, vary=("omega_cdm", "logA"), order: str = "one-loop",
+                       cutoff: float | None = 0.5, emulator: Path | None = None, counterterm: bool | None = None,
+                       window: str | None = "cic") -> PowerTheory:
+    """Real-space matter P(k) theory with an exact (CLASS + loop) or Taylor-emulated basis."""
     if emulator is None:
         knodes = default_knodes(dataset.edges[-1], boxsize=dataset.metadata["boxsize"])
         basis = PowerBasis(cosmo=build_cosmology(vary), knodes=knodes, z=dataset.metadata["redshift"], order=order,
@@ -114,8 +119,32 @@ def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=(
         _bound_to_emulator(basis, bounds)
     binning = LatticeBinning(dataset.edges, dataset.metadata["boxsize"], dataset.metadata["nmesh"], knodes,
                              window=window)
-    theory = PowerTheory(binning, basis=basis, shotnoise=dataset.shotnoise, order=order, counterterm=counterterm)
+    return PowerTheory(binning, basis=basis, shotnoise=dataset.shotnoise, order=order, counterterm=counterterm)
+
+
+def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
+                           order: str = "one-loop", cutoff: float | None = 0.5, emulator: Path | None = None,
+                           counterterm: bool | None = None, window: str | None = "cic") -> WSTLikelihood:
+    """Real-space matter P(k) likelihood with an exact (CLASS + loop) or Taylor-emulated basis."""
+    theory = build_power_theory(dataset, vary, order=order, cutoff=cutoff, emulator=emulator,
+                                counterterm=counterterm, window=window)
     return WSTLikelihood(theory, dataset.mean, covariance)
+
+
+def joint_vectors(wst: WSTDataset, power: PowerDataset) -> np.ndarray:
+    """Concatenated data vectors [WST, P(k)] of the same realizations."""
+    if list(wst.files) != list(power.files):
+        raise ValueError("the WST and P(k) datasets must hold the same realizations in the same order")
+    return np.concatenate([wst.vectors, power.vectors], axis=1)
+
+
+def build_joint_likelihood(wst: WSTDataset, power: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
+                           wst_emulator: Path | None = None, power_emulator: Path | None = None,
+                           order: str = "one-loop", cutoff: float | None = 0.5) -> WSTLikelihood:
+    """Joint WST + P(k) likelihood with shared cosmology; ``covariance`` is that of ``joint_vectors``."""
+    theory = JointTheory([build_wst_theory(wst, vary, wst_emulator),
+                          build_power_theory(power, vary, order=order, cutoff=cutoff, emulator=power_emulator)])
+    return WSTLikelihood(theory, joint_vectors(wst, power).mean(axis=0), covariance)
 
 
 def profile(posterior, output: Path, seed: int = 42, nstarts: int = 4):
