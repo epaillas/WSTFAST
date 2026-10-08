@@ -50,6 +50,8 @@ def parse_args():
     parser.add_argument("--counterterm", action=argparse.BooleanOptionalAction, default=None,
                         help="free cs2_pk (default: at one loop only)")
     parser.add_argument("--covariance", choices=("auto", "sample", "diagonal"), default="auto")
+    parser.add_argument("--volume", type=float, default=None,
+                        help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true",
                         help="errors of the realization mean (default: one 1 (Gpc/h)^3 box)")
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY))
@@ -72,6 +74,11 @@ def main():
 
     dataset = load_power_dataset(args.data_dir, "real", kmin=args.kmin, kmax=args.kmax, rebin=args.rebin)
     covariance, kind = covariance_for(dataset, args.covariance, of_mean=args.covariance_of_mean)
+    if args.volume is not None:
+        if args.covariance_of_mean:
+            raise SystemExit("--volume and --covariance-of-mean are exclusive")
+        box_volume = (dataset.metadata["boxsize"] / 1000.0) ** 3  # (Gpc/h)^3
+        covariance = covariance * box_volume / args.volume
     print(f"{dataset.k.size} bins in [{dataset.k[0]:.4f}, {dataset.k[-1]:.4f}] h/Mpc, "
           f"{dataset.vectors.shape[0]} realizations, {kind} covariance")
 
@@ -97,7 +104,7 @@ def main():
     summary = summarize(likelihood, profiles, samples, dataset, kind)
     summary.update(vary=args.vary, order=args.order, cutoff=args.cutoff, counterterm=args.counterterm,
                    kmin=args.kmin, kmax=args.kmax, rebin=args.rebin, emulator=str(emulator),
-                   covariance_of_mean=args.covariance_of_mean, data_dir=str(args.data_dir))
+                   covariance_of_mean=args.covariance_of_mean, volume=args.volume, data_dir=str(args.data_dir))
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     cutoff = "unregulated" if args.cutoff is None else f"Lambda = {args.cutoff} h/Mpc"
     plot_power_fit(args.output_dir / "bestfit.png", likelihood, dataset, covariance,
