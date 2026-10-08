@@ -79,10 +79,12 @@ class WSTTheory(Calculator):
     Nuisance parameters: ``cs2`` (counterterm, (Mpc/h)^2) and one second-layer noise amplitude
     ``noise_j{j1}_l{l}`` per first-layer field used in S21 (the noise of U_{j1,l} is (1 + noise) times
     its Gaussian-chaos value). ``edgeworth=False`` drops the NLO Edgeworth correction to S1.
+    With ``layer2=True``, one constant ``layer2_l{l}`` per l scales the second-layer Edgeworth factor (see
+    ``wstfast.theory.model.Assembly``).
     """
 
     def __init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
-                 **basis_kwargs):
+                 layer2: bool = False, **basis_kwargs):
         self.basis = WSTBasis(config=config, **basis_kwargs) if basis is None else basis
         self.cs2 = Parameter("cs2", value=0.0, prior=dict(limits=[-20.0, 20.0]),
                              ref=dict(dist="norm", loc=0.0, scale=1.0), latex="c_s^2")
@@ -90,14 +92,19 @@ class WSTTheory(Calculator):
         self.noise = {key: Parameter(f"noise_j{key[0]}_l{key[1]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
                                      ref=dict(dist="norm", loc=0.0, scale=0.1), latex=rf"a_{{N,{key[0]},{key[1]}}}")
                       for key in fields}
+        ells = sorted({c.ell for c in coefficients if c.kind == "S21"}) if layer2 else []
+        self.layer2 = {ell: Parameter(f"layer2_l{ell}", value=10.0, prior=dict(limits=[0.0, 100.0]),
+                                      ref=dict(dist="norm", loc=10.0, scale=2.0), latex=rf"C_{{2,{ell}}}")
+                       for ell in ells}
 
     def __post_init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
-                      **basis_kwargs):
+                      layer2: bool = False, **basis_kwargs):
         self.assembly = Assembly(config, coefficients, edgeworth=edgeworth)
 
     def __call__(self):
         noise = jnp.stack([self.noise[key].value for key in self.assembly.noise_keys]) if self.noise else jnp.zeros(0)
-        self.flattheory = self.assembly(self.basis.s1_terms, self.basis.s21_terms, self.cs2.value, noise)
+        layer2 = (jnp.stack([self.layer2[ell].value for ell in self.assembly.layer2_keys]) if self.layer2 else None)
+        self.flattheory = self.assembly(self.basis.s1_terms, self.basis.s21_terms, self.cs2.value, noise, layer2)
         return self.flattheory
 
     def tree_flatten(self):

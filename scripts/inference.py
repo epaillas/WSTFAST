@@ -48,6 +48,8 @@ def parse_args():
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY))
     parser.add_argument("--emulator", default="outputs/emulators/wst_basis_taylor.h5",
                         help="trained basis emulator, or 'none' for the exact model")
+    parser.add_argument("--layer2", action="store_true",
+                        help="free second-layer non-Gaussianity constants C_l (needed for sigma_j1 = 12.5 Mpc/h)")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=50000)
@@ -80,7 +82,7 @@ def main():
     print(f"{len(coefficients)} coefficients, {dataset.vectors.shape[0]} realizations, {kind} covariance")
 
     emulator = None if args.emulator == "none" else Path(args.emulator)
-    likelihood = build_likelihood(dataset, covariance, vary=args.vary, emulator=emulator)
+    likelihood = build_likelihood(dataset, covariance, vary=args.vary, emulator=emulator, layer2=args.layer2)
     posterior = Posterior(likelihood)
 
     profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed)

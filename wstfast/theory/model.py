@@ -141,6 +141,13 @@ class Assembly:
     With ``edgeworth``, S1 gets its NLO Edgeworth factor 1 + E(q), and S21 = S2 / S1(j1) the one-point
     factor (1 + E(1))^q / (1 + E(q)) of its first-layer field: the Gaussian relation <U>^2 = m_n s^2 behind
     the S21 formula becomes <U>^2 = m_n s^2 (1 + E(1))^2, and S1(j1) = (Gaussian) (1 + E(q)).
+
+    The second layer Y = U * psi_{j2} is not Gaussian either. Its Edgeworth factor is modelled as
+        1 + C_l q (q - 2) / (8 n (n + 2)) K4(j1, l)^2 f_N^2 (sigma_j1 / sigma_j2)^3,
+    with the kurtosis K4 of the first-layer field, the noise fraction f_N = (G' + N) / (R + G' + N) of Y's
+    variance (G' including the noise amplitude) and the volume dilution (sigma_j1 / sigma_j2)^3, and one free
+    constant C_l per l (``layer2_amplitudes``). This scaling describes the measured second-layer kurtosis of
+    every pair with sigma_j2 / sigma_j1 >= 2.8 and sigma_j1 >= 12.5 Mpc/h to ~20% with C_l ~ 6-21.
     """
 
     def __init__(self, config: WSTConfig, coefficients, edgeworth: bool = True):
@@ -162,6 +169,11 @@ class Assembly:
         self.s1_n, self.s21_n = s1_n, s21_n
         self.s1_gamma = np.exp(gammaln((s1_n + self.q) / 2) - gammaln(s1_n / 2))
         self.s21_mean2 = 2 * np.exp(2 * (gammaln((s21_n + 1) / 2) - gammaln(s21_n / 2)))
+        s21 = [c for c in self.coefficients if c.kind == "S21"]
+        self.s21_dilution = np.array([(config.sigma(c.j) / config.sigma(c.j2)) ** 3 for c in s21])
+        #: Multipoles l of the S21 coefficients, one second-layer kurtosis constant C_l each.
+        self.layer2_keys = sorted({c.ell for c in s21})
+        self.s21_layer2_index = np.array([self.layer2_keys.index(c.ell) for c in s21], dtype=int)
         #: First-layer fields (j1, l) of the S21 coefficients, one noise amplitude each.
         self.noise_keys = sorted({(c.j, c.ell) for c in self.coefficients if c.kind == "S21"})
         self.s21_noise_index = np.array([self.noise_keys.index((c.j, c.ell)) for c in self.coefficients if c.kind == "S21"],
@@ -170,14 +182,21 @@ class Assembly:
         self.order = np.argsort([i for i, c in enumerate(self.coefficients) if c.kind == "S1"]
                                 + [i for i, c in enumerate(self.coefficients) if c.kind == "S21"])
 
-    def __call__(self, s1_terms, s21_terms, cs2, noise_amplitudes):
+    def __call__(self, s1_terms, s21_terms, cs2, noise_amplitudes, layer2_amplitudes=None):
         q = self.q
         t1 = s1_terms[self.s1_rows]
         variance = (t1[:, 0] + t1[:, 1] - 2 * cs2 * t1[:, 2] + t1[:, 3]) / self.s1_n
         s1 = self.s1_gamma * (2 * variance) ** (q / 2)
         t21 = s21_terms[self.s21_rows]
         amplitude = 1.0 + jnp.asarray(noise_amplitudes)[self.s21_noise_index]
-        s21 = (self.s21_mean2 * (t21[:, 0] + amplitude * t21[:, 1] + t21[:, 2]) / self.s21_n) ** (q / 2)
+        noise = amplitude * t21[:, 1] + t21[:, 2]
+        s21 = (self.s21_mean2 * (t21[:, 0] + noise) / self.s21_n) ** (q / 2)
+        if layer2_amplitudes is not None:
+            n, first = self.s21_n, s1_terms[self.s21_s1_rows]
+            k4 = first[:, 4] * n**2 / first[:, 0] ** 2
+            fraction = noise / (t21[:, 0] + noise)
+            constant = jnp.asarray(layer2_amplitudes)[self.s21_layer2_index]
+            s21 = s21 * (1 + constant * q * (q - 2) / (8 * n * (n + 2)) * k4**2 * fraction**2 * self.s21_dilution)
         if self.edgeworth:
             s1 = s1 * (1 + edgeworth(q, self.s1_n, t1))
             first = s1_terms[self.s21_s1_rows]

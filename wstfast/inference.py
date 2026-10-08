@@ -59,7 +59,8 @@ def load_emulated_basis(path: Path, dataset: WSTDataset, vary):
     return basis, _fix_unvaried(basis, settings, vary, path)
 
 
-def build_wst_theory(dataset: WSTDataset, vary=("omega_cdm", "logA"), emulator: Path | None = None) -> WSTTheory:
+def build_wst_theory(dataset: WSTDataset, vary=("omega_cdm", "logA"), emulator: Path | None = None,
+                     layer2: bool = False) -> WSTTheory:
     """WST theory with an exact (CLASS) or Taylor-emulated cosmology-dependent basis."""
     if emulator is None:
         basis = WSTBasis(cosmo=build_cosmology(vary), config=dataset.config, z=dataset.metadata["redshift"],
@@ -67,13 +68,13 @@ def build_wst_theory(dataset: WSTDataset, vary=("omega_cdm", "logA"), emulator: 
     else:
         basis, bounds = load_emulated_basis(emulator, dataset, vary)
         _bound_to_emulator(basis, bounds)
-    return WSTTheory(dataset.coefficients, config=dataset.config, basis=basis)
+    return WSTTheory(dataset.coefficients, config=dataset.config, basis=basis, layer2=layer2)
 
 
 def build_likelihood(dataset: WSTDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
-                     emulator: Path | None = None) -> WSTLikelihood:
+                     emulator: Path | None = None, layer2: bool = False) -> WSTLikelihood:
     """WST likelihood with an exact (CLASS) or Taylor-emulated cosmology-dependent basis."""
-    return WSTLikelihood(build_wst_theory(dataset, vary, emulator), dataset.mean, covariance)
+    return WSTLikelihood(build_wst_theory(dataset, vary, emulator, layer2=layer2), dataset.mean, covariance)
 
 
 def _bound_to_emulator(basis, bounds):
@@ -140,9 +141,9 @@ def joint_vectors(wst: WSTDataset, power: PowerDataset) -> np.ndarray:
 
 def build_joint_likelihood(wst: WSTDataset, power: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
                            wst_emulator: Path | None = None, power_emulator: Path | None = None,
-                           order: str = "one-loop", cutoff: float | None = 0.5) -> WSTLikelihood:
+                           order: str = "one-loop", cutoff: float | None = 0.5, layer2: bool = False) -> WSTLikelihood:
     """Joint WST + P(k) likelihood with shared cosmology; ``covariance`` is that of ``joint_vectors``."""
-    theory = JointTheory([build_wst_theory(wst, vary, wst_emulator),
+    theory = JointTheory([build_wst_theory(wst, vary, wst_emulator, layer2=layer2),
                           build_power_theory(power, vary, order=order, cutoff=cutoff, emulator=power_emulator)])
     return WSTLikelihood(theory, joint_vectors(wst, power).mean(axis=0), covariance)
 
