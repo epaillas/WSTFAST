@@ -195,3 +195,18 @@ def test_torch_line_of_sight_matches_numpy():
     assert set(result) == set(reference)
     for name in ("S1m", "S2m", "Umean_m", "PUU_m"):
         np.testing.assert_allclose(result[name], reference[name], rtol=2e-4, atol=1e-9)
+
+
+def test_rsd_moments_reduce_to_isotropic_limit():
+    from wstfast.theory.rsd import anisotropic_moment, edgeworth_tensors, multiplicity
+
+    q, s2 = 0.8, 0.37
+    for ell in (0, 1, 3):
+        n = 2 * ell + 1
+        lam = np.full(ell + 1, s2)
+        exact = (2 * s2) ** (q / 2) * np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
+        assert float(anisotropic_moment(lam, multiplicity(ell), q)) == pytest.approx(exact, rel=1e-4)
+        moment, t4, t22 = edgeworth_tensors(lam, multiplicity(ell), q)
+        a4 = q * (q - 2) * exact / (n * (n + 2) * s2**2)  # E_G[d^4 r^q] per pairing, isotropic
+        assert float(t4[0]) == pytest.approx(3 * a4, rel=1e-8)
+        assert float(t22[0, -1]) == pytest.approx(a4, rel=1e-8)
