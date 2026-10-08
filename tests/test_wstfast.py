@@ -147,3 +147,51 @@ def test_leg_sampler_integrates_gaussian():
     M, b = np.array([[3.0, 1.0], [1.0, 3.0]]), np.full(2, unode)
     exact = np.exp(0.5 * (b @ np.linalg.solve(M, b) - unode**2)) / (np.linalg.det(M) ** 1.5 * (2 * np.pi) ** 3)
     assert float(value) == pytest.approx(exact, rel=1e-3)
+
+
+def test_line_of_sight_resolved_moduli():
+    delta, lattice = gaussian_field(nmesh=48, seed=4)
+    config = WSTConfig(J=2, L=2, sigma0=0.8, min_dj=1, cellsize=1.0)
+    qs = [0.8, 2.0]
+    spectra = PowerMultipoles(lattice, 48.0, kmax=1.0)
+    plain = measure_wst(delta, config, qs=qs, lattice=lattice, spectra=spectra)
+    out = measure_wst(delta, config, qs=qs, lattice=lattice, spectra=spectra, los=True)
+    # The m-summed outputs do not change.
+    for name in ("S1", "S2", "PUU", "PUd", "Umean"):
+        np.testing.assert_allclose(out[name], plain[name], rtol=1e-6)
+    # sum_|m| U_|m|^2 = U^2, so at q = 2 the |m|-resolved S1 add up to S1 (and likewise in the second layer).
+    np.testing.assert_allclose(np.nansum(out["S1m"][1], axis=-1), out["S1"][1], rtol=1e-5)
+    for j1, j2 in config.second_layer_pairs():
+        for ell in range(config.lmax2 + 1):
+            total = sum(np.nansum(out["S2m"][1, j1, j2, ell, m1]) for m1 in range(ell + 1))
+            assert np.isfinite(total)
+    # Isotropic Gaussian field: each |m| block is a chi variable with 1 (m = 0) or 2 components.
+    fk = np.fft.rfftn(delta)
+    mult = np.full(fk.shape, 2.0)
+    mult[..., 0] = mult[..., -1] = 1.0
+    for j in range(config.J + 1):
+        for ell in range(config.L + 1):
+            n = 2 * ell + 1
+            s2 = np.sum(mult * np.abs(fk) ** 2 * lattice.radial(config.sigma0 * 2**j, ell) ** 2) / delta.size**2 / n
+            for m in range(ell + 1):
+                nm = 1 if m == 0 else 2
+                expected = (2 * s2) ** 0.4 * np.exp(gammaln((nm + 0.8) / 2) - gammaln(nm / 2))
+                assert out["S1m"][0, j, ell, m] == pytest.approx(expected, rel=3e-2)
+            assert np.all(np.isnan(out["S1m"][:, j, ell, ell + 1:]))
+
+
+def test_torch_line_of_sight_matches_numpy():
+    torch = pytest.importorskip("torch")
+    from wstfast.measure_torch import TorchLattice, TorchPowerMultipoles, measure_wst_torch
+
+    delta, lattice = gaussian_field(nmesh=32, seed=5)
+    config = WSTConfig(J=3, L=2, L2=2, min_dj=2, sigma0=0.8, step=2**0.5, cellsize=1.0)
+    qs = [0.8, 2.0]
+    reference = measure_wst(delta, config, qs=qs, lattice=lattice, spectra=PowerMultipoles(lattice, 32.0, kmax=1.5),
+                            los=True)
+    tlattice = TorchLattice(32, device=torch.device("cpu"))
+    result = measure_wst_torch(delta, config, qs=qs, lattice=tlattice,
+                               spectra=TorchPowerMultipoles(tlattice, 32.0, kmax=1.5), los=True)
+    assert set(result) == set(reference)
+    for name in ("S1m", "S2m", "Umean_m", "PUU_m"):
+        np.testing.assert_allclose(result[name], reference[name], rtol=2e-4, atol=1e-9)

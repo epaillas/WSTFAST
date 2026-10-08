@@ -19,7 +19,7 @@ def save_measurement(path: Path, result: dict, config: WSTConfig, metadata: dict
 
 
 def load_measurement(path: Path, q: float | None = None) -> dict:
-    """Read a measurement; S0, S1 and S2 are returned for one exponent q (default: the config's).
+    """Read a measurement; S0, S1 and S2 (S1m and S2m if stored) are returned for one exponent q (default: config's).
 
     Spectra (``k``, ``Pdd``, ``PUd``, ``PUU``, ...) are returned as stored. Files written before
     several q were stored at once hold a single q and no ``q`` array.
@@ -33,8 +33,9 @@ def load_measurement(path: Path, q: float | None = None) -> dict:
         matches = np.flatnonzero(np.isclose(out["q"], q))
         if matches.size == 0:
             raise ValueError(f"{path} has q = {out['q'].tolist()}, not {q}")
-        for name in ("S0", "S1", "S2"):
-            out[name] = out[name][matches[0]]
+        for name in ("S0", "S1", "S2", "S1m", "S2m"):
+            if name in out:
+                out[name] = out[name][matches[0]]
     elif not np.isclose(q, config.q):
         raise ValueError(f"{path} only has q = {config.q}")
     out["config"] = config.with_q(q)

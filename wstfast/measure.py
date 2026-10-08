@@ -86,15 +86,25 @@ def _rfft(arr):
     return sfft.rfftn(arr, workers=WORKERS)
 
 
-def wavelet_modulus(fk, lattice: Lattice, harmonics, sigma: float, ell: int):
-    """|field * psi_{sigma,l}| on the mesh, given the field's rfft (sigma in cells)."""
+def wavelet_modulus(fk, lattice: Lattice, harmonics, sigma: float, ell: int, los: bool = False):
+    """|field * psi_{sigma,l}| on the mesh, given the field's rfft (sigma in cells).
+
+    With ``los``, also return the line-of-sight-resolved moduli U_|m| = sqrt(X_m^2 + X_-m^2) (|X_0| for m = 0),
+    |m| = 0..l, about the z axis; ``harmonics`` must be ordered m = -l..l as ``Lattice.harmonics`` returns them.
+    """
     phase = (-1j) ** ell
     radial = lattice.radial(sigma, ell)
-    power = None
-    for y in harmonics:
+    power, per_m = None, [None] * (ell + 1)
+    for index, y in enumerate(harmonics):
         x = _irfft(fk * (phase * radial * y), lattice.n)
-        power = x * x if power is None else power + x * x
-    return np.sqrt(power)
+        x2 = x * x
+        power = x2 if power is None else power + x2
+        if los:
+            m = abs(index - ell)
+            per_m[m] = x2 if per_m[m] is None else per_m[m] + x2
+    if not los:
+        return np.sqrt(power)
+    return np.sqrt(power), [np.sqrt(p) for p in per_m]
 
 
 def _moments(field, qs):
@@ -104,46 +114,71 @@ def _moments(field, qs):
 
 
 def measure_wst(delta: np.ndarray, config: WSTConfig, qs=None, lattice: Lattice | None = None,
-                spectra: PowerMultipoles | None = None) -> dict:
+                spectra: PowerMultipoles | None = None, los: bool = False) -> dict:
     """WST coefficients of a density contrast mesh, for one or several exponents q.
 
     Returns ``q`` (nq,), ``S0`` (nq,), ``S1`` (nq, J+1, L+1) and ``S2`` (nq, J+1, J+1, L2+1), NaN where not
     measured. The second layer reuses l, as in kymatio. With ``spectra``, also the power-spectrum
     multipoles ``Pdd`` (nell, nk), ``PUd`` and ``PUU`` (J+1, L+1, nell, nk) of the first-layer moduli U
     with delta, their means ``Umean`` (J+1, L+1), and the binning ``k``, ``k_edges`` and ``nmodes``.
+
+    With ``los``, also the line-of-sight-resolved coefficients (line of sight z), built from the moduli
+    U_|m| = sqrt(X_m^2 + X_-m^2) of each |m| = 0..l: ``S1m`` (nq, J+1, L+1, L+1) indexed [q, j, l, |m|],
+    ``S2m`` (nq, J+1, J+1, L2+1, L2+1, L2+1) indexed [q, j1, j2, l, |m1|, |m2|] (the second layer of
+    U_|m1| resolved in |m2|), and with ``spectra`` ``Umean_m``, ``PUd_m`` and ``PUU_m`` (indexed [j, l, |m|, ...]).
     """
     qs = np.atleast_1d(config.q if qs is None else qs).astype(float)
     nmesh = delta.shape[0]
     lattice = lattice or Lattice(nmesh)
     fk = _rfft(delta.astype(np.float32))
-    nq, nj = len(qs), config.J + 1
+    nq, nj, nl, nl2 = len(qs), config.J + 1, config.L + 1, config.lmax2 + 1
     out = {"q": qs, "S0": _moments(delta.astype(np.float64), qs),
-           "S1": np.full((nq, nj, config.L + 1), np.nan),
-           "S2": np.full((nq, nj, nj, config.lmax2 + 1), np.nan)}
+           "S1": np.full((nq, nj, nl), np.nan),
+           "S2": np.full((nq, nj, nj, nl2), np.nan)}
+    if los:
+        out.update(S1m=np.full((nq, nj, nl, nl), np.nan), S2m=np.full((nq, nj, nj, nl2, nl2, nl2), np.nan))
     if spectra is not None:
         nell, nk = len(spectra.ells), spectra.nbins
         out.update(k=spectra.k, k_edges=spectra.edges, nmodes=spectra.nmodes, Pdd=spectra(fk, fk),
-                   PUd=np.full((nj, config.L + 1, nell, nk), np.nan), PUU=np.full((nj, config.L + 1, nell, nk), np.nan),
-                   Umean=np.full((nj, config.L + 1), np.nan))
+                   PUd=np.full((nj, nl, nell, nk), np.nan), PUU=np.full((nj, nl, nell, nk), np.nan),
+                   Umean=np.full((nj, nl), np.nan))
+        if los:
+            out.update(PUd_m=np.full((nj, nl, nl, nell, nk), np.nan), PUU_m=np.full((nj, nl, nl, nell, nk), np.nan),
+                       Umean_m=np.full((nj, nl, nl), np.nan))
     pairs = config.second_layer_pairs()
-    for ell in range(config.L + 1):
+    for ell in range(nl):
         harmonics = lattice.harmonics(ell)
         for j1 in range(nj):
-            u1 = wavelet_modulus(fk, lattice, harmonics, config.sigma0 * config.step**j1, ell)
-            out["S1"][:, j1, ell] = _moments(u1, qs)
+            sigma1 = config.sigma0 * config.step**j1
             second_layer = ell <= config.lmax2 and any(pair[0] == j1 for pair in pairs)
-            if spectra is None and not second_layer:
-                continue
-            mean = u1.mean(dtype=np.float64)
-            fu = _rfft(u1 - mean)
-            if spectra is not None:
-                out["Umean"][j1, ell] = mean
-                out["PUd"][j1, ell] = spectra(fu, fk)
-                out["PUU"][j1, ell] = spectra(fu, fu)
-            if not second_layer:
-                continue
-            fu[0, 0, 0] = mean * nmesh**3  # restore the mean for the low-pass (l = 0) second layer
-            for _, j2 in (pair for pair in pairs if pair[0] == j1):
-                u2 = wavelet_modulus(fu, lattice, harmonics, config.sigma0 * config.step**j2, ell)
-                out["S2"][:, j1, j2, ell] = _moments(u2, qs)
+            if los:
+                u1, per_m = wavelet_modulus(fk, lattice, harmonics, sigma1, ell, los=True)
+                fields = [(None, u1)] + list(enumerate(per_m))
+            else:
+                fields = [(None, wavelet_modulus(fk, lattice, harmonics, sigma1, ell))]
+            for m1, u in fields:
+                if m1 is None:
+                    out["S1"][:, j1, ell] = _moments(u, qs)
+                else:
+                    out["S1m"][:, j1, ell, m1] = _moments(u, qs)
+                if spectra is None and not second_layer:
+                    continue
+                mean = u.mean(dtype=np.float64)
+                fu = _rfft(u - mean)
+                if spectra is not None:
+                    suffix, index = ("", (j1, ell)) if m1 is None else ("_m", (j1, ell, m1))
+                    out["Umean" + suffix][index] = mean
+                    out["PUd" + suffix][index] = spectra(fu, fk)
+                    out["PUU" + suffix][index] = spectra(fu, fu)
+                if not second_layer:
+                    continue
+                fu[0, 0, 0] = mean * nmesh**3  # restore the mean for the low-pass (l = 0) second layer
+                for _, j2 in (pair for pair in pairs if pair[0] == j1):
+                    sigma2 = config.sigma0 * config.step**j2
+                    if m1 is None:
+                        out["S2"][:, j1, j2, ell] = _moments(wavelet_modulus(fu, lattice, harmonics, sigma2, ell), qs)
+                    else:
+                        _, per_m2 = wavelet_modulus(fu, lattice, harmonics, sigma2, ell, los=True)
+                        for m2, u2 in enumerate(per_m2):
+                            out["S2m"][:, j1, j2, ell, m1, m2] = _moments(u2, qs)
     return out

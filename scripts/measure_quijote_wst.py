@@ -21,6 +21,9 @@ measured. Examples:
 
     # a single dyadic configuration
     python scripts/measure_quijote_wst.py --realizations 0-1499 --J 4 --L 4 --sigma0 0.8 --q 0.8
+
+    # line-of-sight-resolved moduli (S1m, S2m, ...; see wstfast.measure.measure_wst), written to {tag}_los
+    python scripts/measure_quijote_wst.py --superset --los-resolved --backend torch
 """
 
 from __future__ import annotations
@@ -76,6 +79,8 @@ def parse_args():
     parser.add_argument("--sigma0", type=float, nargs="+", default=[0.8], help="smallest wavelet width(s) in cells")
     parser.add_argument("--q", type=float, nargs="+", default=[0.8], help="exponents, all stored in each file")
     parser.add_argument("--kmax", type=float, default=0.4, help="largest k [h/Mpc] of the stored spectra")
+    parser.add_argument("--los-resolved", action="store_true",
+                        help="also measure the moduli of each |m| about the line of sight (z), into {tag}_los")
     parser.add_argument("--backend", choices=("numpy", "torch"), default="numpy",
                         help="torch runs painting and the WST on --device (e.g. a GPU)")
     parser.add_argument("--device", default="auto", help="torch device: auto, cpu or cuda")
@@ -116,7 +121,8 @@ def main():
     print(f"{len(realizations)} realizations to process (shard {index + 1}/{count})", flush=True)
     for realization in realizations:
         for space in args.spaces:
-            paths = {config: args.output_dir / config.tag(args.nmesh) / space / f"wst_r{realization:05d}.npz"
+            suffix = "_los" if args.los_resolved else ""
+            paths = {config: args.output_dir / (config.tag(args.nmesh) + suffix) / space / f"wst_r{realization:05d}.npz"
                      for config in configs}
             pending = {config: path for config, path in paths.items() if not path.exists()}
             for path in set(paths.values()) - set(pending.values()):
@@ -129,10 +135,11 @@ def main():
             spectra = spectra or multipoles(lattice, header["boxsize"], kmax=args.kmax)
             metadata = dict(realization=realization, space=space, los="z" if space == "rsd" else None,
                             redshift=round(header["redshift"], 6), boxsize=header["boxsize"], nmesh=args.nmesh,
-                            nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend)
+                            nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend,
+                            los_resolved=args.los_resolved)
             for config, path in pending.items():
                 config = WSTConfig(**{**config.to_dict(), "cellsize": header["boxsize"] / args.nmesh})
-                result = estimator(delta, config, qs=args.q, lattice=lattice, spectra=spectra)
+                result = estimator(delta, config, qs=args.q, lattice=lattice, spectra=spectra, los=args.los_resolved)
                 save_measurement(path, result, config, metadata)
                 print(f"wrote {path} ({time.time() - start:.0f} s)", flush=True)
 

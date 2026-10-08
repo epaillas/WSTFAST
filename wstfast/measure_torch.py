@@ -66,11 +66,18 @@ class TorchPowerMultipoles:
         return (out / self._nmodes * self.norm).cpu().numpy()
 
 
-def wavelet_modulus(fk, lattice: TorchLattice, sigma: float, ell: int) -> torch.Tensor:
-    """|field * psi_{sigma,l}| given the field's rfft (sigma in cells)."""
-    filtered = fk * (lattice.radial(sigma, ell) * lattice.harmonics(ell)) * (-1j) ** ell  # (2l+1, ...)
-    x = torch.fft.irfftn(filtered, s=(lattice.n,) * 3, dim=(-3, -2, -1))
-    return torch.sqrt((x * x).sum(dim=0))
+def wavelet_modulus(fk, lattice: TorchLattice, sigma: float, ell: int, los: bool = False):
+    """|field * psi_{sigma,l}| given the field's rfft (sigma in cells).
+
+    With ``los``, also return the line-of-sight-resolved moduli U_|m| (|m| = 0..l), as ``wstfast.measure``.
+    """
+    filtered = fk * (lattice.radial(sigma, ell) * lattice.harmonics(ell)) * (-1j) ** ell  # (2l+1, ...), m = -l..l
+    x2 = torch.fft.irfftn(filtered, s=(lattice.n,) * 3, dim=(-3, -2, -1)) ** 2
+    total = torch.sqrt(x2.sum(dim=0))
+    if not los:
+        return total
+    per_m = [torch.sqrt(x2[ell])] + [torch.sqrt(x2[ell + m] + x2[ell - m]) for m in range(1, ell + 1)]
+    return total, per_m
 
 
 def _moments(field, qs) -> np.ndarray:
@@ -79,42 +86,62 @@ def _moments(field, qs) -> np.ndarray:
 
 
 def measure_wst_torch(delta, config: WSTConfig, qs=None, lattice: TorchLattice | None = None,
-                      spectra: TorchPowerMultipoles | None = None) -> dict:
+                      spectra: TorchPowerMultipoles | None = None, los: bool = False) -> dict:
     """Same outputs as ``wstfast.measure.measure_wst``, computed on ``lattice.device``."""
     qs = np.atleast_1d(config.q if qs is None else qs).astype(float)
     nmesh = delta.shape[0]
     lattice = lattice or TorchLattice(nmesh)
     field = torch.as_tensor(np.asarray(delta, dtype=np.float32), device=lattice.device)
     fk = torch.fft.rfftn(field)
-    nq, nj = len(qs), config.J + 1
+    nq, nj, nl, nl2 = len(qs), config.J + 1, config.L + 1, config.lmax2 + 1
     out = {"q": qs, "S0": _moments(field, qs),
-           "S1": np.full((nq, nj, config.L + 1), np.nan),
-           "S2": np.full((nq, nj, nj, config.lmax2 + 1), np.nan)}
+           "S1": np.full((nq, nj, nl), np.nan),
+           "S2": np.full((nq, nj, nj, nl2), np.nan)}
+    if los:
+        out.update(S1m=np.full((nq, nj, nl, nl), np.nan), S2m=np.full((nq, nj, nj, nl2, nl2, nl2), np.nan))
     if spectra is not None:
         nell, nk = len(spectra.ells), spectra.nbins
         out.update(k=spectra.k, k_edges=spectra.edges, nmodes=spectra.nmodes, Pdd=spectra(fk, fk),
-                   PUd=np.full((nj, config.L + 1, nell, nk), np.nan), PUU=np.full((nj, config.L + 1, nell, nk), np.nan),
-                   Umean=np.full((nj, config.L + 1), np.nan))
+                   PUd=np.full((nj, nl, nell, nk), np.nan), PUU=np.full((nj, nl, nell, nk), np.nan),
+                   Umean=np.full((nj, nl), np.nan))
+        if los:
+            out.update(PUd_m=np.full((nj, nl, nl, nell, nk), np.nan), PUU_m=np.full((nj, nl, nl, nell, nk), np.nan),
+                       Umean_m=np.full((nj, nl, nl), np.nan))
     pairs = config.second_layer_pairs()
-    for ell in range(config.L + 1):
+    for ell in range(nl):
         for j1 in range(nj):
-            u1 = wavelet_modulus(fk, lattice, config.sigma0 * config.step**j1, ell)
-            out["S1"][:, j1, ell] = _moments(u1, qs)
+            sigma1 = config.sigma0 * config.step**j1
             second_layer = ell <= config.lmax2 and any(pair[0] == j1 for pair in pairs)
-            if spectra is None and not second_layer:
-                continue
-            mean = float(u1.to(torch.float64).mean())
-            fu = torch.fft.rfftn(u1 - mean)
-            if spectra is not None:
-                out["Umean"][j1, ell] = mean
-                out["PUd"][j1, ell] = spectra(fu, fk)
-                out["PUU"][j1, ell] = spectra(fu, fu)
-            if not second_layer:
-                continue
-            fu[0, 0, 0] = mean * nmesh**3  # restore the mean for the low-pass (l = 0) second layer
-            for _, j2 in (pair for pair in pairs if pair[0] == j1):
-                u2 = wavelet_modulus(fu, lattice, config.sigma0 * config.step**j2, ell)
-                out["S2"][:, j1, j2, ell] = _moments(u2, qs)
+            if los:
+                u1, per_m = wavelet_modulus(fk, lattice, sigma1, ell, los=True)
+                fields = [(None, u1)] + list(enumerate(per_m))
+            else:
+                fields = [(None, wavelet_modulus(fk, lattice, sigma1, ell))]
+            for m1, u in fields:
+                if m1 is None:
+                    out["S1"][:, j1, ell] = _moments(u, qs)
+                else:
+                    out["S1m"][:, j1, ell, m1] = _moments(u, qs)
+                if spectra is None and not second_layer:
+                    continue
+                mean = float(u.to(torch.float64).mean())
+                fu = torch.fft.rfftn(u - mean)
+                if spectra is not None:
+                    suffix, index = ("", (j1, ell)) if m1 is None else ("_m", (j1, ell, m1))
+                    out["Umean" + suffix][index] = mean
+                    out["PUd" + suffix][index] = spectra(fu, fk)
+                    out["PUU" + suffix][index] = spectra(fu, fu)
+                if not second_layer:
+                    continue
+                fu[0, 0, 0] = mean * nmesh**3  # restore the mean for the low-pass (l = 0) second layer
+                for _, j2 in (pair for pair in pairs if pair[0] == j1):
+                    sigma2 = config.sigma0 * config.step**j2
+                    if m1 is None:
+                        out["S2"][:, j1, j2, ell] = _moments(wavelet_modulus(fu, lattice, sigma2, ell), qs)
+                    else:
+                        _, per_m2 = wavelet_modulus(fu, lattice, sigma2, ell, los=True)
+                        for m2, u2 in enumerate(per_m2):
+                            out["S2m"][:, j1, j2, ell, m1, m2] = _moments(u2, qs)
     return out
 
 
