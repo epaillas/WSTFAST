@@ -41,6 +41,7 @@ evaluated per cosmology and emulated, like the real-space one.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from numpy.polynomial.legendre import leggauss
@@ -607,38 +608,57 @@ class APProjection:
     the window, and ``noise`` (ntarget,) for the shot noise); ``__call__(rows, qpar, qperp)`` interpolates each grid row
     at the true-frame (k', mu') of every mode (linear in ln k, exact in mu^2, as ``grid_interpolation``), applies the
     weights and divides by q_par q_perp^2. At q_par = q_perp = 1 it equals the fixed-matrix projections.
+
+    The true-frame coordinates of a mode depend only on (k_perp^2, k_par^2), which many lattice modes share (to the
+    bit: k and |mu| are computed from the same integers), so the modes are grouped and their weights summed: the
+    result is unchanged and the interpolation runs over ~10x fewer points. The evaluation is jitted.
     """
 
     def __init__(self, grid: RSDGrid, k, mu, weights, noise):
         self.logk = jnp.asarray(np.log(grid.k))
         self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2  # stochastic shape on the grid
-        self.nodes2 = jnp.asarray(grid.mu**2)
-        self.k, self.mu = jnp.asarray(k), jnp.asarray(mu)
-        self.weights, self.noise = jnp.asarray(weights), jnp.asarray(noise)
+        nodes = np.asarray(grid.mu, dtype="f8") ** 2
+        self.nodes2 = jnp.asarray(nodes)
+        self.denominators = jnp.asarray([np.prod([nodes[j] - nodes[m] for m in range(nodes.size) if m != j])
+                                         for j in range(nodes.size)])
+        coordinates, inverse = np.unique(np.column_stack([np.asarray(k, "f8"), np.asarray(mu, "f8")]), axis=0,
+                                         return_inverse=True)
+        grouped = np.zeros((np.shape(weights)[0], len(coordinates)))
+        np.add.at(grouped.T, inverse.ravel(), np.asarray(weights, "f8").T)
+        self.k, self.mu = jnp.asarray(coordinates[:, 0]), jnp.asarray(coordinates[:, 1])
+        self.weights, self.noise = jnp.asarray(grouped), jnp.asarray(noise)
+        self._evaluate = jax.jit(self._project)
+
+    def _lagrange(self, x):
+        """Lagrange weights (n, nnodes) at points x (n,) of the mu^2 nodes, as products of the other differences."""
+        diff = x[:, None] - self.nodes2[None, :]
+        ones = jnp.ones_like(diff[:, :1])
+        left = jnp.cumprod(jnp.concatenate([ones, diff[:, :-1]], axis=1), axis=1)
+        right = jnp.cumprod(jnp.concatenate([ones, diff[:, :0:-1]], axis=1), axis=1)[:, ::-1]
+        return left * right / self.denominators
 
     def interpolate(self, rows, qpar, qperp):
-        """Grid rows (R, nk, nmu) at the true-frame coordinates of the modes: (R, nmodes), and the volume factor."""
+        """Grid rows (R, nk, nmu) at the true-frame coordinates of the (grouped) modes: (R, nmodes), and the volume
+        factor."""
         from .ap import observed_to_true
 
         k, mu, volume = observed_to_true(self.k, self.mu, qpar, qperp)
         logk = jnp.clip(jnp.log(k), self.logk[0], self.logk[-1])
         i = jnp.clip(jnp.searchsorted(self.logk, logk) - 1, 0, self.logk.size - 2)
         t = (logk - self.logk[i]) / (self.logk[i + 1] - self.logk[i])
-        x = mu**2
-        nodes = self.nodes2
-        lagrange = jnp.ones((x.size, nodes.size))
-        for j in range(nodes.size):
-            for m in range(nodes.size):
-                if m != j:
-                    lagrange = lagrange.at[:, j].multiply((x - nodes[m]) / (nodes[j] - nodes[m]))
+        lagrange = self._lagrange(mu**2)
         rows = jnp.asarray(rows)
         lower = jnp.sum(rows[:, i, :] * lagrange[None], axis=-1)
         upper = jnp.sum(rows[:, i + 1, :] * lagrange[None], axis=-1)
         return (1 - t) * lower + t * upper, volume
 
-    def __call__(self, rows, qpar=1.0, qperp=1.0, shotnoise=0.0):
+    def _project(self, rows, qpar, qperp, shotnoise):
         values, volume = self.interpolate(rows, qpar, qperp)
-        return volume * (values @ self.weights.T + shotnoise * self.noise)
+        return volume * (values @ self.weights.T + jnp.asarray(shotnoise)[..., None] * self.noise)
+
+    def __call__(self, rows, qpar=1.0, qperp=1.0, shotnoise=0.0):
+        """(R, ntarget) for grid rows (R, nk, nmu); ``shotnoise`` is a scalar or one value per row (R,)."""
+        return self._evaluate(jnp.asarray(rows), qpar, qperp, jnp.asarray(shotnoise, dtype="f8"))
 
 
 def s1m_ap_projection(config: WSTConfig, coefficients, grid: RSDGrid, kmax: float = 0.27, boxsize: float = 1000.0,

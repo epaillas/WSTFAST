@@ -503,9 +503,9 @@ class S1mTheory(Calculator):
             variances = self.matrix @ grid.ravel() + noise * self.noise
             linear = self.matrix @ linear_grid.ravel() + linear_noise * self.noise
         else:  # the cumulants (Edgeworth numerators) are left without AP: ~1e-4 of S1m
-            qpar, qperp = self.ap.ratios(self.ap_params)
-            variances = self.projection(grid[None], qpar, qperp, noise * self.shotnoise)[0]
-            linear = self.projection(linear_grid[None], qpar, qperp, linear_noise * self.shotnoise)[0]
+            qpar, qperp = self.ap.ratios(self.ap_params)  # one interpolation for both grids
+            variances, linear = self.projection(jnp.stack([grid, linear_grid]), qpar, qperp,
+                                                jnp.stack([noise, linear_noise]) * self.shotnoise)
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude)
         return self.flattheory
