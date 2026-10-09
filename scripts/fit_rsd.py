@@ -14,6 +14,13 @@ applied at assembly, on top of the true-frame emulated basis (P(k) and S1m only)
 
 S21m = S2m / S1m (``--stats s21m``) needs an emulator trained with the S21 terms; it adds one noise amplitude
 noise_j{j1}_l{l}_m{m1} per first-layer field (``wstfast.theory.rsd_moduli``).
+
+Halos: an emulator trained with ``--tracer biased`` (``wstfast.theory.rsd_bias``) and the halo measurements; the
+tracer is read from the emulator. All statistics then share the Eulerian biases b1, b2, bG2, bGamma3 and the
+stochastic alpha0, alpha2 (``BiasParameters``); the shot noise V / N is the mean over the realizations:
+
+    python scripts/fit_rsd.py --stats pk s1m s21m --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \
+        --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5 --vary omega_cdm logA n_s h --volume 8 --output-dir ...
 """
 
 from __future__ import annotations
@@ -85,8 +92,10 @@ def load_correction(args, config, coefficients, settings):
     from cosmoprimo import Cosmology
 
     from wstfast.theory.rsd import cumulant_correction
+    from wstfast.theory.rsd_bias import biased_cumulant_correction
 
-    tag = "_".join(c.label for c in coefficients)
+    if settings.get("tracer", "matter") == "biased":
+        cumulant_correction = biased_cumulant_correction  # noqa: F811
     cache = args.emulator.with_suffix(f".correction_{args.cumulant_points}.npz")
     if cache.exists():
         stored = np.load(cache, allow_pickle=False)
@@ -116,6 +125,7 @@ def main():
     first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
     config = load_measurement(first, q=args.q)["config"]
     basis, settings = load_basis(args.emulator, args.vary)
+    tracer = settings.get("tracer", "matter")
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
     ap = APGeometry(basis, settings["z"]) if args.ap else None
@@ -134,7 +144,7 @@ def main():
         projection = s1m_ap_projection(config, coefficients, grid) if args.ap else S1mProjection(config, coefficients, grid)
         theories.append(S1mTheory(projection, coefficients, q=args.q, basis=basis, shotnoise=s1m.shotnoise,
                                   cumulant_index=[emulated.index(c.label) for c in coefficients],
-                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap))
+                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer))
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
@@ -162,7 +172,8 @@ def main():
         files = s21m.files
         theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=args.q,
                                    basis=basis, entry_index=entry_index,
-                                   cumulant_index=[emulated.index(c.label) for c in first_layer]))
+                                   cumulant_index=[emulated.index(c.label) for c in first_layer],
+                                   shotnoise=s21m.shotnoise, tracer=tracer))
         vectors.append(s21m.vectors)
         labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -172,7 +183,7 @@ def main():
                                    ells=(0, 2, 4))
         files = power.files
         projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
-        theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap))
+        theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer))
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
@@ -209,7 +220,8 @@ def main():
     summary = dict(bestfit=best, chi2=chi2, ndata=int(ndata), nvaried=len(varied), nrealizations=int(nreal),
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
-                   s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator))
+                   s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
+                   tracer=tracer, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"])
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
                                            std=float(np.asarray(samples.std(name))))
