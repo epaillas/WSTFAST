@@ -523,6 +523,7 @@ class S1mProjection:
                  window: str | None = "cic"):
         modes = lattice_modes(boxsize, nmesh, grid.k[-1], window)
         interp = grid_interpolation(grid, modes["k"], modes["mu"])
+        self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2  # stochastic shape on the grid
         theta = np.arccos(np.clip(modes["mu"], -1, 1))
         rows, shot, self.blocks = [], [], []
         for index, c in enumerate(coefficients):
@@ -547,6 +548,7 @@ class MultipoleProjection:
 
         modes = lattice_modes(boxsize, nmesh, edges[-1], window)
         interp = grid_interpolation(grid, modes["k"], modes["mu"])
+        self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2  # stochastic shape on the grid
         index = np.digitize(modes["k"], edges) - 1
         inside = (index >= 0) & (index < len(edges) - 1)
         nbins = len(edges) - 1
@@ -592,6 +594,7 @@ class APProjection:
 
     def __init__(self, grid: RSDGrid, k, mu, weights, noise):
         self.logk = jnp.asarray(np.log(grid.k))
+        self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2  # stochastic shape on the grid
         self.nodes2 = jnp.asarray(grid.mu**2)
         self.k, self.mu = jnp.asarray(k), jnp.asarray(mu)
         self.weights, self.noise = jnp.asarray(weights), jnp.asarray(noise)
