@@ -65,7 +65,10 @@ def parse_args():
     parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE")
     parser.add_argument("--cumulant-points", type=int, default=2**20,
                         help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
-    parser.add_argument("--ng-amplitude", action="store_true", help="free amplitude a_ng of the S1m Edgeworth correction")
+    parser.add_argument("--ng-amplitude", nargs="?", const="constant", default=None,
+                        choices=("constant", "slope", "per-scale"),
+                        help="free amplitude of the S1m Edgeworth correction: one a_ng (default when given without a "
+                             "value), a_ng + b_ng [(25 / sigma)^2 - 1], or one a_ng_j per scale")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
@@ -144,7 +147,8 @@ def main():
         projection = s1m_ap_projection(config, coefficients, grid) if args.ap else S1mProjection(config, coefficients, grid)
         theories.append(S1mTheory(projection, coefficients, q=args.q, basis=basis, shotnoise=s1m.shotnoise,
                                   cumulant_index=[emulated.index(c.label) for c in coefficients],
-                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer))
+                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
+                                  sigmas=[config.sigma(c.j) for c in coefficients]))
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata

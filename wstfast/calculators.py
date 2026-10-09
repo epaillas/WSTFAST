@@ -452,23 +452,35 @@ class S1mTheory(Calculator):
 
     Counterterms ``c0``, ``c2``, ``c4`` [(Mpc/h)^2] of the block variances (separate from the P(k) ones).
     ``correction`` = (kappa ratio, skewness^2 ratio) from ``wstfast.theory.rsd.cumulant_correction`` corrects the
-    sampling error of the basis cumulants; with ``ng_amplitude``, a free factor ``a_ng`` scales the Edgeworth
-    correction of every block (the damped tree cumulants overshoot it by ~7% at sigma = 25 Mpc/h).
+    sampling error of the basis cumulants. ``ng_amplitude`` frees the amplitude of the Edgeworth correction (the
+    damped tree cumulants overshoot it by ~7% at sigma = 25 Mpc/h, less at larger scales):
+
+    - ``"constant"`` (or True): one factor ``a_ng`` for every block;
+    - ``"slope"``: a(sigma) = a_ng + b_ng [(NG_PIVOT / sigma)^2 - 1], so ``a_ng`` is the amplitude at the pivot;
+    - ``"per-scale"``: one factor ``a_ng_j{j}`` per filter scale.
+
+    The last two need ``sigmas``, the filter scale of each coefficient.
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                 cumulant_index=None, correction=None, ng_amplitude: bool = False, ap=None, tracer: str = "matter"):
+                 cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
+                 sigmas=None):
         self.basis = basis
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
-        self.a_ng = (Parameter("a_ng", value=1.0, prior=dict(limits=[0.5, 1.5]), ref=dict(dist="norm", loc=1.0, scale=0.02),
-                               latex=r"a_{\rm NG}") if ng_amplitude else None)
+        self.ng_params = _ng_amplitudes(ng_amplitude, coefficients)
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                      cumulant_index=None, correction=None, ng_amplitude: bool = False, ap=None, tracer: str = "matter"):
+                      cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
+                      sigmas=None):
         self.projection, self.shotnoise = projection, float(shotnoise)
+        self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
+        if self.ng_mode in ("slope", "per-scale") and sigmas is None:
+            raise ValueError(f"ng_amplitude={ng_amplitude!r} needs the filter scales (sigmas)")
+        self.ng_slope = None if sigmas is None else (NG_PIVOT / np.asarray(sigmas, dtype=float)) ** 2 - 1
+        self.ng_names = [f"a_ng_j{c.j}" for c in coefficients]
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         if ap is None:
             self.matrix = jnp.asarray(projection.matrix)
@@ -483,7 +495,7 @@ class S1mTheory(Calculator):
     def __call__(self):
         from .theory.rsd import s1m_from_variances
 
-        amplitude = 1.0 if self.a_ng is None else self.a_ng.value
+        amplitude = self.ng_amplitude()
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
         if not self.bias_params:
             rows, kappa, skewness2 = rsd_rows(self.basis)
@@ -509,6 +521,16 @@ class S1mTheory(Calculator):
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude)
         return self.flattheory
+
+    def ng_amplitude(self):
+        """Edgeworth amplitude of each coefficient (a scalar for "constant")."""
+        if not self.ng_mode:
+            return 1.0
+        if self.ng_mode == "constant":
+            return self.ng_params["a_ng"].value
+        if self.ng_mode == "slope":
+            return self.ng_params["a_ng"].value + self.ng_params["b_ng"].value * self.ng_slope
+        return jnp.stack([self.ng_params[name].value for name in self.ng_names])
 
     def tree_flatten(self):
         return [self.flattheory], None
@@ -606,6 +628,30 @@ class S21mTheory(Calculator):
         obj = object.__new__(cls)
         obj.flattheory = children[0]
         return obj
+
+
+#: Pivot scale [Mpc/h] of the "slope" Edgeworth amplitude (the smallest S1m scale of the baseline fits).
+NG_PIVOT = 25.0
+
+
+def _ng_amplitudes(mode, coefficients) -> dict:
+    """Free Edgeworth amplitudes of S1mTheory (see its docstring)."""
+    def amplitude(name, latex):
+        return Parameter(name, value=1.0, prior=dict(limits=[0.5, 1.5]), ref=dict(dist="norm", loc=1.0, scale=0.02),
+                         latex=latex)
+
+    if not mode:
+        return {}
+    if mode in (True, "constant"):
+        return {"a_ng": amplitude("a_ng", r"a_{\rm NG}")}
+    if mode == "slope":
+        slope = Parameter("b_ng", value=0.0, prior=dict(limits=[-1.0, 1.0]), ref=dict(dist="norm", loc=0.0, scale=0.02),
+                          latex=r"b_{\rm NG}")
+        return {"a_ng": amplitude("a_ng", r"a_{\rm NG}"), "b_ng": slope}
+    if mode == "per-scale":
+        return {f"a_ng_j{j}": amplitude(f"a_ng_j{j}", rf"a_{{\rm NG}}^{{({j})}}")
+                for j in sorted({c.j for c in coefficients})}
+    raise ValueError(f"unknown ng_amplitude {mode!r}")
 
 
 class JointTheory(Calculator):

@@ -324,7 +324,9 @@ class RSDS1Basis:
 def s1m_from_variances(variances, linear, kappa_diag, skewness2, ells, q, edgeworth_amplitude=1.0):
     """S1m of every block from its full variance ``variances`` and linear variance ``linear`` (flat over blocks,
     in the order coefficient-major, |m| = 0..l), the block cumulants ``kappa_diag`` (ncoef, L + 1) and the m = 0
-    skewness ``skewness2`` (ncoef,); see ``s1m_rsd``."""
+    skewness ``skewness2`` (ncoef,); see ``s1m_rsd``. ``edgeworth_amplitude`` scales the Edgeworth correction: a
+    scalar, or one value per coefficient."""
+    amplitudes = jnp.broadcast_to(jnp.asarray(edgeworth_amplitude, dtype=float), (len(ells),))
     out, start = [], 0
     for index, ell in enumerate(ells):
         nb = ell + 1
@@ -332,7 +334,7 @@ def s1m_from_variances(variances, linear, kappa_diag, skewness2, ells, q, edgewo
         n = np.asarray(multiplicity(ell))
         gamma = np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
         e = block_edgeworth(lin, kappa_diag[index, :nb], skewness2[index], ell, q)
-        out.append((2 * lam) ** (q / 2) * gamma * (1 + edgeworth_amplitude * e))
+        out.append((2 * lam) ** (q / 2) * gamma * (1 + amplitudes[index] * e))
         start += nb
     return jnp.concatenate(out)
 

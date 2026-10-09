@@ -247,3 +247,22 @@ def test_block_pair_kernels_sum_to_isotropic_kernel():
         np.testing.assert_allclose(blocks, np.asarray(legendre(ell, cos)), atol=1e-12)
     entries = s21m_entries([Coefficient("S21", 2, 5, 9), Coefficient("S21", 1, 6, 9)])
     assert len(entries) == 9 + 4 and entries[0] == (0, 0, 0) and entries[-1] == (1, 1, 1)
+
+
+def test_s1m_edgeworth_amplitude_per_coefficient():
+    from wstfast.theory.rsd import s1m_from_variances
+
+    ells, q = [0, 2, 1], 0.8
+    nblocks = sum(ell + 1 for ell in ells)
+    rng = np.random.default_rng(3)
+    variances = 1.0 + rng.random(nblocks)
+    linear = 0.9 * variances
+    kappa = 0.05 * rng.random((len(ells), 3))
+    skewness2 = 0.01 * rng.random(len(ells))
+    scalar = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=0.9)
+    uniform = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=[0.9] * 3)
+    np.testing.assert_allclose(uniform, scalar, rtol=1e-14)
+    gaussian = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=0.0)
+    mixed = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=[0.9, 0.0, 0.9])
+    np.testing.assert_allclose(mixed[1:4], gaussian[1:4], rtol=1e-14)  # the l = 2 blocks
+    np.testing.assert_allclose(mixed[:1], scalar[:1], rtol=1e-14)
