@@ -29,8 +29,8 @@ import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, setup_logging
 from desilike.emulators import Emulator, Space
 from wstfast.calculators import (JointTheory, PowerBasis, PowerTheory, RSDBasis, RSDPowerTheory, S1mTheory,
-                                 WSTBasis, build_cosmology)
-from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
+                                 S21mTheory, WSTBasis, build_cosmology)
+from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
 from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset
 from wstfast.theory import Assembly, all_coefficients
 from wstfast.theory.power import ORDERS, LatticeBinning, default_knodes
@@ -97,20 +97,29 @@ def train_power(args):
 
 
 def train_rsd(args):
-    """Emulate RSDBasis (redshift-space P_s grid + S1m cumulants of every S1 coefficient with sigma >= --s1-min-scale);
-    validate the S1m blocks and the multipoles (counterterms at zero) against the exact basis at random points."""
+    """Emulate RSDBasis (redshift-space P_s grid + S1m cumulants of every S1 coefficient with sigma >= --s1-min-scale +
+    S21m terms of the S21 coefficients of the --s21-* cuts, unless --no-s21); validate the S1m blocks, the multipoles
+    (counterterms at zero) and S21m (noise amplitudes at zero) against the exact basis at random points."""
     from wstfast.theory.rsd import MultipoleProjection, RSDGrid, S1mProjection
 
     first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
     measurement = load_measurement(first, q=0.8 if args.q is None else args.q)
     config, meta = measurement["config"], measurement["metadata"]
     coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale) if c.kind == "S1"]
+    s21 = [] if args.no_s21 else [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
+                                                                   s21_min_ratio=args.s21_min_ratio,
+                                                                   s21_min_scale2=args.s21_min_scale2)
+                                   if c.kind == "S21"]
+    first_layer = [Coefficient("S1", ell, j) for j, ell in sorted({(c.j, c.ell) for c in s21})]
+    missing = [c.label for c in first_layer if c not in coefficients]
+    if missing:
+        raise SystemExit(f"--s1-min-scale must include the first-layer coefficients {missing}")
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
-                    s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
+                    s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds)
     basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
-                     kmax=args.kmax, ir=args.ir)
+                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -124,17 +133,26 @@ def train_rsd(args):
     grid = RSDGrid(kmax=args.kmax)  # the same grid as the basis
     projections = dict(s1m=S1mProjection(config, coefficients, grid), pk=MultipoleProjection(power.edges, grid))
     # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles.
-    graphs = {name: build(JointTheory([S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b,
-                                                 shotnoise=s1m.shotnoise),
-                                       RSDPowerTheory(projections["pk"], basis=b, shotnoise=power.shotnoise)]))
-              for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
+    def theories(b):
+        out = [S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b, shotnoise=s1m.shotnoise),
+               RSDPowerTheory(projections["pk"], basis=b, shotnoise=power.shotnoise)]
+        if s21:
+            out.append(S21mTheory(S1mProjection(config, first_layer, grid), s21, first_layer, q=config.q, basis=b,
+                                  cumulant_index=[coefficients.index(c) for c in first_layer]))
+        return out
+
+    graphs = {name: build(JointTheory(theories(b))) for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
     nblock = projections["s1m"].matrix.shape[0]
+    npk = projections["pk"].matrix.shape[0]
+    slices = {"s1m": slice(0, nblock), "pk": slice(nblock, nblock + npk)}
+    if s21:
+        slices["s21m"] = slice(nblock + npk, None)
     rng = np.random.default_rng(0)
-    errors = {"s1m": [], "pk": []}
+    errors = {stat: [] for stat in slices}
     for _ in range(args.nvalidation):
         point = {name: float(rng.uniform(*bounds[name])) for name in args.vary}
         exact, approx = (np.asarray(graphs[kind](point)) for kind in ("exact", "emulated"))
-        for stat, sl in (("s1m", slice(0, nblock)), ("pk", slice(nblock, None))):
+        for stat, sl in slices.items():
             errors[stat].append(np.max(np.abs(approx[sl] / exact[sl] - 1)))
     report = dict(npoints=args.nvalidation, order=args.order, accuracy=args.accuracy, budget=args.budget,
                   max_relative_error={k: float(np.max(v)) for k, v in errors.items()},
@@ -149,6 +167,10 @@ def main():
                         help="rsd: redshift-space P_s grid + S1m cumulants (data from the _los measurements)")
     parser.add_argument("--s1-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j of the S1m cumulants")
     parser.add_argument("--ir", action="store_true", help="rsd: BAO infrared resummation of the P_s grid")
+    parser.add_argument("--no-s21", action="store_true", help="rsd: leave out the S21m terms")
+    parser.add_argument("--s21-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j1 of the S21m terms")
+    parser.add_argument("--s21-min-scale2", type=float, default=70.0, help="rsd: smallest sigma_j2 of the S21m terms")
+    parser.add_argument("--s21-min-ratio", type=float, default=2.8, help="rsd: smallest sigma_j2 / sigma_j1 of S21m")
     parser.add_argument("--data-dir", type=Path, default=Path("data/quijote/fiducial/z0.5/J4_L4_sigma0.8_n256"))
     parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")
     parser.add_argument("--q", type=float, default=None, help="WST exponent (default: the measurement's first q)")

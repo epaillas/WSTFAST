@@ -187,3 +187,24 @@ def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=N
     metadata = {key: measurements[0]["metadata"][key] for key in keys}
     return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
                       metadata=metadata, files=[str(path) for path in files])
+
+
+def load_s21m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
+    """Line-of-sight-resolved S21m = S2m(j1, j2, l, |m1|, |m2|) / S1m(j1, l, |m1|) of the S21 ``coefficients``
+    (coefficient-major, then |m1|, then |m2|; ``wstfast.theory.rsd_moduli.s21m_entries``)."""
+    from .theory.rsd_moduli import s21m_entries
+
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    measurements = [load_measurement(path, q=q) for path in files]
+    if "S2m" not in measurements[0]:
+        raise ValueError(f"{files[0]} has no line-of-sight-resolved coefficients (measure with --los-resolved)")
+    entries = s21m_entries(coefficients)
+    vectors = np.array([[m["S2m"][coefficients[i].j, coefficients[i].j2, coefficients[i].ell, m1, m2]
+                         / m["S1m"][coefficients[i].j, coefficients[i].ell, m1] for i, m1, m2 in entries]
+                        for m in measurements])
+    keys = ("redshift", "boxsize", "nmesh", "nparticles", "space")
+    metadata = {key: measurements[0]["metadata"][key] for key in keys}
+    return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
+                      metadata=metadata, files=[str(path) for path in files])

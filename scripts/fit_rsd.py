@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Redshift-space fits of Quijote matter: P(k) multipoles, line-of-sight-resolved S1m, or both (desilike, MH).
+"""Redshift-space fits of Quijote matter: P(k) multipoles, line-of-sight-resolved S1m and S21m (desilike, MH).
 
 Both statistics come from the same line-of-sight-resolved files, so the joint covariance (with cross terms)
 is the sample covariance of the concatenated vectors [S1m blocks, P_0, P_2, P_4]. They share one emulated
@@ -10,7 +10,10 @@ c0_pk, c2_pk, c4_pk for P(k)). Example (4 parameters, omega_b fixed, errors of a
         --emulator outputs/emulators/rsd_basis_taylor_4p.h5 --output-dir outputs/inference/rsd/joint_V60
 
 With ``--ap``, the Alcock-Paczynski distortions of the trial cosmology (relative to the Quijote fiducial) are
-applied at assembly, on top of the true-frame emulated basis.
+applied at assembly, on top of the true-frame emulated basis (P(k) and S1m only).
+
+S21m = S2m / S1m (``--stats s21m``) needs an emulator trained with the S21 terms; it adds one noise amplitude
+noise_j{j1}_l{l}_m{m1} per first-layer field (``wstfast.theory.rsd_moduli``).
 """
 
 from __future__ import annotations
@@ -24,9 +27,9 @@ import numpy as np
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
-from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, WSTLikelihood
-from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
-from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset, sample_covariance
+from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood
+from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
+from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset, load_s21m_dataset, sample_covariance
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh)
 from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
@@ -37,10 +40,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data-dir", type=Path,
                         default=Path("data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"))
-    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m"), default=["pk", "s1m"])
+    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m"), default=["pk", "s1m"])
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--s1-min-scale", type=float, default=25.0, help="smallest sigma_j [Mpc/h] of S1m")
     parser.add_argument("--s1-ells", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    parser.add_argument("--s21-min-scale", type=float, default=17.6, help="smallest sigma_j1 [Mpc/h] of S21m")
+    parser.add_argument("--s21-min-scale2", type=float, default=70.0, help="smallest sigma_j2 [Mpc/h] of S21m")
+    parser.add_argument("--s21-min-ratio", type=float, default=2.8, help="smallest sigma_j2 / sigma_j1 of S21m")
     parser.add_argument("--kmin", type=float, default=0.0)
     parser.add_argument("--kmax", type=float, default=0.12)
     parser.add_argument("--rebin", type=int, default=2, help="P(k) bins of rebin x k_f")
@@ -132,6 +138,35 @@ def main():
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
+    if "s21m" in args.stats:
+        from wstfast.theory.rsd_moduli import s21m_entries
+
+        if args.ap:
+            raise SystemExit("--ap is not implemented for s21m")
+        coefficients = [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
+                                                       s21_min_ratio=args.s21_min_ratio,
+                                                       s21_min_scale2=args.s21_min_scale2) if c.kind == "S21"]
+        emulated21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
+                      if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
+        emulated21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
+        missing = [c.label for c in coefficients if c not in emulated21]
+        if missing:
+            raise ValueError(f"the emulator has no S21m terms for {missing}")
+        first_layer = [Coefficient("S1", ell, j) for j, ell in sorted({(c.j, c.ell) for c in coefficients})]
+        missing = [c.label for c in first_layer if c.label not in emulated]
+        if missing:
+            raise ValueError(f"the emulator has no cumulants for the first-layer {missing}")
+        basis_entries = {(emulated21[i].label, m1, m2): n for n, (i, m1, m2) in enumerate(s21m_entries(emulated21))}
+        entry_index = [basis_entries[coefficients[i].label, m1, m2] for i, m1, m2 in s21m_entries(coefficients)]
+        s21m = load_s21m_dataset(args.data_dir, "rsd", coefficients, q=args.q, files=files)
+        files = s21m.files
+        theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=args.q,
+                                   basis=basis, entry_index=entry_index,
+                                   cumulant_index=[emulated.index(c.label) for c in first_layer]))
+        vectors.append(s21m.vectors)
+        labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
+                   for i, m1, m2 in s21m_entries(coefficients)]
+        meta = s21m.metadata
     if "pk" in args.stats:
         power = load_power_dataset(args.data_dir, "rsd", kmin=args.kmin, kmax=args.kmax, rebin=args.rebin, files=files,
                                    ells=(0, 2, 4))
@@ -173,7 +208,8 @@ def main():
     chi2 = float(residual @ np.linalg.solve(covariance, residual))
     summary = dict(bestfit=best, chi2=chi2, ndata=int(ndata), nvaried=len(varied), nrealizations=int(nreal),
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
-                   kmax=args.kmax, ap=args.ap, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator))
+                   kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
+                   s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator))
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
                                            std=float(np.asarray(samples.std(name))))

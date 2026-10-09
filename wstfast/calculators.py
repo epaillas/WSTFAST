@@ -214,27 +214,34 @@ class RSDBasis(Calculator):
     """Cosmology-dependent redshift-space pieces shared by the P(k) multipoles and the S1m blocks.
 
     Outputs ``grid_terms`` (5, nk, nmu): GRID_TERMS of ``wstfast.theory.rsd.RSDGrid``; ``kappa`` (ncoef, L + 1) and
-    ``skewness2`` (ncoef,): the velocity-damped tree cumulants of the S1m blocks of ``coefficients``; and ``dlogA``.
+    ``skewness2`` (ncoef,): the velocity-damped tree cumulants of the S1m blocks of ``coefficients``; ``s21m_terms``
+    (nentry, 2): the S21M_TERMS of every S21m entry of ``s21_coefficients`` (``wstfast.theory.rsd_moduli``); and
+    ``dlogA``.
     With ``ir``, the grid is BAO IR-resummed (``wstfast.theory.rsd.RSDGrid``).
-    Rows are rescaled by powers of A_s / POWER_AMPLITUDE (Kaiser and counterterms 1, loop 2, kappa 3, skewness^2 4)
+    Rows are rescaled by powers of A_s / POWER_AMPLITUDE (Kaiser and counterterms 1, loop 2, kappa 3, skewness^2 4,
+    S21m response 1, noise 0)
     so that a Taylor emulator is nearly exact in logA (the damping breaks this slightly). NumPy (pure_callback).
     """
 
     _is_external = True
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
-                 damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False):
+                 damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
+                 s21_coefficients=()):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
-                      damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False):
+                      damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
+                      s21_coefficients=()):
         from .theory.rsd import RSDGrid, RSDS1Basis
+        from .theory.rsd_moduli import RSDS21mBasis
 
         self.z = float(z)
         self.grid = RSDGrid(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         self.cumulant_model = (RSDS1Basis(config, self.coefficients, damping=damping, npoints=npoints, lattice=False)
                                if self.coefficients else None)
+        self.s21_model = RSDS21mBasis(config, list(s21_coefficients)) if len(s21_coefficients) else None
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_m", "z": self.z, "k": self.klin}],
                                      "fourier.sigma8_z": [{"of": "delta_cb", "z": self.z}, {"of": "theta_cb", "z": self.z}],
@@ -253,16 +260,20 @@ class RSDBasis(Calculator):
         else:
             kappa, skewness2 = np.zeros((0, 1)), np.zeros(0)
         self.kappa, self.skewness2 = kappa / ratio**3, skewness2 / ratio**4
+        s21m = self.s21_model(self.klin, pk, f) if self.s21_model is not None else np.zeros((0, 2))
+        self.s21m_terms = s21m / np.array([ratio, 1.0])
         self.dlogA = np.log(ratio)
         return self
 
     def tree_flatten(self):
-        return [self.grid_terms, self.kappa, self.skewness2, self.dlogA], None
+        return [self.grid_terms, self.kappa, self.skewness2, self.s21m_terms, self.dlogA], None
 
     @classmethod
     def tree_unflatten(cls, aux, children):
         obj = object.__new__(cls)
-        obj.grid_terms, obj.kappa, obj.skewness2, obj.dlogA = children
+        if len(children) == 4:  # emulators trained before the S21m terms existed
+            children = [*children[:3], jnp.zeros((0, 2)), children[3]]
+        obj.grid_terms, obj.kappa, obj.skewness2, obj.s21m_terms, obj.dlogA = children
         return obj
 
 
@@ -271,6 +282,11 @@ def rsd_rows(basis):
     a = jnp.exp(basis.dlogA)
     scale = jnp.stack([a, a**2, a, a, a])[:, None, None]
     return basis.grid_terms * scale, basis.kappa * a**3, basis.skewness2 * a**4
+
+
+def s21m_rows(basis):
+    """S21m terms (nentry, 2) at the basis's amplitude, from a (possibly emulated) RSDBasis output."""
+    return basis.s21m_terms * jnp.stack([jnp.exp(basis.dlogA), 1.0])
 
 
 def _rsd_counterterms(prefix, latex):
@@ -383,6 +399,75 @@ class S1mTheory(Calculator):
             linear = self.projection(rows[0][None], qpar, qperp, 0.0)[0]
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude)
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
+class S21mTheory(Calculator):
+    """Line-of-sight-resolved S21m = S2m / S1m of the selected S21 coefficients (every |m1|, |m2|), from the shared
+    RSDBasis (``wstfast.theory.rsd_moduli``).
+
+    Nuisance parameters: one noise amplitude ``noise_j{j1}_l{l}_m{m1}`` per first-layer field (its Gaussian noise is
+    (1 + noise) times the tree value). The one-point factor (1 + E_1(1))^q / (1 + E_1(q)) uses the linear block
+    variances (``projection``: an ``S1mProjection`` of the first-layer S1 coefficients ``first_layer``) and the basis
+    cumulants of those coefficients (rows ``cumulant_index``). ``entry_index`` selects the entries of the basis.
+    """
+
+    def __init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
+                 cumulant_index=None):
+        from .theory.rsd_moduli import first_layer_fields
+
+        self.basis = basis
+        self.noise = {key: Parameter(f"noise_j{key[0]}_l{key[1]}_m{key[2]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
+                                     ref=dict(dist="norm", loc=0.0, scale=0.05),
+                                     latex=rf"a_{{N,{key[0]},{key[1]},{key[2]}}}")
+                      for key in first_layer_fields(coefficients)}
+
+    def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
+                      cumulant_index=None):
+        from .theory.rsd_moduli import first_layer_fields, s21m_entries
+
+        self.q = float(q)
+        entries = s21m_entries(coefficients)
+        self.entry_index = np.arange(len(entries)) if entry_index is None else np.asarray(entry_index)
+        self.keys = first_layer_fields(coefficients)
+        self.field_index = np.array([self.keys.index((coefficients[i].j, coefficients[i].ell, m1))
+                                     for i, m1, _ in entries], dtype=int)
+        self.n1 = np.array([1.0 if m1 == 0 else 2.0 for _, m1, _ in entries])
+        self.n2 = np.array([1.0 if m2 == 0 else 2.0 for _, _, m2 in entries])
+        # First-layer blocks: position of each entry's (j1, l, |m1|) block in the projection's flat block list.
+        offsets = np.cumsum([0] + [c.ell + 1 for c in first_layer])
+        position = {(c.j, c.ell): offsets[i] for i, c in enumerate(first_layer)}
+        self.block_index = np.array([position[coefficients[i].j, coefficients[i].ell] + m1 for i, m1, _ in entries])
+        self.first_ells = [c.ell for c in first_layer]
+        self.matrix = jnp.asarray(projection.matrix)
+        self.cumulant_index = np.arange(len(first_layer)) if cumulant_index is None else np.asarray(cumulant_index)
+
+    def __call__(self):
+        from .theory.rsd import block_edgeworth
+        from .theory.rsd_moduli import s21m_from_terms
+
+        rows, kappa, skewness2 = rsd_rows(self.basis)
+        linear = self.matrix @ rows[0].ravel()
+        kappa, skewness2 = kappa[self.cumulant_index], skewness2[self.cumulant_index]
+        e_q, e_1, start = [], [], 0
+        for index, ell in enumerate(self.first_ells):
+            lin = linear[start:start + ell + 1]
+            e_q.append(block_edgeworth(lin, kappa[index, :ell + 1], skewness2[index], ell, self.q))
+            e_1.append(block_edgeworth(lin, kappa[index, :ell + 1], skewness2[index], ell, 1.0))
+            start += ell + 1
+        e_q, e_1 = jnp.concatenate(e_q)[self.block_index], jnp.concatenate(e_1)[self.block_index]
+        amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
+        terms = s21m_rows(self.basis)[self.entry_index]
+        self.flattheory = s21m_from_terms(terms, amplitudes, self.n1, self.n2, self.q, e_q, e_1)
         return self.flattheory
 
     def tree_flatten(self):

@@ -231,3 +231,19 @@ def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
     k, mu, volume = observed_to_true(ap.k, ap.mu, 1.03, 0.98)
     exact = volume * (np.asarray(ap.weights) @ model(np.asarray(k), np.asarray(mu)))
     np.testing.assert_allclose(ap(rows, 1.03, 0.98)[0], exact, rtol=1e-3, atol=1e-4)
+
+
+def test_block_pair_kernels_sum_to_isotropic_kernel():
+    from wstfast.theory.moduli import legendre
+    from wstfast.theory.rsd_moduli import _harmonic, s21m_entries
+    from wstfast.config import Coefficient
+
+    rng = np.random.default_rng(3)
+    p, q = rng.normal(size=(50, 3)), rng.normal(size=(50, 3))
+    cos = np.sum(p * q, axis=1) / np.linalg.norm(p, axis=1) / np.linalg.norm(q, axis=1)
+    for ell in (1, 2, 3, 4):
+        blocks = sum(4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
+                     * np.real(_harmonic(ell, m, p) * np.conj(_harmonic(ell, m, q))) for m in range(ell + 1))
+        np.testing.assert_allclose(blocks, np.asarray(legendre(ell, cos)), atol=1e-12)
+    entries = s21m_entries([Coefficient("S21", 2, 5, 9), Coefficient("S21", 1, 6, 9)])
+    assert len(entries) == 9 + 4 and entries[0] == (0, 0, 0) and entries[-1] == (1, 1, 1)

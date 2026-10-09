@@ -330,12 +330,20 @@ def s1m_from_variances(variances, linear, kappa_diag, skewness2, ells, q, edgewo
         lam, lin = variances[start:start + nb], linear[start:start + nb]
         n = np.asarray(multiplicity(ell))
         gamma = np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
-        e = q * (q - 2) * (kappa_diag[index, :nb] / lin**2) / (8 * n * (n + 2))
-        if ell % 2 == 0:
-            e = e.at[0].add(q * (q - 2) * (q - 4) * skewness2[index] / lin[0] ** 3 / (72 * 15))
+        e = block_edgeworth(lin, kappa_diag[index, :nb], skewness2[index], ell, q)
         out.append((2 * lam) ** (q / 2) * gamma * (1 + edgeworth_amplitude * e))
         start += nb
     return jnp.concatenate(out)
+
+
+def block_edgeworth(linear, kappa_diag, skewness2, ell, q):
+    """NLO Edgeworth factor E_M(q) of E|X_M|^q for the |m| blocks of one coefficient (``s1m_rsd``), from the linear
+    block variances, sum_{a,b in M} kappa_aabb and the m = 0 skewness^2 (used for even l)."""
+    n = np.asarray(multiplicity(ell))
+    e = q * (q - 2) * (kappa_diag / linear**2) / (8 * n * (n + 2))
+    if ell % 2 == 0:
+        e = jnp.asarray(e).at[0].add(q * (q - 2) * (q - 4) * skewness2 / linear[0] ** 3 / (72 * 15))
+    return e
 
 
 def s1m_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_edgeworth=True,

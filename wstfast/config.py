@@ -94,16 +94,19 @@ class Coefficient:
 
 
 def select_coefficients(config: WSTConfig, s1_min_scale: float = 25.0, s1_ells=(0, 1, 2, 3, 4),
-                        s21_min_scale: float = 12.5, s21_ells=(1, 2, 3, 4), s21_min_ratio: float = 2.8):
+                        s21_min_scale: float = 12.5, s21_ells=(1, 2, 3, 4), s21_min_ratio: float = 2.8,
+                        s21_min_scale2: float = 0.0):
     """Coefficients inside the perturbative regime (scales in Mpc/h, see docs/wst_eft_feasibility.md).
 
     ``s21_min_ratio`` is the smallest sigma_j2 / sigma_j1 kept in the second layer. The default 2.8 drops
     adjacent pairs (sigma_j2 = 2 sigma_j1), whose second-layer non-Gaussianity is not perturbative at
-    sigma_j1 ~ 12.5 Mpc/h: tree level overshoots the N-body value by ~2x.
+    sigma_j1 ~ 12.5 Mpc/h: tree level overshoots the N-body value by ~2x. ``s21_min_scale2`` is the smallest
+    sigma_j2 (in redshift space, 70 Mpc/h with sigma_j1 >= 17.7 Mpc/h; see ``wstfast.theory.rsd_moduli``).
     """
     out = [Coefficient("S1", ell, j) for ell in s1_ells if ell <= config.L for j in range(config.J + 1)
            if config.sigma(j) >= s1_min_scale - 1e-6]
     out += [Coefficient("S21", ell, j1, j2) for ell in s21_ells if ell <= config.lmax2
             for j1, j2 in config.second_layer_pairs()
-            if config.sigma(j1) >= s21_min_scale - 1e-6 and config.sigma(j2) / config.sigma(j1) >= s21_min_ratio - 1e-6]
+            if config.sigma(j1) >= s21_min_scale - 1e-6 and config.sigma(j2) / config.sigma(j1) >= s21_min_ratio - 1e-6
+            and config.sigma(j2) >= s21_min_scale2 - 1e-6]
     return out
