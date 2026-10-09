@@ -187,7 +187,8 @@ class RSDS1Basis:
 
     def __init__(self, config: WSTConfig, coefficients, shotnoise: float = 0.0, window: str | None = "cic",
                  boxsize: float = 1000.0, nmesh: int = 256, kmax: float = 0.3, nk: int = 48, nmu: int = 12,
-                 npoints: int = 2**16, quadrature: Quadrature = Quadrature(), damping: str | float | None = None):
+                 npoints: int = 2**16, quadrature: Quadrature = Quadrature(), damping: str | float | None = None,
+                 lattice: bool = True):
         self.config, self.coefficients = config, list(coefficients)
         #: Velocity damping of the cumulant legs, exp(-(f k mu sigma_v)^2 / 2): None, "linear" (sigma_v^2 =
         #: int P_L dk / (6 pi^2)) or a fixed sigma_v [Mpc/h].
@@ -200,7 +201,8 @@ class RSDS1Basis:
         self.window2 = (np.exp(-(self.k * config.cellsize) ** 2 / 6.0) if window == "cic" else np.ones_like(self.k))
         self.lmax = max(c.ell for c in self.coefficients)
         self.angles = {ell: angular_weights(ell, self.mu) for ell in range(self.lmax + 1)}
-        self._lattice_modes(boxsize, nmesh, min(kmax, self.k[-1]), window)
+        if lattice:
+            self._lattice_modes(boxsize, nmesh, min(kmax, self.k[-1]), window)
         self.samplers, self.block_angles = {}, {}
         for ell in sorted({c.ell for c in self.coefficients}):
             sampler = LegSampler([[1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, -1, -1]], [0, 0, 0, 0], (ell + 3) / 2, npoints,
@@ -269,6 +271,25 @@ class RSDS1Basis:
                 skewness2[index] = 15 * self._skewness(pk, f, sigma, ell) ** 2
         return blocks, kappa, skewness2
 
+    def cumulants(self, klin, pklin, f):
+        """Only the cumulants: ``kappa_diag`` (ncoef, L + 1), sum_{a,b in M} kappa_aabb per block, and ``skewness2``."""
+        logk, logp = np.log(klin), np.log(pklin)
+        pk = lambda x: np.where(np.asarray(x) > 0, np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp)), 0.0)  # noqa
+        self.sigma_v = (0.0 if self.damping is None else float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+                        if self.damping == "linear" else float(self.damping))
+        self.f = f
+        nb = self.lmax + 1
+        kappa = np.zeros((len(self.coefficients), nb))
+        skewness2 = np.zeros(len(self.coefficients))
+        cache = {}
+        for index, c in enumerate(self.coefficients):
+            sigma, ell = self.config.sigma(c.j), c.ell
+            pairs, _ = self._kappa(pk, f, sigma, ell, cache)
+            kappa[index, :ell + 1] = np.diag(pairs)
+            if ell % 2 == 0:
+                skewness2[index] = 15 * self._skewness(pk, f, sigma, ell) ** 2
+        return kappa, skewness2
+
     def _kappa(self, pk, f, sigma, ell, cache):
         sampler = self.samplers[ell]
         legs = [np.asarray(x) for x in sampler.legs(0.0)]
@@ -297,6 +318,24 @@ class RSDS1Basis:
     def _damp(self, k):
         """exp(-(f k_z sigma_v)^2 / 2) for wavevectors k (N, 3)."""
         return np.exp(-0.5 * (self.f * k[:, 2] * self.sigma_v) ** 2)
+
+
+def s1m_from_variances(variances, linear, kappa_diag, skewness2, ells, q, edgeworth_amplitude=1.0):
+    """S1m of every block from its full variance ``variances`` and linear variance ``linear`` (flat over blocks,
+    in the order coefficient-major, |m| = 0..l), the block cumulants ``kappa_diag`` (ncoef, L + 1) and the m = 0
+    skewness ``skewness2`` (ncoef,); see ``s1m_rsd``."""
+    out, start = [], 0
+    for index, ell in enumerate(ells):
+        nb = ell + 1
+        lam, lin = variances[start:start + nb], linear[start:start + nb]
+        n = np.asarray(multiplicity(ell))
+        gamma = np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
+        e = q * (q - 2) * (kappa_diag[index, :nb] / lin**2) / (8 * n * (n + 2))
+        if ell % 2 == 0:
+            e = e.at[0].add(q * (q - 2) * (q - 4) * skewness2[index] / lin[0] ** 3 / (72 * 15))
+        out.append((2 * lam) ** (q / 2) * gamma * (1 + edgeworth_amplitude * e))
+        start += nb
+    return jnp.concatenate(out)
 
 
 def s1m_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_edgeworth=True,
@@ -349,3 +388,146 @@ def s1_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_
             s1 = s1 * (1 + correction / moment)
         out.append(s1)
     return jnp.stack(out)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Shared redshift-space basis: P_s(k, mu) pieces on a fine grid, and lattice matrices to observables
+# ---------------------------------------------------------------------------------------------------------------
+
+#: Rows of the P_s grid: Kaiser (1 + f mu^2)^2 P_L, one-loop, and the counterterm shapes k^2 P_L mu^{0, 2, 4}.
+GRID_TERMS = ("kaiser", "loop", "ct0", "ct2", "ct4")
+
+
+class RSDGrid:
+    """Fine (k, mu) grid of the redshift-space matter spectrum pieces (mu >= 0; P_s is even in mu).
+
+    The loop is computed on a coarse grid (dsc-model's quadrature, ~20 s) and interpolated: cubic in ln k,
+    and exactly (polynomial in mu^2 through the Gauss nodes) in mu.
+    """
+
+    def __init__(self, kmax: float = 0.3, nk: int = 240, nmu: int = 16, nk_loop: int = 40, nmu_loop: int = 8,
+                 quadrature: Quadrature = Quadrature()):
+        self.k = np.geomspace(1e-3, kmax, nk)
+        x, _ = leggauss(2 * nmu)
+        self.mu = x[nmu:]
+        self.k_loop = np.geomspace(2e-3, kmax, nk_loop)
+        x, _ = leggauss(2 * nmu_loop)
+        self.mu_loop = x[nmu_loop:]
+        self.quadrature = quadrature
+        self.loop_to_grid = lagrange_matrix(self.mu_loop**2, self.mu**2)  # (nmu, nmu_loop)
+
+    def __call__(self, klin, pklin, f):
+        """Rows (5, nk, nmu) for the linear spectrum tabulated on ``klin`` and growth rate ``f``."""
+        from scipy.interpolate import CubicSpline
+
+        spectrum = LinearSpectrum(np.asarray(klin, "f8"), np.asarray(pklin, "f8"))
+        plin = spectrum(self.k)[:, None]
+        mu2 = self.mu[None, :] ** 2
+        loop = loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True)["loop"]
+        loop = CubicSpline(np.log(self.k_loop), loop, axis=0)(np.log(np.clip(self.k, self.k_loop[0], None)))
+        loop = loop @ self.loop_to_grid.T
+        k2 = self.k[:, None] ** 2
+        return np.stack([(1 + f * mu2) ** 2 * plin, loop, k2 * plin * np.ones_like(mu2), k2 * plin * mu2,
+                         k2 * plin * mu2**2])
+
+
+def lagrange_matrix(nodes, points):
+    """Matrix of Lagrange interpolation weights from ``nodes`` to ``points`` (len(points), len(nodes))."""
+    nodes, points = np.asarray(nodes, "f8"), np.asarray(points, "f8")
+    out = np.ones((points.size, nodes.size))
+    for j, xj in enumerate(nodes):
+        for m, xm in enumerate(nodes):
+            if m != j:
+                out[:, j] *= (points - xm) / (xj - xm)
+    return out
+
+
+def lattice_modes(boxsize: float, nmesh: int, kmax: float, window: str | None = "cic"):
+    """|k|, |mu| (line of sight z), CIC W^2 and aliased shot-noise factor, and multiplicity / V for the modes of the
+    measurement mesh with 0 < |k| <= kmax (rfft half-space, as the estimators)."""
+    from ..measure import Lattice
+
+    lattice = Lattice(nmesh)
+    scale = nmesh / boxsize
+    kmag = lattice.kmag.ravel() * scale
+    keep = (kmag > 0) & (kmag <= kmax)
+    cell = boxsize / nmesh
+    axes = np.meshgrid(2 * np.pi * np.fft.fftfreq(nmesh) / cell, 2 * np.pi * np.fft.fftfreq(nmesh) / cell,
+                       2 * np.pi * np.fft.rfftfreq(nmesh) / cell, indexing="ij")
+    half = [0.5 * a.ravel()[keep] * cell for a in axes]
+    if window == "cic":
+        window2 = np.prod([np.sinc(h / np.pi) ** 4 for h in half], axis=0)
+        noise = np.prod([1.0 - 2.0 / 3.0 * np.sin(h) ** 2 for h in half], axis=0)
+    else:
+        window2 = noise = np.ones(keep.sum())
+    weight = lattice.multiplicity.ravel()[keep] / boxsize**3
+    return dict(k=kmag[keep].astype("f8"), mu=np.abs(lattice.mu.ravel()[keep]).astype("f8"), window2=window2,
+                noise=noise, weight=weight, multiplicity=lattice.multiplicity.ravel()[keep])
+
+
+def grid_interpolation(grid: RSDGrid, k, mu):
+    """Sparse (nmodes, nk * nmu) matrix interpolating grid values to modes: linear in ln k, Lagrange in mu^2."""
+    from scipy import sparse
+
+    logk = np.log(np.clip(k, grid.k[0], grid.k[-1]))
+    i = np.clip(np.searchsorted(np.log(grid.k), logk) - 1, 0, grid.k.size - 2)
+    t = (logk - np.log(grid.k[i])) / (np.log(grid.k[i + 1]) - np.log(grid.k[i]))
+    wmu = lagrange_matrix(grid.mu**2, mu**2)  # (nmodes, nmu)
+    nmu = grid.mu.size
+    rows = np.repeat(np.arange(k.size), 2 * nmu)
+    cols = np.concatenate([(i[:, None] * nmu + np.arange(nmu)), ((i + 1)[:, None] * nmu + np.arange(nmu))], axis=1)
+    vals = np.concatenate([(1 - t)[:, None] * wmu, t[:, None] * wmu], axis=1)
+    return sparse.csr_matrix((vals.ravel(), (rows, cols.ravel())), shape=(k.size, grid.k.size * nmu))
+
+
+class S1mProjection:
+    """Linear map from the P_s grid to the variance of every |m| block of the selected S1 coefficients.
+
+    ``matrix`` (nblock, nk * nmu) and ``shot`` (nblock,) give lambda_M = matrix @ P_grid + shot * V / N, with the
+    lattice mode sums of W^2 R^2 c_l^2 |Y_l|m||^2 per real component. ``blocks`` lists (coefficient index, |m|).
+    """
+
+    def __init__(self, config: WSTConfig, coefficients, grid: RSDGrid, boxsize: float = 1000.0, nmesh: int = 256,
+                 window: str | None = "cic"):
+        modes = lattice_modes(boxsize, nmesh, grid.k[-1], window)
+        interp = grid_interpolation(grid, modes["k"], modes["mu"])
+        theta = np.arccos(np.clip(modes["mu"], -1, 1))
+        rows, shot, self.blocks = [], [], []
+        for index, c in enumerate(coefficients):
+            sigma = config.sigma(c.j)
+            radial = (sigma * modes["k"]) ** (2 * c.ell) * np.exp(-((sigma * modes["k"]) ** 2))
+            for m in range(c.ell + 1):
+                ang = 4 * np.pi / (2 * c.ell + 1) * np.abs(sph_harm_y(c.ell, m, theta, 0.0)) ** 2
+                weight = modes["weight"] * radial * ang
+                rows.append(interp.T @ (weight * modes["window2"]))
+                shot.append(np.sum(weight * modes["noise"]))
+                self.blocks.append((index, m))
+        self.matrix, self.shot = np.array(rows), np.array(shot)
+
+
+class MultipoleProjection:
+    """Linear map from the P_s grid to the binned multipoles (as ``measure.PowerMultipoles`` estimates them):
+    P_ell(b) = mean over the modes of bin b of (2 ell + 1) L_ell(mu) [W^2 P_s(k, mu) + (V/N) aliased noise]."""
+
+    def __init__(self, edges, grid: RSDGrid, ells=(0, 2, 4), boxsize: float = 1000.0, nmesh: int = 256,
+                 window: str | None = "cic"):
+        from scipy.special import eval_legendre
+
+        modes = lattice_modes(boxsize, nmesh, edges[-1], window)
+        interp = grid_interpolation(grid, modes["k"], modes["mu"])
+        index = np.digitize(modes["k"], edges) - 1
+        inside = (index >= 0) & (index < len(edges) - 1)
+        nbins = len(edges) - 1
+        nmodes = np.bincount(index[inside], weights=modes["multiplicity"][inside], minlength=nbins)
+        self.k = np.bincount(index[inside], weights=modes["multiplicity"][inside] * modes["k"][inside],
+                             minlength=nbins) / nmodes
+        self.ells = tuple(ells)
+        rows, shot = [], []
+        for ell in self.ells:
+            leg = (2 * ell + 1) * eval_legendre(ell, modes["mu"]) * modes["multiplicity"] * inside
+            for b in range(nbins):
+                sel = inside & (index == b)
+                w = np.where(sel, leg, 0.0) / nmodes[b]
+                rows.append(interp.T @ (w * modes["window2"]))
+                shot.append(np.sum(w * modes["noise"]))
+        self.matrix, self.shot = np.array(rows), np.array(shot)

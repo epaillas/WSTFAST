@@ -135,14 +135,15 @@ class PowerDataset:
 
 
 def load_power_dataset(data_dir: Path, space: str = "real", kmin: float = 0.0, kmax: float = 0.2, rebin: int = 1,
-                       files=None) -> PowerDataset:
-    """P_dd monopole of every realization in bins of ``rebin`` x k_f, keeping bins with kmin <= k <= kmax.
+                       files=None, ells=(0,)) -> PowerDataset:
+    """P_dd multipoles ``ells`` (concatenated, ell-major) of every realization in bins of ``rebin`` x k_f, keeping bins
+    with kmin <= k <= kmax.
 
     Bins are merged from the first measured bin by mode-weighted averages; ``files`` fixes the
-    realizations (default: every ``wst_r*.npz`` of ``data_dir / space``).
+    realizations (default: every ``wst_r*.npz`` of ``data_dir / space``). The files store ell = 0, 2, 4.
     """
-    if space != "real":
-        raise ValueError("the P(k) model is real-space only")
+    if any(ell not in (0, 2, 4) for ell in ells):
+        raise ValueError("stored multipoles are ell = 0, 2, 4")
     files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
     if not files:
         raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
@@ -162,10 +163,27 @@ def load_power_dataset(data_dir: Path, space: str = "real", kmin: float = 0.0, k
             metadata = json.loads(str(data["metadata"]))
             if any(metadata[key] != reference[key] for key in keys) or not np.array_equal(data["k"], k):
                 raise ValueError(f"{path} was measured with different settings")
-            power = (data["Pdd"][0, :nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
-        vectors.append(power[keep])
+            power = [(data["Pdd"][ell // 2, :nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
+                     for ell in ells]
+        vectors.append(np.concatenate([p[keep] for p in power]))
     bin_edges = edges[:nk + 1:rebin]
     first = np.flatnonzero(keep)[0]
     return PowerDataset(vectors=np.array(vectors), k=kbin[keep], nmodes=weights.sum(axis=1)[keep],
                         edges=bin_edges[first:first + keep.sum() + 1], metadata=reference,
                         files=[str(path) for path in files])
+
+
+def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
+    """Line-of-sight-resolved S1m of every |m| block of ``coefficients`` (coefficient-major, |m| = 0..l)."""
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    measurements = [load_measurement(path, q=q) for path in files]
+    if "S1m" not in measurements[0]:
+        raise ValueError(f"{files[0]} has no line-of-sight-resolved coefficients (measure with --los-resolved)")
+    vectors = np.array([np.concatenate([m["S1m"][c.j, c.ell, :c.ell + 1] for c in coefficients])
+                        for m in measurements])
+    keys = ("redshift", "boxsize", "nmesh", "nparticles", "space")
+    metadata = {key: measurements[0]["metadata"][key] for key in keys}
+    return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
+                      metadata=metadata, files=[str(path) for path in files])

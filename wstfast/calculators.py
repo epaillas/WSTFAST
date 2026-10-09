@@ -209,6 +209,145 @@ class PowerTheory(Calculator):
         return obj
 
 
+class RSDBasis(Calculator):
+    """Cosmology-dependent redshift-space pieces shared by the P(k) multipoles and the S1m blocks.
+
+    Outputs ``grid_terms`` (5, nk, nmu): GRID_TERMS of ``wstfast.theory.rsd.RSDGrid``; ``kappa`` (ncoef, L + 1) and
+    ``skewness2`` (ncoef,): the velocity-damped tree cumulants of the S1m blocks of ``coefficients``; and ``dlogA``.
+    Rows are rescaled by powers of A_s / POWER_AMPLITUDE (Kaiser and counterterms 1, loop 2, kappa 3, skewness^2 4)
+    so that a Taylor emulator is nearly exact in logA (the damping breaks this slightly). NumPy (pure_callback).
+    """
+
+    _is_external = True
+
+    def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
+                 damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16):
+        self.cosmo = build_cosmology() if cosmo is None else cosmo
+
+    def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
+                      damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16):
+        from .theory.rsd import RSDGrid, RSDS1Basis
+
+        self.z = float(z)
+        self.grid = RSDGrid(kmax=kmax)
+        self.coefficients = list(coefficients)
+        self.cumulant_model = (RSDS1Basis(config, self.coefficients, damping=damping, npoints=npoints, lattice=False)
+                               if self.coefficients else None)
+        self.klin = np.geomspace(1e-4, 10.0, 1024)
+        self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_m", "z": self.z, "k": self.klin}],
+                                     "fourier.sigma8_z": [{"of": "delta_cb", "z": self.z}, {"of": "theta_cb", "z": self.z}],
+                                     "params.A_s": None})
+
+    def __call__(self):
+        pk = np.asarray(self.cosmo.get("fourier.pk", of="delta_m", z=self.z, k=self.klin))
+        f = float(self.cosmo.get("fourier.sigma8_z", of="theta_cb", z=self.z)
+                  / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
+        ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE
+        self.grid_terms = self.grid(self.klin, pk, f) / np.array([ratio, ratio**2, ratio, ratio, ratio])[:, None, None]
+        if self.cumulant_model is not None:
+            kappa, skewness2 = self.cumulant_model.cumulants(self.klin, pk, f)
+        else:
+            kappa, skewness2 = np.zeros((0, 1)), np.zeros(0)
+        self.kappa, self.skewness2 = kappa / ratio**3, skewness2 / ratio**4
+        self.dlogA = np.log(ratio)
+        return self
+
+    def tree_flatten(self):
+        return [self.grid_terms, self.kappa, self.skewness2, self.dlogA], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.grid_terms, obj.kappa, obj.skewness2, obj.dlogA = children
+        return obj
+
+
+def rsd_rows(basis):
+    """Grid rows, kappa and skewness^2 at the basis's amplitude, from a (possibly emulated) RSDBasis output."""
+    a = jnp.exp(basis.dlogA)
+    scale = jnp.stack([a, a**2, a, a, a])[:, None, None]
+    return basis.grid_terms * scale, basis.kappa * a**3, basis.skewness2 * a**4
+
+
+def _rsd_counterterms(prefix, latex):
+    return {name: Parameter(f"{name}{prefix}", value=0.0, prior=dict(limits=[-100.0, 100.0]),
+                            ref=dict(dist="norm", loc=0.0, scale=2.0), latex=rf"{label}{latex}")
+            for name, label in (("c0", "c_0"), ("c2", "c_2"), ("c4", "c_4"))}
+
+
+class RSDPowerTheory(Calculator):
+    """Redshift-space matter P(k) multipoles, lattice-averaged: projection.matrix @ P_s grid + V/N projection.shot.
+
+    Counterterms ``c0_pk``, ``c2_pk``, ``c4_pk`` [(Mpc/h)^2]: P_s -= 2 (c0 + c2 mu^2 + c4 mu^4) k^2 P_L.
+    """
+
+    def __init__(self, projection, basis=None, shotnoise: float = 0.0):
+        self.basis = basis
+        self.counterterms = _rsd_counterterms("_pk", r"^{P}")
+
+    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0):
+        self.matrix = jnp.asarray(projection.matrix)
+        self.noise = jnp.asarray(shotnoise * projection.shot)
+
+    def __call__(self):
+        rows, _, _ = rsd_rows(self.basis)
+        c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
+        grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
+        self.flattheory = self.matrix @ grid.ravel() + self.noise
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
+class S1mTheory(Calculator):
+    """Line-of-sight-resolved S1m of the selected S1 coefficients (all |m| blocks), from the shared RSDBasis.
+
+    Counterterms ``c0``, ``c2``, ``c4`` [(Mpc/h)^2] of the block variances (separate from the P(k) ones).
+    """
+
+    def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
+                 cumulant_index=None):
+        self.basis = basis
+        self.counterterms = _rsd_counterterms("", "")
+
+    def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
+                      cumulant_index=None):
+        self.matrix = jnp.asarray(projection.matrix)
+        self.noise = jnp.asarray(shotnoise * projection.shot)
+        self.ells = [c.ell for c in coefficients]
+        self.q = float(q)
+        #: Rows of the basis cumulants for each selected coefficient (the basis may hold more coefficients).
+        self.cumulant_index = np.arange(len(coefficients)) if cumulant_index is None else np.asarray(cumulant_index)
+
+    def __call__(self):
+        from .theory.rsd import s1m_from_variances
+
+        rows, kappa, skewness2 = rsd_rows(self.basis)
+        c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
+        grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
+        variances = self.matrix @ grid.ravel() + self.noise
+        linear = self.matrix @ rows[0].ravel()
+        self.flattheory = s1m_from_variances(variances, linear, kappa[self.cumulant_index],
+                                             skewness2[self.cumulant_index], self.ells, self.q)
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
 class JointTheory(Calculator):
     """Concatenated predictions of several theories (e.g. WST and P(k)) that share the cosmological parameters.
 
