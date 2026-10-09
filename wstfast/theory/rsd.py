@@ -1,10 +1,11 @@
 """First-order WST coefficients S1 of redshift-space matter (line of sight z), m-summed as measured.
 
-WORK IN PROGRESS. Validated: the isotropic limit of the moments and Edgeworth tensors, the f = 0 limit of
-the cumulants (real-space values), and the lattice-averaged one-loop P_s against the measured multipoles
-(chi^2 = 26 for 53 dof at V = 60 (Gpc/h)^3 up to k = 0.12). Not yet: S1 itself, whose fit at the true
-cosmology still has chi^2 ~ 200 at V = 60 with unphysical counterterms. The tree cumulants overshoot the
-measured non-Gaussianity by 10-25%; with the m-summed data, block-variance and cumulant errors are degenerate.
+Status. Line-of-sight-resolved S1m (``s1m_rsd``, one isotropic block of 1 or 2 components per |m|) with the
+lattice-summed block variances and the velocity-damped tree cumulants (``damping="linear"``, sigma_v^2 =
+int P_L / 6 pi^2) fits all 60 blocks with sigma >= 25 Mpc/h at the true cosmology with chi^2 = 29 for 57 dof
+(diagonal errors of a 60 (Gpc/h)^3 survey) and counterterms (c0, c2, c4) = (0.7, 12.8, 2.9) (Mpc/h)^2; at
+sigma = 17.7 it does not (chi^2 = 367 for 72). The m-summed S1 (``s1_rsd``) is not yet adequate: its data mix
+block-variance and cumulant errors.
 
 In redshift space the n = 2l + 1 components of X_a = (delta_s * psi_{sigma,l}^a)(x) are independent Gaussians
 at leading order but no longer equally distributed: by symmetry about the line of sight, the variance of each
@@ -179,7 +180,9 @@ class RSDS1Basis:
       ``blocks`` (ncoef, L + 1, 6): the |m| block variances split as BLOCK_TERMS (zero beyond |m| = l);
       ``kappa`` (ncoef, L + 1, L + 2): per block pair M, M' the tree sum_{a in M, b in M'} kappa_aabb (first L + 1
       columns) and per block sum_{a in M} kappa_aaaa (last column);
-      ``skewness2`` (ncoef,): 15 kappa_3^2 for l = 0 (zero otherwise).
+      ``skewness2`` (ncoef,): 15 kappa_3^2 of the m = 0 component for even l (zero otherwise). By azimuthal
+      symmetry, blocks with |m| > 0 have no third cumulant, and neither has the m = 0 component of odd l
+      (z -> -z parity).
     """
 
     def __init__(self, config: WSTConfig, coefficients, shotnoise: float = 0.0, window: str | None = "cic",
@@ -204,7 +207,8 @@ class RSDS1Basis:
                                  seed=17 + ell)
             self.samplers[ell] = sampler
             self.block_angles[ell] = _block_angles(ell, [np.asarray(x) for x in sampler.legs(0.0)])
-        self.bis_sampler = LegSampler([[1, 0], [0, 1], [-1, -1]], [0, 0, 0], 1.5, npoints, seed=29)
+        self.bis_samplers = {ell: LegSampler([[1, 0], [0, 1], [-1, -1]], [0, 0, 0], (ell + 3) / 2, npoints, seed=29 + ell)
+                             for ell in sorted({c.ell for c in self.coefficients}) if ell % 2 == 0}
 
     def _lattice_modes(self, boxsize, nmesh, kmax, window):
         """Modes of the measurement mesh with |k| <= kmax: |k|, |mu| and the weight multiplicity W^2 / V per mode."""
@@ -261,8 +265,8 @@ class RSDS1Basis:
             radial = (sigma * km) ** (2 * ell) * np.exp(-((sigma * km) ** 2))
             blocks[index, :ell + 1] = np.einsum("tn,n,an->at", pieces, radial, self.mode_angles[ell])
             kappa[index, :ell + 1, :ell + 1], kappa[index, :ell + 1, nb] = self._kappa(pk, f, sigma, ell, trispectra)
-            if ell == 0:
-                skewness2[index] = 15 * self._skewness(pk, f, sigma) ** 2
+            if ell % 2 == 0:
+                skewness2[index] = 15 * self._skewness(pk, f, sigma, ell) ** 2
         return blocks, kappa, skewness2
 
     def _kappa(self, pk, f, sigma, ell, cache):
@@ -277,16 +281,50 @@ class RSDS1Basis:
         pairs = np.einsum("n,an,bn->ab", weight, pair12, pair34)
         return 0.5 * (pairs + pairs.T), comps @ weight
 
-    def _skewness(self, pk, f, sigma):
-        legs = [np.asarray(x) for x in self.bis_sampler.legs(0.0)]
+    def _skewness(self, pk, f, sigma, ell=0):
+        """Third cumulant of the m = 0 component X_l0 (even l): c_l^3 int B_s prod_i R(k_i) Y_l0(k_i)."""
+        sampler = self.bis_samplers[ell]
+        legs = [np.asarray(x) for x in sampler.legs(0.0)]
         b = tree_bispectrum_rsd([x / sigma for x in legs], pk, f)
-        filters = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), 0, sigma) * self._damp(x / sigma)
-                           for x in legs], axis=0)
-        return float(np.sum(self.bis_sampler.weights * b * filters)) / sigma**6
+        c = np.sqrt(4 * np.pi / (2 * ell + 1))
+        factors = []
+        for x in legs:
+            norm = np.sqrt(np.sum(x**2, axis=-1))
+            y = np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / norm, -1, 1)), 0.0))
+            factors.append(self._filter(norm, ell, sigma) * self._damp(x / sigma) * c * y)
+        return float(np.sum(sampler.weights * b * np.prod(factors, axis=0))) / sigma**6
 
     def _damp(self, k):
         """exp(-(f k_z sigma_v)^2 / 2) for wavevectors k (N, 3)."""
         return np.exp(-0.5 * (self.f * k[:, 2] * self.sigma_v) ** 2)
+
+
+def s1m_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_edgeworth=True,
+            edgeworth_amplitude=1.0):
+    """Line-of-sight-resolved S1m(j, l, |m|) for every coefficient, as a list of arrays of length l + 1.
+
+    Each |m| block is an isotropic Gaussian of n_M = 1 (m = 0) or 2 components and variance lambda_M per component,
+    so S1m = (2 lambda_M)^{q/2} Gamma((n_M + q)/2) / Gamma(n_M / 2) [1 + E_M], with the Edgeworth factor of an
+    O(n_M)-invariant modulus: E_M = q (q-2) K4_M / (8 n_M (n_M+2)) + q (q-2)(q-4) 15 K33 / (72 * 15) for m = 0 and
+    even l, K4_M = sum_{a,b in M} kappa_aabb / lambda_M^2 (linear lambda). ``edgeworth_amplitude`` scales E_M.
+    """
+    c0, c2, c4 = counterterms
+    out = []
+    for index, ell in enumerate(ells):
+        nb = ell + 1
+        n = jnp.asarray(multiplicity(ell))
+        b = blocks[index, :nb]
+        lam = b[:, 0] + b[:, 1] - 2 * (c0 * b[:, 2] + c2 * b[:, 3] + c4 * b[:, 4]) + b[:, 5]
+        gamma = jnp.exp(gammaln((np.asarray(multiplicity(ell)) + q) / 2) - gammaln(np.asarray(multiplicity(ell)) / 2))
+        s1 = (2 * lam) ** (q / 2) * gamma
+        if use_edgeworth:
+            lin = b[:, 0]
+            k4 = jnp.diag(kappa[index, :nb, :nb]) / lin**2
+            e = q * (q - 2) * k4 / (8 * n * (n + 2))
+            e = e.at[0].add(q * (q - 2) * (q - 4) * skewness2[index] / lin[0] ** 3 / (72 * 15)) if ell % 2 == 0 else e
+            s1 = s1 * (1 + edgeworth_amplitude * e)
+        out.append(s1)
+    return out
 
 
 def s1_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_edgeworth=True):
@@ -307,6 +345,7 @@ def s1_rsd(blocks, kappa, skewness2, ells, q, counterterms=(0.0, 0.0, 0.0), use_
             if ell == 0:
                 s2 = b[0, 0]
                 correction = correction + moment * q * (q - 2) * (q - 4) * skewness2[index] / s2**3 / (72 * 15)
+            # (for even l > 0 the m = 0 skewness enters s1m_rsd; it is ~1e-4 of the m-summed S1)
             s1 = s1 * (1 + correction / moment)
         out.append(s1)
     return jnp.stack(out)
