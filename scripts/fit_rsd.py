@@ -221,7 +221,8 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"])
+                   tracer=tracer, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
                                            std=float(np.asarray(samples.std(name))))
