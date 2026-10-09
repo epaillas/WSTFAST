@@ -571,3 +571,81 @@ def cumulant_correction(config: WSTConfig, coefficients, klin, pklin, f, npoints
     kappa_ref, skewness2_ref = reference.cumulants(klin, pklin, f)
     with np.errstate(divide="ignore", invalid="ignore"):
         return (np.where(kappa != 0, kappa_ref / kappa, 1.0), np.where(skewness2 != 0, skewness2_ref / skewness2, 1.0))
+
+
+class APProjection:
+    """Linear observables of the P_s grid with Alcock-Paczynski distortions applied at assembly (ap.py).
+
+    Holds the observed-frame weights of each target on the measurement mesh modes (``weights`` (ntarget, nmodes), with
+    the window, and ``noise`` (ntarget,) for the shot noise); ``__call__(rows, qpar, qperp)`` interpolates each grid row
+    at the true-frame (k', mu') of every mode (linear in ln k, exact in mu^2, as ``grid_interpolation``), applies the
+    weights and divides by q_par q_perp^2. At q_par = q_perp = 1 it equals the fixed-matrix projections.
+    """
+
+    def __init__(self, grid: RSDGrid, k, mu, weights, noise):
+        self.logk = jnp.asarray(np.log(grid.k))
+        self.nodes2 = jnp.asarray(grid.mu**2)
+        self.k, self.mu = jnp.asarray(k), jnp.asarray(mu)
+        self.weights, self.noise = jnp.asarray(weights), jnp.asarray(noise)
+
+    def interpolate(self, rows, qpar, qperp):
+        """Grid rows (R, nk, nmu) at the true-frame coordinates of the modes: (R, nmodes), and the volume factor."""
+        from .ap import observed_to_true
+
+        k, mu, volume = observed_to_true(self.k, self.mu, qpar, qperp)
+        logk = jnp.clip(jnp.log(k), self.logk[0], self.logk[-1])
+        i = jnp.clip(jnp.searchsorted(self.logk, logk) - 1, 0, self.logk.size - 2)
+        t = (logk - self.logk[i]) / (self.logk[i + 1] - self.logk[i])
+        x = mu**2
+        nodes = self.nodes2
+        lagrange = jnp.ones((x.size, nodes.size))
+        for j in range(nodes.size):
+            for m in range(nodes.size):
+                if m != j:
+                    lagrange = lagrange.at[:, j].multiply((x - nodes[m]) / (nodes[j] - nodes[m]))
+        rows = jnp.asarray(rows)
+        lower = jnp.sum(rows[:, i, :] * lagrange[None], axis=-1)
+        upper = jnp.sum(rows[:, i + 1, :] * lagrange[None], axis=-1)
+        return (1 - t) * lower + t * upper, volume
+
+    def __call__(self, rows, qpar=1.0, qperp=1.0, shotnoise=0.0):
+        values, volume = self.interpolate(rows, qpar, qperp)
+        return volume * (values @ self.weights.T + shotnoise * self.noise)
+
+
+def s1m_ap_projection(config: WSTConfig, coefficients, grid: RSDGrid, kmax: float = 0.27, boxsize: float = 1000.0,
+                      nmesh: int = 256, window: str | None = "cic") -> APProjection:
+    """APProjection of the S1m block variances (observed-frame filters; modes with k <= kmax)."""
+    modes = lattice_modes(boxsize, nmesh, kmax, window)
+    theta = np.arccos(np.clip(modes["mu"], -1, 1))
+    weights, noise = [], []
+    for c in coefficients:
+        sigma = config.sigma(c.j)
+        radial = (sigma * modes["k"]) ** (2 * c.ell) * np.exp(-((sigma * modes["k"]) ** 2))
+        for m in range(c.ell + 1):
+            w = modes["weight"] * radial * 4 * np.pi / (2 * c.ell + 1) * np.abs(sph_harm_y(c.ell, m, theta, 0.0)) ** 2
+            weights.append(w * modes["window2"])
+            noise.append(np.sum(w * modes["noise"]))
+    return APProjection(grid, modes["k"], modes["mu"], np.array(weights), np.array(noise))
+
+
+def multipole_ap_projection(edges, grid: RSDGrid, ells=(0, 2, 4), boxsize: float = 1000.0, nmesh: int = 256,
+                            window: str | None = "cic") -> APProjection:
+    """APProjection of the binned multipoles (as ``MultipoleProjection``)."""
+    from scipy.special import eval_legendre
+
+    modes = lattice_modes(boxsize, nmesh, edges[-1], window)
+    index = np.digitize(modes["k"], edges) - 1
+    inside = (index >= 0) & (index < len(edges) - 1)
+    keep = {name: value[inside] for name, value in modes.items()}
+    index = index[inside]
+    nbins = len(edges) - 1
+    nmodes = np.bincount(index, weights=keep["multiplicity"], minlength=nbins)
+    weights, noise = [], []
+    for ell in ells:
+        leg = (2 * ell + 1) * eval_legendre(ell, keep["mu"]) * keep["multiplicity"]
+        for b in range(nbins):
+            w = np.where(index == b, leg, 0.0) / nmodes[b]
+            weights.append(w * keep["window2"])
+            noise.append(np.sum(w * keep["noise"]))
+    return APProjection(grid, keep["k"], keep["mu"], np.array(weights), np.array(noise))

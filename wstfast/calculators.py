@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+from desilike import get_params
 from desilike.base import Calculator, GaussianLikelihood
 from desilike.parameter import Parameter
 from desilike.theories import CosmoprimoCosmology
@@ -278,25 +279,50 @@ def _rsd_counterterms(prefix, latex):
             for name, label in (("c0", "c_0"), ("c2", "c_2"), ("c4", "c_4"))}
 
 
+class APGeometry:
+    """AP ratios of the trial cosmology. ``params`` are the basis's own ``h`` and ``omega_cdm`` Parameter instances
+    (theories hold them as ``ap_params``, so that desilike sees one parameter each); ``omega_b`` is a constant (it is
+    not an input of the emulated basis)."""
+
+    def __init__(self, basis, z: float, omega_b: float = QUIJOTE_COSMOLOGY["omega_b"]):
+        params = get_params(basis)
+        self.params = {name: params[name] for name in ("h", "omega_cdm")}
+        self.z, self.omega_b = float(z), float(omega_b)
+
+    def ratios(self, params):
+        from .theory.ap import ap_ratios
+
+        return ap_ratios(self.z, params["h"].value, self.omega_b, params["omega_cdm"].value)
+
+
 class RSDPowerTheory(Calculator):
     """Redshift-space matter P(k) multipoles, lattice-averaged: projection.matrix @ P_s grid + V/N projection.shot.
 
     Counterterms ``c0_pk``, ``c2_pk``, ``c4_pk`` [(Mpc/h)^2]: P_s -= 2 (c0 + c2 mu^2 + c4 mu^4) k^2 P_L.
+    With ``ap`` (see ``APGeometry``), ``projection`` is an ``APProjection`` and the AP distortions are applied.
     """
 
-    def __init__(self, projection, basis=None, shotnoise: float = 0.0):
+    def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None):
         self.basis = basis
         self.counterterms = _rsd_counterterms("_pk", r"^{P}")
+        self.ap = ap
+        self.ap_params = ap.params if ap is not None else {}
 
-    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0):
-        self.matrix = jnp.asarray(projection.matrix)
-        self.noise = jnp.asarray(shotnoise * projection.shot)
+    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None):
+        self.projection, self.shotnoise = projection, float(shotnoise)
+        if ap is None:
+            self.matrix = jnp.asarray(projection.matrix)
+            self.noise = jnp.asarray(shotnoise * projection.shot)
 
     def __call__(self):
         rows, _, _ = rsd_rows(self.basis)
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
         grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
-        self.flattheory = self.matrix @ grid.ravel() + self.noise
+        if self.ap is None:
+            self.flattheory = self.matrix @ grid.ravel() + self.noise
+        else:
+            qpar, qperp = self.ap.ratios(self.ap_params)
+            self.flattheory = self.projection(grid[None], qpar, qperp, self.shotnoise)[0]
         return self.flattheory
 
     def tree_flatten(self):
@@ -319,16 +345,20 @@ class S1mTheory(Calculator):
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                 cumulant_index=None, correction=None, ng_amplitude: bool = False):
+                 cumulant_index=None, correction=None, ng_amplitude: bool = False, ap=None):
         self.basis = basis
         self.counterterms = _rsd_counterterms("", "")
+        self.ap = ap
+        self.ap_params = ap.params if ap is not None else {}
         self.a_ng = (Parameter("a_ng", value=1.0, prior=dict(limits=[0.5, 1.5]), ref=dict(dist="norm", loc=1.0, scale=0.02),
                                latex=r"a_{\rm NG}") if ng_amplitude else None)
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                      cumulant_index=None, correction=None, ng_amplitude: bool = False):
-        self.matrix = jnp.asarray(projection.matrix)
-        self.noise = jnp.asarray(shotnoise * projection.shot)
+                      cumulant_index=None, correction=None, ng_amplitude: bool = False, ap=None):
+        self.projection, self.shotnoise = projection, float(shotnoise)
+        if ap is None:
+            self.matrix = jnp.asarray(projection.matrix)
+            self.noise = jnp.asarray(shotnoise * projection.shot)
         self.ells = [c.ell for c in coefficients]
         self.q = float(q)
         #: Rows of the basis cumulants for each selected coefficient (the basis may hold more coefficients).
@@ -344,8 +374,13 @@ class S1mTheory(Calculator):
         amplitude = 1.0 if self.a_ng is None else self.a_ng.value
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
         grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
-        variances = self.matrix @ grid.ravel() + self.noise
-        linear = self.matrix @ rows[0].ravel()
+        if self.ap is None:
+            variances = self.matrix @ grid.ravel() + self.noise
+            linear = self.matrix @ rows[0].ravel()
+        else:  # the cumulants (Edgeworth numerators) are left without AP: ~1e-4 of S1m
+            qpar, qperp = self.ap.ratios(self.ap_params)
+            variances = self.projection(grid[None], qpar, qperp, self.shotnoise)[0]
+            linear = self.projection(rows[0][None], qpar, qperp, 0.0)[0]
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude)
         return self.flattheory

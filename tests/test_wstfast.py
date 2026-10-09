@@ -210,3 +210,24 @@ def test_rsd_moments_reduce_to_isotropic_limit():
         a4 = q * (q - 2) * exact / (n * (n + 2) * s2**2)  # E_G[d^4 r^q] per pairing, isotropic
         assert float(t4[0]) == pytest.approx(3 * a4, rel=1e-8)
         assert float(t22[0, -1]) == pytest.approx(a4, rel=1e-8)
+
+
+def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
+    from wstfast.theory.ap import QUIJOTE_FIDUCIAL as fid, ap_ratios, observed_to_true
+    from wstfast.theory.rsd import MultipoleProjection, RSDGrid, multipole_ap_projection
+
+    assert np.allclose(ap_ratios(0.5, fid.h, fid.omega_b, fid.omega_cdm), 1.0)
+    qpar, qperp = ap_ratios(0.5, 0.70, fid.omega_b, fid.omega_cdm)
+    assert qpar > 1.0 and qperp > 1.0  # larger h: shorter H^-1 in Mpc, longer in Mpc/h
+
+    grid = RSDGrid(kmax=0.12, nmu=8)
+    model = lambda k, mu: (1 + 0.7 * mu**2) ** 2 * np.exp(-((k / 0.05) ** 2))  # noqa: E731  (polynomial in mu^2)
+    rows = model(*np.meshgrid(grid.k, grid.mu, indexing="ij"))[None]
+    edges = np.linspace(0.02, 0.1, 9)
+    fixed, ap = MultipoleProjection(edges, grid, boxsize=500.0, nmesh=64), multipole_ap_projection(
+        edges, grid, boxsize=500.0, nmesh=64)
+    np.testing.assert_allclose(ap(rows, 1.0, 1.0, 2.0)[0], fixed.matrix @ rows[0].ravel() + 2.0 * fixed.shot,
+                               rtol=1e-10, atol=1e-12)
+    k, mu, volume = observed_to_true(ap.k, ap.mu, 1.03, 0.98)
+    exact = volume * (np.asarray(ap.weights) @ model(np.asarray(k), np.asarray(mu)))
+    np.testing.assert_allclose(ap(rows, 1.03, 0.98)[0], exact, rtol=1e-3, atol=1e-4)

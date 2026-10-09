@@ -8,6 +8,9 @@ c0_pk, c2_pk, c4_pk for P(k)). Example (4 parameters, omega_b fixed, errors of a
 
     python scripts/fit_rsd.py --stats pk s1m --kmax 0.12 --vary omega_cdm logA n_s h --volume 60 \
         --emulator outputs/emulators/rsd_basis_taylor_4p.h5 --output-dir outputs/inference/rsd/joint_V60
+
+With ``--ap``, the Alcock-Paczynski distortions of the trial cosmology (relative to the Quijote fiducial) are
+applied at assembly, on top of the true-frame emulated basis.
 """
 
 from __future__ import annotations
@@ -21,12 +24,13 @@ import numpy as np
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
-from wstfast.calculators import JointTheory, RSDPowerTheory, S1mTheory, WSTLikelihood
+from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, WSTLikelihood
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset, sample_covariance
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh)
-from wstfast.theory.rsd import MultipoleProjection, RSDGrid, S1mProjection
+from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
+                                s1m_ap_projection)
 
 
 def parse_args():
@@ -49,6 +53,7 @@ def parse_args():
     parser.add_argument("--cumulant-points", type=int, default=2**20,
                         help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
     parser.add_argument("--ng-amplitude", action="store_true", help="free amplitude a_ng of the S1m Edgeworth correction")
+    parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200000)
@@ -107,6 +112,7 @@ def main():
     basis, settings = load_basis(args.emulator, args.vary)
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
+    ap = APGeometry(basis, settings["z"]) if args.ap else None
 
     theories, vectors, labels = [], [], []
     files = None
@@ -119,9 +125,10 @@ def main():
         s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=args.q)
         files = s1m.files
         correction = load_correction(args, config, coefficients, settings) if args.cumulant_points else None
-        theories.append(S1mTheory(S1mProjection(config, coefficients, grid), coefficients, q=args.q, basis=basis,
-                                  shotnoise=s1m.shotnoise, cumulant_index=[emulated.index(c.label) for c in coefficients],
-                                  correction=correction, ng_amplitude=args.ng_amplitude))
+        projection = s1m_ap_projection(config, coefficients, grid) if args.ap else S1mProjection(config, coefficients, grid)
+        theories.append(S1mTheory(projection, coefficients, q=args.q, basis=basis, shotnoise=s1m.shotnoise,
+                                  cumulant_index=[emulated.index(c.label) for c in coefficients],
+                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap))
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
@@ -129,7 +136,8 @@ def main():
         power = load_power_dataset(args.data_dir, "rsd", kmin=args.kmin, kmax=args.kmax, rebin=args.rebin, files=files,
                                    ells=(0, 2, 4))
         files = power.files
-        theories.append(RSDPowerTheory(MultipoleProjection(power.edges, grid), basis=basis, shotnoise=power.shotnoise))
+        projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
+        theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap))
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
@@ -165,7 +173,7 @@ def main():
     chi2 = float(residual @ np.linalg.solve(covariance, residual))
     summary = dict(bestfit=best, chi2=chi2, ndata=int(ndata), nvaried=len(varied), nrealizations=int(nreal),
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
-                   kmax=args.kmax, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator))
+                   kmax=args.kmax, ap=args.ap, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator))
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
                                            std=float(np.asarray(samples.std(name))))
