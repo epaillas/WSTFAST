@@ -46,6 +46,9 @@ def parse_args():
                         help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true", help="errors of the realization mean")
     parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE")
+    parser.add_argument("--cumulant-points", type=int, default=2**20,
+                        help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
+    parser.add_argument("--ng-amplitude", action="store_true", help="free amplitude a_ng of the S1m Edgeworth correction")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=200000)
@@ -64,6 +67,32 @@ def load_basis(path: Path, vary):
     basis = Emulator.read(str(path)).to_calculator()
     _bound_to_emulator(basis, _fix_unvaried(basis, settings, vary, path))
     return basis, settings
+
+
+def load_correction(args, config, coefficients, settings):
+    """Control-variate correction of the emulated S1m cumulants at the Quijote cosmology (cached next to the emulator)."""
+    from cosmoprimo import Cosmology
+
+    from wstfast.theory.rsd import cumulant_correction
+
+    tag = "_".join(c.label for c in coefficients)
+    cache = args.emulator.with_suffix(f".correction_{args.cumulant_points}.npz")
+    if cache.exists():
+        stored = np.load(cache, allow_pickle=False)
+        labels = list(stored["labels"])
+        index = [labels.index(c.label) for c in coefficients]
+        return stored["kappa"][index], stored["skewness2"][index]
+    every = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"]) if c.kind == "S1"]
+    fourier = Cosmology(engine="class", m_ncdm=0.0, **QUIJOTE_COSMOLOGY).get_fourier()
+    klin = np.geomspace(1e-4, 10.0, 1024)
+    pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
+    f = float(fourier.sigma8_z(settings["z"], of="theta_cb") / fourier.sigma8_z(settings["z"], of="delta_cb"))
+    kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=args.cumulant_points)
+    np.savez(cache, kappa=kappa, skewness2=skewness2, labels=np.array([c.label for c in every]))
+    print(f"wrote {cache}")
+    labels = [c.label for c in every]
+    index = [labels.index(c.label) for c in coefficients]
+    return kappa[index], skewness2[index]
 
 
 def main():
@@ -89,9 +118,10 @@ def main():
             raise ValueError(f"the emulator has no cumulants for {missing}")
         s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=args.q)
         files = s1m.files
+        correction = load_correction(args, config, coefficients, settings) if args.cumulant_points else None
         theories.append(S1mTheory(S1mProjection(config, coefficients, grid), coefficients, q=args.q, basis=basis,
-                                  shotnoise=s1m.shotnoise,
-                                  cumulant_index=[emulated.index(c.label) for c in coefficients]))
+                                  shotnoise=s1m.shotnoise, cumulant_index=[emulated.index(c.label) for c in coefficients],
+                                  correction=correction, ng_amplitude=args.ng_amplitude))
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata

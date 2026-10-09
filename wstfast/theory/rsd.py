@@ -531,3 +531,19 @@ class MultipoleProjection:
                 rows.append(interp.T @ (w * modes["window2"]))
                 shot.append(np.sum(w * modes["noise"]))
         self.matrix, self.shot = np.array(rows), np.array(shot)
+
+
+def cumulant_correction(config: WSTConfig, coefficients, klin, pklin, f, npoints: int = 2**16,
+                        npoints_reference: int = 2**20, damping="linear"):
+    """Control-variate correction of the quasi-Monte Carlo block cumulants of an emulated basis.
+
+    The basis cumulants use fixed ``npoints`` Sobol points, so their sampling error is a fixed, smooth function of
+    cosmology (10% for l = 4, m = 0 at 2^16). Returns kappa_ref / kappa and skewness2_ref / skewness2 at one cosmology
+    (``npoints_reference`` points, the same seeds), to multiply the emulated cumulants with.
+    """
+    base = RSDS1Basis(config, coefficients, damping=damping, npoints=npoints, lattice=False)
+    reference = RSDS1Basis(config, coefficients, damping=damping, npoints=npoints_reference, lattice=False)
+    kappa, skewness2 = base.cumulants(klin, pklin, f)
+    kappa_ref, skewness2_ref = reference.cumulants(klin, pklin, f)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (np.where(kappa != 0, kappa_ref / kappa, 1.0), np.where(skewness2 != 0, skewness2_ref / skewness2, 1.0))

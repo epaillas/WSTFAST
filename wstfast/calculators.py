@@ -310,32 +310,41 @@ class S1mTheory(Calculator):
     """Line-of-sight-resolved S1m of the selected S1 coefficients (all |m| blocks), from the shared RSDBasis.
 
     Counterterms ``c0``, ``c2``, ``c4`` [(Mpc/h)^2] of the block variances (separate from the P(k) ones).
+    ``correction`` = (kappa ratio, skewness^2 ratio) from ``wstfast.theory.rsd.cumulant_correction`` corrects the
+    sampling error of the basis cumulants; with ``ng_amplitude``, a free factor ``a_ng`` scales the Edgeworth
+    correction of every block (the damped tree cumulants overshoot it by ~7% at sigma = 25 Mpc/h).
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                 cumulant_index=None):
+                 cumulant_index=None, correction=None, ng_amplitude: bool = False):
         self.basis = basis
         self.counterterms = _rsd_counterterms("", "")
+        self.a_ng = (Parameter("a_ng", value=1.0, prior=dict(limits=[0.5, 1.5]), ref=dict(dist="norm", loc=1.0, scale=0.02),
+                               latex=r"a_{\rm NG}") if ng_amplitude else None)
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                      cumulant_index=None):
+                      cumulant_index=None, correction=None, ng_amplitude: bool = False):
         self.matrix = jnp.asarray(projection.matrix)
         self.noise = jnp.asarray(shotnoise * projection.shot)
         self.ells = [c.ell for c in coefficients]
         self.q = float(q)
         #: Rows of the basis cumulants for each selected coefficient (the basis may hold more coefficients).
         self.cumulant_index = np.arange(len(coefficients)) if cumulant_index is None else np.asarray(cumulant_index)
+        self.kappa_ratio, self.skewness_ratio = ((jnp.asarray(correction[0]), jnp.asarray(correction[1]))
+                                                 if correction is not None else (1.0, 1.0))
 
     def __call__(self):
         from .theory.rsd import s1m_from_variances
 
         rows, kappa, skewness2 = rsd_rows(self.basis)
+        kappa, skewness2 = kappa[self.cumulant_index] * self.kappa_ratio, skewness2[self.cumulant_index] * self.skewness_ratio
+        amplitude = 1.0 if self.a_ng is None else self.a_ng.value
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
         grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
         variances = self.matrix @ grid.ravel() + self.noise
         linear = self.matrix @ rows[0].ravel()
-        self.flattheory = s1m_from_variances(variances, linear, kappa[self.cumulant_index],
-                                             skewness2[self.cumulant_index], self.ells, self.q)
+        self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
+                                             edgeworth_amplitude=amplitude)
         return self.flattheory
 
     def tree_flatten(self):
