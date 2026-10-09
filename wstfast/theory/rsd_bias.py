@@ -27,7 +27,7 @@ from scipy.special import sph_harm_y
 
 from .bias import (galaxy_kernel, monomial_exponents, monomial_position, monomial_product,
                    product_coefficients)
-from .eft_loop import LinearSpectrum, Quadrature, loop_integrals, radial_rule
+from .eft_loop import LinearSpectrum, Quadrature, radial_rule
 from .rsd import RSDGrid, RSDS1Basis
 from .rsd_moduli import SIGMA_V_FACTOR, ModulusSpectraRSD, S21mProjection, _harmonic, first_layer_fields
 
@@ -70,12 +70,13 @@ def renormalize(parts, spectrum: LinearSpectrum, quadrature: Quadrature):
 class BiasedRSDGrid(RSDGrid):
     """``RSDGrid`` of a biased tracer: rows ``BIASED_GRID_TERMS`` (18, nk, nmu)."""
 
+    _biased = True
+
     def _to_grid_components(self, coarse):
         return np.stack([self._to_grid(coarse[..., i]) for i in LOOP])
 
     def _loop(self, spectrum, f):
-        parts = loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True, biased=True)
-        return renormalize(parts, spectrum, self.quadrature)
+        return renormalize(self._loop_parts(spectrum, f), spectrum, self.quadrature)
 
     def __call__(self, klin, pklin, f, h=None, r_bao=None):
         spectrum = LinearSpectrum(np.asarray(klin, "f8"), np.asarray(pklin, "f8"))
@@ -101,69 +102,78 @@ class BiasedRSDGrid(RSDGrid):
                                np.stack([k2 * damped * mu2**n for n in (0, 1, 2)])])
 
 
-def tree_bispectrum_components(k, pk, f, kernels=None):
-    """Tree tracer bispectrum (N, 35) for k[0] + k[1] + k[2] = 0; ``kernels`` caches the Z2 components (scale-free)."""
-    z1 = [linear_components(x, f) for x in k]
-    power = [pk(np.sqrt(np.sum(x**2, axis=-1))) for x in k]
-    total = 0.
-    for n, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
-        z2 = kernels[n] if kernels is not None else galaxy_kernel(np.stack([k[a], k[b]], axis=-2), f)
-        total = total + 2 * (power[a] * power[b])[:, None] * product_coefficients(z2, z1[a], z1[b])
-    return total
+class _ScaleFreeTerms:
+    """Sum_t C_t(n) prod_{v in V_t} P_L(|v(n)| / sigma) over sample points n: the kernel coefficients C_t (scale-free:
+    Z kernels depend on directions only) are built once, the spectra per sigma. Terms with the same degree are
+    stacked: ``coefficients[d]`` (nterm, N, nmono(d)) and ``norms[d]`` (nterm, nfactor, N)."""
+
+    def __init__(self):
+        self.terms = {}
+
+    def add(self, degree, coefficients, vectors):
+        norms = np.array([np.sqrt(np.sum(v**2, axis=-1)) for v in vectors]).reshape(len(vectors), len(coefficients))
+        self.terms.setdefault(degree, []).append((coefficients, norms))
+
+    def freeze(self):
+        self.coefficients = {d: np.stack([c for c, _ in t]) for d, t in self.terms.items()}
+        self.norms = {d: np.stack([n for _, n in t]) for d, t in self.terms.items()}
+        del self.terms
+
+    def __call__(self, degree, scale, pk, weight):
+        """sum_n weight(n, ...) sum_t C_t(n) prod P_L: weight (N, nout) -> (nout, nmono(degree))."""
+        norms = self.norms[degree]
+        factors = np.prod(pk(norms / scale), axis=1)  # (nterm, N); 1 for a term without spectra
+        combined = np.einsum("tnm,tn->nm", self.coefficients[degree], factors)  # (N, nmono)
+        return weight.T @ combined
 
 
-def tree_power_components(k, pk, f):
-    """Tree tracer spectrum Z1^2 P_L (N, 15)."""
-    z1 = linear_components(k, f)
-    return pk(np.sqrt(np.sum(k**2, axis=-1)))[:, None] * product_coefficients(z1, z1)
-
-
-class _TrispectrumKernels:
-    """Scale-free Z kernels of the tree trispectrum and its Poisson terms at fixed unit legs (one per l)."""
-
-    def __init__(self, legs, f):
-        self.legs = legs
-        idx = range(4)
-        self.z3 = {i: galaxy_kernel(np.stack([legs[x] for x in idx if x != i], axis=-2), f) for i in idx}
-        self.z2 = {}
-        for i in idx:
-            for j in range(i + 1, 4):
-                c, d = (x for x in idx if x not in (i, j))
-                for c_, d_ in ((c, d), (d, c)):
-                    s = legs[i] + legs[c_]
-                    self.z2[i, j, c_] = (galaxy_kernel(np.stack([-legs[c_], s], axis=-2), f),
-                                         galaxy_kernel(np.stack([-legs[d_], -s], axis=-2), f))
-        self.pairs = {}  # Poisson B(k_i + k_j, k_c, k_d)
-        for i in idx:
-            for j in range(i + 1, 4):
-                c, d = (x for x in idx if x not in (i, j))
-                q = (legs[i] + legs[j], legs[c], legs[d])
-                self.pairs[i, j] = (q, [galaxy_kernel(np.stack([q[a], q[b]], axis=-2), f)
-                                        for a, b in ((0, 1), (1, 2), (2, 0))])
-
-
-def trispectrum_components(kern: _TrispectrumKernels, scale, pk, f):
-    """Tree trispectrum and Poisson terms at legs / scale: list of (N, 70), (N, 35), (N, 15), (N, 1)."""
-    legs = [x / scale for x in kern.legs]
-    norms = [np.sqrt(np.sum(x**2, axis=-1)) for x in legs]
-    z1 = [linear_components(x, f) for x in legs]
-    power = [pk(n) for n in norms]
+def _trispectrum_terms(legs, f):
+    """Tree trispectrum (degree 4) and Poisson terms B (3), P (2) and 1 (0) at unit legs k_0 + ... + k_3 = 0."""
+    terms = _ScaleFreeTerms()
     idx = range(4)
-    tree = 0.
+    z1 = [linear_components(x, f) for x in legs]
     for i in idx:  # 3111
         j, l, m = (x for x in idx if x != i)
-        tree = tree + 6.0 * (power[j] * power[l] * power[m])[:, None] * product_coefficients(kern.z3[i], z1[j], z1[l], z1[m])
-    for (i, j, c), (z2a, z2b) in kern.z2.items():  # 2211
-        d = next(x for x in idx if x not in (i, j, c))
-        ps = pk(np.sqrt(np.sum((legs[i] + legs[c]) ** 2, axis=-1)))
-        tree = tree + 4.0 * (power[c] * power[d] * ps)[:, None] * product_coefficients(z2a, z2b, z1[c], z1[d])
-    shot1 = 0.
-    for (q, kernels) in kern.pairs.values():
-        shot1 = shot1 + tree_bispectrum_components([x / scale for x in q], pk, f, kernels)
-    shot2 = sum(tree_power_components(x, pk, f) for x in legs)
-    for pair in ((0, 1), (0, 2), (0, 3)):
-        shot2 = shot2 + tree_power_components(legs[pair[0]] + legs[pair[1]], pk, f)
-    return [tree, shot1, shot2, np.ones((legs[0].shape[0], 1))]
+        z3 = galaxy_kernel(np.stack([legs[j], legs[l], legs[m]], axis=-2), f)
+        terms.add(4, 6.0 * product_coefficients(z3, z1[j], z1[l], z1[m]), [legs[j], legs[l], legs[m]])
+    for i in idx:  # 2211
+        for j in range(i + 1, 4):
+            c, d = (x for x in idx if x not in (i, j))
+            for c_, d_ in ((c, d), (d, c)):
+                s = legs[i] + legs[c_]
+                z2a = galaxy_kernel(np.stack([-legs[c_], s], axis=-2), f)
+                z2b = galaxy_kernel(np.stack([-legs[d_], -s], axis=-2), f)
+                terms.add(4, 4.0 * product_coefficients(z2a, z2b, z1[c_], z1[d_]), [legs[c_], legs[d_], s])
+    for i in idx:  # Poisson B(k_i + k_j, k_c, k_d) / n
+        for j in range(i + 1, 4):
+            c, d = (x for x in idx if x not in (i, j))
+            _add_bispectrum(terms, (legs[i] + legs[j], legs[c], legs[d]), f)
+    for v in list(legs) + [legs[0] + legs[1], legs[0] + legs[2], legs[0] + legs[3]]:  # Poisson P / n^2
+        z = linear_components(v, f)
+        terms.add(2, product_coefficients(z, z), [v])
+    terms.add(0, np.ones((legs[0].shape[0], 1)), [])  # 1 / n^3
+    terms.freeze()
+    return terms
+
+
+def _add_bispectrum(terms, q, f):
+    """Tree bispectrum terms 2 Z2(q_a, q_b) Z1(q_a) Z1(q_b) P(q_a) P(q_b) (degree 3) for q_0 + q_1 + q_2 = 0."""
+    z1 = [linear_components(x, f) for x in q]
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        z2 = galaxy_kernel(np.stack([q[a], q[b]], axis=-2), f)
+        terms.add(3, 2 * product_coefficients(z2, z1[a], z1[b]), [q[a], q[b]])
+
+
+def _bispectrum_terms(legs, f):
+    """Tree bispectrum (degree 3) and Poisson terms P (2) and 1 (0) at unit legs k_0 + k_1 + k_2 = 0."""
+    terms = _ScaleFreeTerms()
+    _add_bispectrum(terms, legs, f)
+    for v in legs:
+        z = linear_components(v, f)
+        terms.add(2, product_coefficients(z, z), [v])
+    terms.add(0, np.ones((legs[0].shape[0], 1)), [])
+    terms.freeze()
+    return terms
 
 
 class BiasedRSDS1Basis(RSDS1Basis):
@@ -181,48 +191,37 @@ class BiasedRSDS1Basis(RSDS1Basis):
         nb = self.lmax + 1
         kappa = np.zeros((len(self.coefficients), nb, sum(KAPPA_SIZES)))
         skewness = np.zeros((len(self.coefficients), sum(SKEW_SIZES)))
-        tri, bis = {}, {}
-        for index, c in enumerate(self.coefficients):
-            sigma, ell = self.config.sigma(c.j), c.ell
-            if ell not in tri:
-                tri[ell] = _TrispectrumKernels([np.asarray(x) for x in self.samplers[ell].legs(0.0)], f)
-            pieces = trispectrum_components(tri[ell], sigma, pk, f)
-            kappa[index, :ell + 1] = np.concatenate([self._kappa_pieces(p, sigma, ell, damp=n == 0)
-                                                     for n, p in enumerate(pieces)], axis=-1)
-            if ell % 2 == 0:
-                if ell not in bis:
-                    legs = [np.asarray(x) for x in self.bis_samplers[ell].legs(0.0)]
-                    bis[ell] = (legs, [galaxy_kernel(np.stack([legs[a], legs[b]], axis=-2), f)
-                                       for a, b in ((0, 1), (1, 2), (2, 0))])
-                skewness[index] = self._skewness_pieces(bis[ell], pk, f, sigma, ell)
+        for ell in sorted({c.ell for c in self.coefficients}):  # kernels once per l, spectra per sigma
+            members = [i for i, c in enumerate(self.coefficients) if c.ell == ell]
+            legs = [np.asarray(x) for x in self.samplers[ell].legs(0.0)]
+            terms = _trispectrum_terms(legs, f)
+            (pair12, pair34), _ = self.block_angles[ell]
+            angles = (pair12 * pair34).T  # (N, l + 1): diagonal block sums
+            for index in members:
+                sigma = self.config.sigma(self.coefficients[index].j)
+                filters = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) for x in legs], axis=0)
+                damping = np.prod([self._damp(x / sigma) for x in legs], axis=0)
+                weight = (self.samplers[ell].weights * filters / sigma**9)[:, None] * angles
+                # velocity-damped legs for the clustering piece only: the Poisson pieces are not
+                kappa[index, :ell + 1] = np.concatenate([terms(4, sigma, pk, weight * damping[:, None])]
+                                                        + [terms(d, sigma, pk, weight) for d in (3, 2, 0)], axis=-1)
+            del terms
+            if ell % 2:
+                continue
+            legs = [np.asarray(x) for x in self.bis_samplers[ell].legs(0.0)]
+            terms = _bispectrum_terms(legs, f)
+            c = np.sqrt(4 * np.pi / (2 * ell + 1))
+            ys = [c * np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / np.sqrt(np.sum(x**2, axis=-1)), -1, 1)), 0.0))
+                  for x in legs]
+            for index in members:
+                sigma = self.config.sigma(self.coefficients[index].j)
+                factors = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) * y for x, y in zip(legs, ys)],
+                                  axis=0)
+                damping = np.prod([self._damp(x / sigma) for x in legs], axis=0)
+                weight = (self.bis_samplers[ell].weights * factors / sigma**6)[:, None]
+                skewness[index] = np.concatenate([terms(3, sigma, pk, weight * damping[:, None])[0]]
+                                                 + [terms(d, sigma, pk, weight)[0] for d in (2, 0)])
         return kappa, skewness
-
-    def _kappa_pieces(self, values, sigma, ell, damp=True):
-        """Diagonal block sums (L + 1, ncol) of one trispectrum piece (N, ncol) at the sampler legs (velocity-damped
-        legs for the clustering piece only: the Poisson pieces are not)."""
-        sampler = self.samplers[ell]
-        legs = [np.asarray(x) for x in sampler.legs(0.0)]
-        filters = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma)
-                           * (self._damp(x / sigma) if damp else 1.0) for x in legs], axis=0)
-        weight = (sampler.weights * filters / sigma**9)[:, None] * values
-        (pair12, pair34), _ = self.block_angles[ell]
-        return np.einsum("nm,an,an->am", weight, pair12, pair34)
-
-    def _skewness_pieces(self, cache, pk, f, sigma, ell):
-        sampler = self.bis_samplers[ell]
-        legs, kernels = cache
-        scaled = [x / sigma for x in legs]
-        c = np.sqrt(4 * np.pi / (2 * ell + 1))
-        factors, damping = [], []
-        for x in legs:
-            norm = np.sqrt(np.sum(x**2, axis=-1))
-            y = np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / norm, -1, 1)), 0.0))
-            factors.append(self._filter(norm, ell, sigma) * c * y)
-            damping.append(self._damp(x / sigma))
-        weight = sampler.weights * np.prod(factors, axis=0) / sigma**6
-        tree = tree_bispectrum_components(scaled, pk, f, kernels)
-        shot1 = sum(tree_power_components(x, pk, f) for x in scaled)
-        return np.concatenate([(weight * np.prod(damping, axis=0)) @ tree, weight @ shot1, [np.sum(weight)]])
 
 
 class BiasedModulusSpectraRSD(ModulusSpectraRSD):

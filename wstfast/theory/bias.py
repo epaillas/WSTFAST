@@ -62,25 +62,33 @@ class _BiasedKernels(_Kernels):
         gamma3 = {mask: value - self._tidal_product(self.G, self.G).get(mask, 0.) for mask, value in tidal.items()}
         return [self.F, square, tidal, gamma3]
 
-    def components(self, f):
-        """Z_n of the full mask along beta: (..., NBETA)."""
+    def powers(self):
+        """Z_n of the full mask along beta and in powers of f: (..., n + 1, NBETA), Z_n = sum_j f^j [..., j, :]."""
         velocity = {mask: _divide(self.parallel[mask], self.norms[mask]) * self.G[mask] for mask in self.momenta}
         zeros = np.zeros(self.batch_shape)
         ops = self.operators()
-        out = [zeros.copy()] + [zeros + op.get(self.full, 0.) for op in ops]
+        out = [[zeros] + [zeros + op.get(self.full, 0.) for op in ops]]
         power = velocity
         for j in range(1, self.n + 1):
-            factor = (f * self.parallel[self.full]) ** j / factorial(j)
-            out[0] = out[0] + factor * power.get(self.full, 0.)
-            for index, op in enumerate(ops):
-                out[index + 1] = out[index + 1] + factor * _product(op, power).get(self.full, 0.)
+            factor = self.parallel[self.full] ** j / factorial(j)
+            out.append([factor * power.get(self.full, 0.)]
+                       + [factor * _product(op, power).get(self.full, 0.) for op in ops])
             power = _product(power, velocity)
-        return np.stack(out, axis=-1)
+        return np.stack([np.stack(row, axis=-1) for row in out], axis=-2)
+
+    def components(self, f):
+        """Z_n of the full mask along beta: (..., NBETA)."""
+        return np.einsum("...jb,j->...b", self.powers(), float(f) ** np.arange(self.n + 1))
 
 
 def galaxy_kernel(vectors, f=0., los=(0., 0., 1.)):
     """Components of the symmetrized redshift-space tracer Z_n along beta, shape (..., NBETA), n <= 3."""
     return _BiasedKernels(vectors, los).components(float(f))
+
+
+def galaxy_kernel_powers(vectors, los=(0., 0., 1.)):
+    """Components of Z_n along beta and in powers of f: (..., n + 1, NBETA), with Z_n = sum_j f^j [..., j, :]."""
+    return _BiasedKernels(vectors, los).powers()
 
 
 @lru_cache(None)
@@ -93,22 +101,33 @@ def monomial_exponents(degree: int, nvar: int = NBETA) -> np.ndarray:
 
 
 @lru_cache(None)
-def _outer_to_monomials(degree: int, nvar: int = NBETA) -> np.ndarray:
-    """(nvar^degree, nmono) 0/1 matrix collecting the outer product of ``degree`` components into monomials."""
-    exponents = monomial_exponents(degree, nvar)
-    lookup = {tuple(e): i for i, e in enumerate(exponents)}
-    matrix = np.zeros((nvar**degree, len(exponents)))
-    for flat, index in enumerate(np.ndindex(*(nvar,) * degree)):
-        matrix[flat, lookup[tuple(np.bincount(index, minlength=nvar))]] = 1.
-    return matrix
+def _product_terms(d1: int, d2: int, nvar: int = NBETA):
+    """(target, i, j) for every monomial i of degree d1 and j of degree d2: x^i x^j = x^target."""
+    return tuple((int(t), i, j) for (i, j), t in np.ndenumerate(
+        np.argmax(_product_map(d1, d2, nvar), axis=1).reshape(len(monomial_exponents(d1, nvar)), -1)))
+
+
+def multiply_first(a, d1: int, b, d2: int):
+    """Coefficients (n12, ...) of the product of polynomials of degrees d1 and d2 with coefficients first: a (n1, ...),
+    b (n2, ...). Accumulates contiguous arrays (no outer product)."""
+    out = np.zeros((len(monomial_exponents(d1 + d2)),) + np.broadcast_shapes(a.shape[1:], b.shape[1:]))
+    for target, i, j in _product_terms(d1, d2):
+        out[target] += a[i] * b[j]
+    return out
+
+
+def _multiply(a, d1, b, d2):
+    """Coefficients-last version of ``multiply_first``: a (..., n1), b (..., n2) -> (..., n12)."""
+    return np.moveaxis(multiply_first(np.moveaxis(a, -1, 0), d1, np.moveaxis(b, -1, 0), d2), 0, -1)
 
 
 def product_coefficients(*factors):
     """Monomial coefficients (..., nmono) of the product of affine-in-beta factors, each (..., NBETA)."""
-    outer = factors[0]
-    for factor in factors[1:]:
-        outer = (outer[..., :, None] * factor[..., None, :]).reshape(*outer.shape[:-1], -1)
-    return outer @ _outer_to_monomials(len(factors), factors[0].shape[-1])
+    first = [np.ascontiguousarray(np.moveaxis(factor, -1, 0)) for factor in factors]
+    out = first[0]
+    for degree, factor in enumerate(first[1:], start=1):
+        out = multiply_first(out, degree, factor, 1)
+    return np.moveaxis(out, 0, -1)
 
 
 def monomials(beta, degree: int):
@@ -142,8 +161,7 @@ def _product_map(d1: int, d2: int, nvar: int = NBETA) -> np.ndarray:
 
 def monomial_product(a, d1: int, b, d2: int):
     """Coefficients (..., n12) of the product of polynomials with coefficients a (..., n1) and b (..., n2)."""
-    outer = (a[..., :, None] * b[..., None, :]).reshape(*a.shape[:-1], -1)
-    return outer @ _product_map(d1, d2)
+    return _multiply(np.asarray(a), d1, np.asarray(b), d2)
 
 
 def lift(coefficients, d_from: int, d_to: int):

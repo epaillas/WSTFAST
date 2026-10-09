@@ -420,8 +420,12 @@ class RSDGrid:
     """
 
     def __init__(self, kmax: float = 0.3, nk: int = 240, nmu: int = 16, nk_loop: int = 40, nmu_loop: int = 8,
-                 quadrature: Quadrature = Quadrature(), ir: bool = False):
+                 quadrature: Quadrature = Quadrature(), ir: bool = False, tables: bool = True):
         self.ir = ir
+        #: Evaluate the loop from cosmology-independent tables (``loop_tables.LoopTables``, built at the first call,
+        #: equal to ``loop_integrals`` to rounding) instead of the direct quadrature.
+        self.tables = tables
+        self._tables = None
         self.k = np.geomspace(1e-3, kmax, nk)
         x, _ = leggauss(2 * nmu)
         self.mu = x[nmu:]
@@ -430,6 +434,19 @@ class RSDGrid:
         self.mu_loop = x[nmu_loop:]
         self.quadrature = quadrature
         self.loop_to_grid = lagrange_matrix(self.mu_loop**2, self.mu**2)  # (nmu, nmu_loop)
+
+    _biased = False
+
+    def _loop_parts(self, spectrum, f):
+        """dsc-model's ``loop_integrals`` (unregulated) on the coarse loop grid, from the tables if ``tables``."""
+        if not self.tables:
+            return loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True,
+                                  biased=self._biased)
+        if self._tables is None:
+            from .loop_tables import LoopTables
+
+            self._tables = LoopTables(self.k_loop, self.mu_loop, self.quadrature, biased=self._biased)
+        return self._tables(spectrum, f)
 
     def _to_grid(self, coarse):
         from scipy.interpolate import CubicSpline
@@ -444,7 +461,7 @@ class RSDGrid:
         plin = spectrum(self.k)[:, None]
         mu2 = self.mu[None, :] ** 2
         k2 = self.k[:, None] ** 2
-        parts = loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True)
+        parts = self._loop_parts(spectrum, f)
         loop = self._to_grid(parts["loop"])
         if not self.ir:
             return np.stack([(1 + f * mu2) ** 2 * plin, loop, k2 * plin * np.ones_like(mu2), k2 * plin * mu2,
@@ -453,7 +470,7 @@ class RSDGrid:
 
         nowiggle, sigma2, dsigma2, _ = split_linear(spectrum, h, r_bao / h)
         pnw = nowiggle(self.k)[:, None]
-        parts_nw = loop_integrals(self.k_loop, self.mu_loop, nowiggle, f, None, self.quadrature, rsd=True)
+        parts_nw = self._loop_parts(nowiggle, f)
         ratio = (spectrum(self.k_loop) / nowiggle(self.k_loop) - 1.0)[:, None]
         wiggle = self._to_grid(parts["22"] - parts_nw["22"] + parts_nw["13"] * ratio)
         d = np.asarray(damping(self.k, self.mu, f, sigma2, dsigma2))

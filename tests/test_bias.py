@@ -80,6 +80,22 @@ def test_biased_loop_matter_limit_and_renormalization():
     assert np.all(biased["loop"][..., sorted(unused)] == 0)
 
 
+@pytest.mark.parametrize("biased", [False, True])
+def test_loop_tables_equal_direct_integrals(biased):
+    from wstfast.theory.eft_loop import LinearSpectrum, Quadrature, loop_integrals
+    from wstfast.theory.loop_tables import LoopTables
+
+    spectrum = LinearSpectrum(*linear_power())
+    quadrature = Quadrature(nq=32, nx=8, nphi=9)
+    k, mu = np.array([5e-3, 0.08]), np.array([0.3, 0.9])
+    tables = LoopTables(k, mu, quadrature, biased=biased)
+    for f in (0.6, 0.85):
+        direct = loop_integrals(k, mu, spectrum, f, None, quadrature, rsd=True, biased=biased)
+        for name in ("22", "13", "loop"):
+            np.testing.assert_allclose(tables(spectrum, f)[name], direct[name], rtol=1e-11,
+                                       atol=1e-12 * np.abs(direct[name]).max())
+
+
 def test_biased_cumulants_and_s21m_matter_limit():
     from wstfast.theory.rsd import RSDS1Basis
     from wstfast.theory.rsd_bias import (KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis, BiasedRSDS21mBasis,
