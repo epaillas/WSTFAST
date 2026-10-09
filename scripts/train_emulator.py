@@ -107,10 +107,10 @@ def train_rsd(args):
     coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale) if c.kind == "S1"]
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
-                    s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", vary=list(args.vary),
+                    s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds)
     basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
-                     kmax=args.kmax)
+                     kmax=args.kmax, ir=args.ir)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -148,6 +148,7 @@ def main():
     parser.add_argument("--stat", choices=("wst", "pk", "rsd"), default="wst",
                         help="rsd: redshift-space P_s grid + S1m cumulants (data from the _los measurements)")
     parser.add_argument("--s1-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j of the S1m cumulants")
+    parser.add_argument("--ir", action="store_true", help="rsd: BAO infrared resummation of the P_s grid")
     parser.add_argument("--data-dir", type=Path, default=Path("data/quijote/fiducial/z0.5/J4_L4_sigma0.8_n256"))
     parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")
     parser.add_argument("--q", type=float, default=None, help="WST exponent (default: the measurement's first q)")

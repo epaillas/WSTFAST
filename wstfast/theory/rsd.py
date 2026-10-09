@@ -403,10 +403,17 @@ class RSDGrid:
 
     The loop is computed on a coarse grid (dsc-model's quadrature, ~20 s) and interpolated: cubic in ln k,
     and exactly (polynomial in mu^2 through the Gauss nodes) in mu.
+
+    With ``ir=True`` (BAO infrared resummation, dsc-model / CLASS-PT conventions, ir.py), with the anisotropic
+    damping D(k, mu) and the wiggle part P_w = P_L - P_nw of the DST split:
+        Kaiser (1 + f mu^2)^2 [P_nw + e^-D (1 + D) P_w],   loop L[P_L] + (e^-D - 1) W,
+        counterterm shapes k^2 mu^{2n} [P_nw + e^-D P_w],
+    with W = L22[P_L] - L22[P_nw] + L13[P_nw] P_w / P_nw (the loop is computed for P_L and for P_nw).
     """
 
     def __init__(self, kmax: float = 0.3, nk: int = 240, nmu: int = 16, nk_loop: int = 40, nmu_loop: int = 8,
-                 quadrature: Quadrature = Quadrature()):
+                 quadrature: Quadrature = Quadrature(), ir: bool = False):
+        self.ir = ir
         self.k = np.geomspace(1e-3, kmax, nk)
         x, _ = leggauss(2 * nmu)
         self.mu = x[nmu:]
@@ -416,19 +423,36 @@ class RSDGrid:
         self.quadrature = quadrature
         self.loop_to_grid = lagrange_matrix(self.mu_loop**2, self.mu**2)  # (nmu, nmu_loop)
 
-    def __call__(self, klin, pklin, f):
-        """Rows (5, nk, nmu) for the linear spectrum tabulated on ``klin`` and growth rate ``f``."""
+    def _to_grid(self, coarse):
         from scipy.interpolate import CubicSpline
 
+        fine = CubicSpline(np.log(self.k_loop), coarse, axis=0)(np.log(np.clip(self.k, self.k_loop[0], None)))
+        return fine @ self.loop_to_grid.T
+
+    def __call__(self, klin, pklin, f, h=None, r_bao=None):
+        """Rows (5, nk, nmu) for the linear spectrum tabulated on ``klin`` and growth rate ``f``; with ``ir``, also
+        h and the sound horizon at drag ``r_bao`` [Mpc/h]."""
         spectrum = LinearSpectrum(np.asarray(klin, "f8"), np.asarray(pklin, "f8"))
         plin = spectrum(self.k)[:, None]
         mu2 = self.mu[None, :] ** 2
-        loop = loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True)["loop"]
-        loop = CubicSpline(np.log(self.k_loop), loop, axis=0)(np.log(np.clip(self.k, self.k_loop[0], None)))
-        loop = loop @ self.loop_to_grid.T
         k2 = self.k[:, None] ** 2
-        return np.stack([(1 + f * mu2) ** 2 * plin, loop, k2 * plin * np.ones_like(mu2), k2 * plin * mu2,
-                         k2 * plin * mu2**2])
+        parts = loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True)
+        loop = self._to_grid(parts["loop"])
+        if not self.ir:
+            return np.stack([(1 + f * mu2) ** 2 * plin, loop, k2 * plin * np.ones_like(mu2), k2 * plin * mu2,
+                             k2 * plin * mu2**2])
+        from .ir import damping, split_linear
+
+        nowiggle, sigma2, dsigma2, _ = split_linear(spectrum, h, r_bao / h)
+        pnw = nowiggle(self.k)[:, None]
+        parts_nw = loop_integrals(self.k_loop, self.mu_loop, nowiggle, f, None, self.quadrature, rsd=True)
+        ratio = (spectrum(self.k_loop) / nowiggle(self.k_loop) - 1.0)[:, None]
+        wiggle = self._to_grid(parts["22"] - parts_nw["22"] + parts_nw["13"] * ratio)
+        d = np.asarray(damping(self.k, self.mu, f, sigma2, dsigma2))
+        pw = plin - pnw
+        damped = pnw + np.exp(-d) * pw
+        return np.stack([(1 + f * mu2) ** 2 * (pnw + np.exp(-d) * (1 + d) * pw), loop + (np.exp(-d) - 1) * wiggle,
+                         k2 * damped, k2 * damped * mu2, k2 * damped * mu2**2])
 
 
 def lagrange_matrix(nodes, points):

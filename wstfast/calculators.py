@@ -214,6 +214,7 @@ class RSDBasis(Calculator):
 
     Outputs ``grid_terms`` (5, nk, nmu): GRID_TERMS of ``wstfast.theory.rsd.RSDGrid``; ``kappa`` (ncoef, L + 1) and
     ``skewness2`` (ncoef,): the velocity-damped tree cumulants of the S1m blocks of ``coefficients``; and ``dlogA``.
+    With ``ir``, the grid is BAO IR-resummed (``wstfast.theory.rsd.RSDGrid``).
     Rows are rescaled by powers of A_s / POWER_AMPLITUDE (Kaiser and counterterms 1, loop 2, kappa 3, skewness^2 4)
     so that a Taylor emulator is nearly exact in logA (the damping breaks this slightly). NumPy (pure_callback).
     """
@@ -221,29 +222,31 @@ class RSDBasis(Calculator):
     _is_external = True
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
-                 damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16):
+                 damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
-                      damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16):
+                      damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False):
         from .theory.rsd import RSDGrid, RSDS1Basis
 
         self.z = float(z)
-        self.grid = RSDGrid(kmax=kmax)
+        self.grid = RSDGrid(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         self.cumulant_model = (RSDS1Basis(config, self.coefficients, damping=damping, npoints=npoints, lattice=False)
                                if self.coefficients else None)
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_m", "z": self.z, "k": self.klin}],
                                      "fourier.sigma8_z": [{"of": "delta_cb", "z": self.z}, {"of": "theta_cb", "z": self.z}],
-                                     "params.A_s": None})
+                                     "params.A_s": None, "params.h": None, "thermodynamics.rs_drag": None})
 
     def __call__(self):
         pk = np.asarray(self.cosmo.get("fourier.pk", of="delta_m", z=self.z, k=self.klin))
         f = float(self.cosmo.get("fourier.sigma8_z", of="theta_cb", z=self.z)
                   / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
         ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE
-        self.grid_terms = self.grid(self.klin, pk, f) / np.array([ratio, ratio**2, ratio, ratio, ratio])[:, None, None]
+        h, r_bao = float(self.cosmo.get("params.h")), float(self.cosmo.get("thermodynamics.rs_drag"))
+        self.grid_terms = (self.grid(self.klin, pk, f, h=h, r_bao=r_bao)
+                           / np.array([ratio, ratio**2, ratio, ratio, ratio])[:, None, None])
         if self.cumulant_model is not None:
             kappa, skewness2 = self.cumulant_model.cumulants(self.klin, pk, f)
         else:
