@@ -581,21 +581,38 @@ class S21mTheory(Calculator):
     """
 
     def __init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
-                 cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter"):
+                 cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
+                 noise_shot: bool = False, full_norm: bool = False):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        # With full_norm, the S1m counterterms (shared by name) enter the first-layer variance.
+        self.counterterms = _rsd_counterterms("", "") if full_norm and tracer == "biased" else {}
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
+        # Free amplitude of the Poisson ("same-object") bispectrum term of the response, B > (1 + B_shot) P(K) / nbar:
+        # halos are not Poisson, and this stochastic term is independent of the power-spectrum one (alpha0).
+        self.bshot_params = ({"B_shot": Parameter("B_shot", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
+                                                                                  limits=[-5.0, 5.0]),
+                                                  ref=dict(dist="norm", loc=0.0, scale=0.1), latex=r"B_{\rm shot}")}
+                             if bispectrum_shot and tracer == "biased" else {})
+        # Free amplitude of the discreteness terms of the modulus noise, g > (1 + alpha_N) N [2 P + (1 + alpha_N) N]:
+        # the 4-point stochasticity of halos need not be Poisson either.
+        self.nshot_params = ({"alpha_N": Parameter("alpha_N", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
+                                                                                   limits=[-1.0, 5.0]),
+                                                   ref=dict(dist="norm", loc=0.0, scale=0.05), latex=r"\alpha_N")}
+                             if noise_shot and tracer == "biased" else {})
         self.noise = {key: Parameter(f"noise_j{key[0]}_l{key[1]}_m{key[2]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
                                      ref=dict(dist="norm", loc=0.0, scale=0.05),
                                      latex=rf"a_{{N,{key[0]},{key[1]},{key[2]}}}")
                       for key in first_layer_fields(coefficients)}
 
     def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
-                      cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter"):
+                      cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
+                      noise_shot: bool = False, full_norm: bool = False):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
+        self.k2mu2 = jnp.asarray(projection.k2mu2)
         self.shot = jnp.asarray(projection.shot)
         entries = s21m_entries(coefficients)
         self.entry_index = np.arange(len(entries)) if entry_index is None else np.asarray(entry_index)
@@ -635,8 +652,15 @@ class S21mTheory(Calculator):
                                                 self.shotnoise)
             r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
             norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
-            terms = jnp.stack([(r0 + noise * r1 + noise**2 * r2) @ m4 / norm2,
-                               (g0 @ m4 + noise * g1 @ m2 + noise**2 * g2[:, 0]) / norm2], axis=1)
+            if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block
+                c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
+                grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value)
+                full = self.matrix @ grid.ravel() + noise * self.shot
+                norm2 = norm2 * (full / linear)[self.block_index] ** 2
+            nr = noise * (1 + self.bshot_params["B_shot"].value) if self.bshot_params else noise
+            ng = noise * (1 + self.nshot_params["alpha_N"].value) if self.nshot_params else noise
+            terms = jnp.stack([(r0 + nr * r1 + nr**2 * r2) @ m4 / norm2,
+                               (g0 @ m4 + ng * g1 @ m2 + ng**2 * g2[:, 0]) / norm2], axis=1)
         e_q, e_1, start = [], [], 0
         for index, ell in enumerate(self.first_ells):
             lin = linear[start:start + ell + 1]
