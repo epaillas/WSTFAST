@@ -22,6 +22,9 @@ measured. Examples:
     # a single dyadic configuration
     python scripts/measure_quijote_wst.py --realizations 0-1499 --J 4 --L 4 --sigma0 0.8 --q 0.8
 
+    # skip the realizations listed in a file (ids or ranges, whitespace-separated), e.g. boxes on a down OST
+    python scripts/measure_quijote_wst.py --superset --exclude $SCRATCH/bad_realizations.txt
+
     # line-of-sight-resolved moduli (S1m, S2m, ...; see wstfast.measure.measure_wst), written to {tag}_los
     python scripts/measure_quijote_wst.py --superset --los-resolved --backend torch
 """
@@ -49,6 +52,14 @@ def parse_realizations(items: list[str]) -> list[int]:
     return out
 
 
+def read_exclusions(items: list[str]) -> list[str]:
+    """Expand every item that is an existing file into the whitespace-separated ids and ranges it lists."""
+    out = []
+    for item in items:
+        out.extend(Path(item).read_text().split() if Path(item).is_file() else [item])
+    return out
+
+
 def discover_realizations(root: Path, redshift: float) -> list[int]:
     """Numeric sub-folders of ``root`` that contain the snapshot directory of ``redshift``."""
     snapdir = f"snapdir_{SNAPNUM[redshift]}"
@@ -63,6 +74,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--realizations", nargs="+", default=None,
                         help="ids and inclusive ranges, e.g. 0-1499 (default: all found under --snapshot-root)")
+    parser.add_argument("--exclude", nargs="+", default=[],
+                        help="ids and inclusive ranges to skip, or a file of them (e.g. boxes on unavailable OSTs)")
     parser.add_argument("--shard", type=int, nargs=2, metavar=("INDEX", "COUNT"), default=(0, 1),
                         help="only process every COUNT-th realization starting at INDEX (e.g. one shard per GPU)")
     parser.add_argument("--spaces", nargs="+", choices=("real", "rsd"), default=["real", "rsd"])
@@ -116,6 +129,8 @@ def main():
         realizations = discover_realizations(args.snapshot_root, args.redshift)
     else:
         realizations = parse_realizations(args.realizations)
+    excluded = set(parse_realizations(read_exclusions(args.exclude)))
+    realizations = [realization for realization in realizations if realization not in excluded]
     index, count = args.shard
     realizations = realizations[index::count]
     print(f"{len(realizations)} realizations to process (shard {index + 1}/{count})", flush=True)
