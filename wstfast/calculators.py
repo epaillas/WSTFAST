@@ -327,15 +327,21 @@ class BiasParameters:
     ``bias_beta(self.bias_params)``.
     """
 
-    SPECS = {"b1": (2.0, [0.0, 5.0], 0.1, "b_1"), "b2": (0.0, [-20.0, 20.0], 0.5, "b_2"),
-             "bG2": (0.0, [-20.0, 20.0], 0.5, r"b_{\mathcal{G}_2}"),
-             "bGamma3": (0.0, [-20.0, 20.0], 0.5, r"b_{\Gamma_3}"),
-             "alpha0": (0.0, [-1.0, 2.0], 0.05, r"\alpha_0"), "alpha2": (0.0, [-100.0, 100.0], 2.0, r"\alpha_2")}
+    #: name: (fiducial value, limits, Gaussian prior sigma (None: flat within the limits), reference scale, latex).
+    #: Gaussian priors centred on zero for the poorly constrained nuisances, as in EFT analyses of galaxies.
+    SPECS = {"b1": (2.0, [0.0, 5.0], None, 0.1, "b_1"),
+             "b2": (0.0, [-20.0, 20.0], 1.0, 0.5, "b_2"),
+             "bG2": (0.0, [-20.0, 20.0], 1.0, 0.5, r"b_{\mathcal{G}_2}"),
+             "bGamma3": (0.0, [-20.0, 20.0], 1.0, 0.5, r"b_{\Gamma_3}"),
+             "alpha0": (0.0, [-1.0, 2.0], 0.3, 0.05, r"\alpha_0"),
+             "alpha2": (0.0, [-100.0, 100.0], 10.0, 2.0, r"\alpha_2")}
 
     def __init__(self):
-        self.params = {name: Parameter(name, value=value, prior=dict(limits=limits),
-                                       ref=dict(dist="norm", loc=value, scale=scale), latex=latex)
-                       for name, (value, limits, scale, latex) in self.SPECS.items()}
+        self.params = {}
+        for name, (value, limits, sigma, scale, latex) in self.SPECS.items():
+            prior = dict(limits=limits) if sigma is None else dict(dist="norm", loc=0.0, scale=sigma, limits=limits)
+            self.params[name] = Parameter(name, value=value, prior=prior, ref=dict(dist="norm", loc=value, scale=scale),
+                                          latex=latex)
 
 
 
