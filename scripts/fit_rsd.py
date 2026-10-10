@@ -85,6 +85,10 @@ def parse_args(argv=None):
     parser.add_argument("--full-norm", action="store_true",
                         help="biased tracers: normalise the S21m modulus spectra by the one-loop first-layer variance "
                              "(with the S1m counterterms) instead of the tree-level one")
+    parser.add_argument("--response-amplitude", action="store_true",
+                        help="free S21m response amplitude a_R_j per first-layer scale (r -> (1 + a_R_j) r)")
+    parser.add_argument("--k2-stochastic", action="store_true",
+                        help="biased tracers: isotropic scale-dependent stochastic term alpha_k2 k^2 V/N (halo exclusion)")
     parser.add_argument("--shared-counterterms", action="store_true",
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
@@ -178,7 +182,7 @@ def build_problem(args, basis=None, settings=None):
                                       cumulant_index=[emulated.index(c.label) for c in coefficients],
                                       correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
                                       sigmas=[config.sigma(c.j) for c in coefficients],
-                                      k4_counterterm=args.k4_counterterm))
+                                      k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic))
             vectors.append(s1m.vectors)
             prefix = f"q{q:g}:" if len(args.q) > 1 else ""
             labels += [f"{prefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
@@ -209,7 +213,8 @@ def build_problem(args, basis=None, settings=None):
                                    basis=basis, entry_index=entry_index,
                                    cumulant_index=[emulated.index(c.label) for c in first_layer],
                                    shotnoise=s21m.shotnoise, tracer=tracer, bispectrum_shot=args.b_shot,
-                                   noise_shot=args.noise_shot, full_norm=args.full_norm))
+                                   noise_shot=args.noise_shot, full_norm=args.full_norm,
+                                   response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic))
         vectors.append(s21m.vectors)
         labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -221,7 +226,7 @@ def build_problem(args, basis=None, settings=None):
         projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
         theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer,
                                        shared_counterterms=args.shared_counterterms,
-                                       k4_counterterm=args.k4_counterterm))
+                                       k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic))
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
@@ -271,7 +276,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),

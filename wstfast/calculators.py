@@ -354,7 +354,11 @@ def bias_beta(params):
 from .theory.rsd_bias import TREE as TREE_INDEX  # noqa: E402
 
 
-def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None):
+def _value(params, name):
+    return params[name].value if params else None
+
+
+def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2=None, alpha_k2=None):
     """P_s grid and its tree part from the biased rows (BIASED_GRID_TERMS), with the stochastic k^2 mu^2 term and,
     with ``ck4`` [(Mpc/h)^4], the next-to-leading redshift-space counterterm -ck4 k^4 mu^4 (b1 + f mu^2)^2 P_L (the
     f^4 of the usual c~ (f mu)^4 k^4 form is absorbed into ck4)."""
@@ -369,6 +373,8 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None):
     grid = tree + loop - 2 * (c0 * rows[-3] + c2 * rows[-2] + c4 * rows[-1]) + shotnoise * alpha2 * k2mu2
     if ck4 is not None:
         grid = grid - ck4 * k2mu2**2 * tree
+    if alpha_k2 is not None:  # isotropic scale-dependent stochasticity (halo exclusion): alpha_k2 k^2 V / N
+        grid = grid + shotnoise * alpha_k2 * k2
     return grid, tree
 
 
@@ -392,6 +398,14 @@ def _k4_counterterm(enabled, prefix, latex):
         return {}
     return {"ck4": Parameter(f"ck4{prefix}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
                              ref=dict(dist="norm", loc=0.0, scale=20.0), latex=rf"\tilde{{c}}{latex}")}
+
+
+def _k2_stochastic(enabled):
+    """{'alpha_k2': Parameter} of the isotropic k^2 stochastic term (``biased_grid``) [(Mpc/h)^2], or {}."""
+    if not enabled:
+        return {}
+    return {"alpha_k2": Parameter("alpha_k2", value=0.0, prior=dict(dist="norm", loc=0.0, scale=20.0, limits=[-200.0, 200.0]),
+                                  ref=dict(dist="norm", loc=0.0, scale=1.0), latex=r"\alpha_{k^2}")}
 
 
 def _rsd_counterterms(prefix, latex):
@@ -425,8 +439,9 @@ class RSDPowerTheory(Calculator):
     """
 
     def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
-                 shared_counterterms: bool = False, k4_counterterm: bool = False):
+                 shared_counterterms: bool = False, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.basis = basis
+        self.k2_params = _k2_stochastic(k2_stochastic)
         self.k4_params = _k4_counterterm(k4_counterterm, "" if shared_counterterms else "_pk",
                                          "" if shared_counterterms else r"^{P}")
         # Shared: the S1m names (c0, c2, c4), so that desilike merges them with the S1m counterterms of a joint fit.
@@ -436,9 +451,10 @@ class RSDPowerTheory(Calculator):
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
 
     def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
-                      shared_counterterms: bool = False, k4_counterterm: bool = False):
+                      shared_counterterms: bool = False, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.k2mu2 = jnp.asarray(projection.k2mu2)
+        self.k2 = jnp.asarray(projection.k2)
         if ap is None:
             self.matrix = jnp.asarray(projection.matrix)
             self.shot = jnp.asarray(projection.shot)
@@ -453,7 +469,7 @@ class RSDPowerTheory(Calculator):
             rows = biased_rows(self.basis)[0]
             ck4 = self.k4_params["ck4"].value if self.k4_params else None
             grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
-                                  self.bias_params["alpha2"].value, ck4)
+                                  self.bias_params["alpha2"].value, ck4, self.k2, _value(self.k2_params, "alpha_k2"))
             noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
         if self.ap is None:
             self.flattheory = self.matrix @ grid.ravel() + noise * self.shot
@@ -489,8 +505,9 @@ class S1mTheory(Calculator):
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                 sigmas=None, k4_counterterm: bool = False):
+                 sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.basis = basis
+        self.k2_params = _k2_stochastic(k2_stochastic)
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
         self.k4_params = _k4_counterterm(k4_counterterm, "", "")
@@ -500,7 +517,7 @@ class S1mTheory(Calculator):
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                      sigmas=None, k4_counterterm: bool = False):
+                      sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
@@ -508,6 +525,7 @@ class S1mTheory(Calculator):
         self.ng_slope = None if sigmas is None else (NG_PIVOT / np.asarray(sigmas, dtype=float)) ** 2 - 1
         self.ng_names = [f"a_ng_j{c.j}" for c in coefficients]
         self.k2mu2 = jnp.asarray(projection.k2mu2)
+        self.k2 = jnp.asarray(projection.k2)
         if ap is None:
             self.matrix = jnp.asarray(projection.matrix)
             self.noise = jnp.asarray(shotnoise * projection.shot)
@@ -537,7 +555,8 @@ class S1mTheory(Calculator):
                                                 self.shotnoise)
             ck4 = self.k4_params["ck4"].value if self.k4_params else None
             grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise,
-                                            self.bias_params["alpha2"].value, ck4)
+                                            self.bias_params["alpha2"].value, ck4, self.k2,
+                                            _value(self.k2_params, "alpha_k2"))
             noise = linear_noise = 1 + self.bias_params["alpha0"].value
         if self.ap is None:
             variances = self.matrix @ grid.ravel() + noise * self.noise
@@ -582,10 +601,18 @@ class S21mTheory(Calculator):
 
     def __init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
                  cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
-                 noise_shot: bool = False, full_norm: bool = False):
+                 noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
+                 k2_stochastic: bool = False):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        self.k2_params = _k2_stochastic(k2_stochastic and full_norm)
+        # Free amplitude of the modulus response, r -> (1 + a_R_j) r, per first-layer scale j1 (measured: the model
+        # response is low by a few percent, nearly uniformly in l and |m| at fixed j1).
+        self.response_params = ({f"a_R_j{j}": Parameter(f"a_R_j{j}", value=0.0, prior=dict(dist="norm", loc=0.0, scale=0.2,
+                                                                                         limits=[-0.5, 1.0]),
+                                                        ref=dict(dist="norm", loc=0.0, scale=0.02), latex=rf"a_{{R,{j}}}")
+                                 for j in sorted({c.j for c in coefficients})} if response_amplitude else {})
         # With full_norm, the S1m counterterms (shared by name) enter the first-layer variance.
         self.counterterms = _rsd_counterterms("", "") if full_norm and tracer == "biased" else {}
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
@@ -608,11 +635,14 @@ class S21mTheory(Calculator):
 
     def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
                       cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
-                      noise_shot: bool = False, full_norm: bool = False):
+                      noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
+                      k2_stochastic: bool = False):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
+        self.entry_j = np.array([coefficients[i].j for i, _, _ in s21m_entries(coefficients)])
         self.k2mu2 = jnp.asarray(projection.k2mu2)
+        self.k2 = jnp.asarray(projection.k2)
         self.shot = jnp.asarray(projection.shot)
         entries = s21m_entries(coefficients)
         self.entry_index = np.arange(len(entries)) if entry_index is None else np.asarray(entry_index)
@@ -654,7 +684,8 @@ class S21mTheory(Calculator):
             norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
             if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block
                 c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-                grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value)
+                grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
+                                      k2=self.k2, alpha_k2=_value(self.k2_params, "alpha_k2"))
                 full = self.matrix @ grid.ravel() + noise * self.shot
                 norm2 = norm2 * (full / linear)[self.block_index] ** 2
             nr = noise * (1 + self.bshot_params["B_shot"].value) if self.bshot_params else noise
@@ -669,6 +700,9 @@ class S21mTheory(Calculator):
             start += ell + 1
         e_q, e_1 = jnp.concatenate(e_q)[self.block_index], jnp.concatenate(e_1)[self.block_index]
         amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
+        if self.response_params:
+            scale = jnp.stack([(1 + self.response_params[f"a_R_j{j}"].value) ** 2 for j in self.entry_j])
+            terms = jnp.stack([terms[:, 0] * scale, terms[:, 1]], axis=1)
         self.flattheory = s21m_from_terms(terms, amplitudes, self.n1, self.n2, self.q, e_q, e_1)
         return self.flattheory
 
