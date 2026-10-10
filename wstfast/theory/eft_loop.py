@@ -234,10 +234,12 @@ def _vectors(k,mu,p,x,phi):
     return kv,pv
 
 
-def loop_integrals(k,mu,power,f,convention=EFTLoopConvention(),quadrature=Quadrature(),rsd=True):
+def loop_integrals(k,mu,power,f,convention=EFTLoopConvention(),quadrature=Quadrature(),rsd=True,biased=False):
     """Return separate 22, 13 and combined matter loops, each of shape (nk, nmu).
 
     convention=None is an explicitly unregulated SPT reference.
+    With ``biased`` (wstfast addition), the loops of Eulerian-biased tracers (``wstfast.theory.bias``), as the
+    coefficients of the degree-2 bias monomials: shape (nk, nmu, nmono).
     """
     k,mu=np.asarray(k,dtype=float),np.asarray(mu,dtype=float)
     if k.ndim!=1 or mu.ndim!=1 or np.any(k<=0) or np.any(np.abs(mu)>1) or not np.isfinite(k).all() or not np.isfinite(mu).all():
@@ -249,11 +251,18 @@ def loop_integrals(k,mu,power,f,convention=EFTLoopConvention(),quadrature=Quadra
     if convention is not None and np.max(k)>convention.cutoff:
         raise ValueError('reference output must satisfy k <= cutoff')
     shape=(len(k),len(mu))
+    if biased:
+        from .bias import galaxy_kernel, monomial_exponents, product_coefficients
+        shape=shape+(len(monomial_exponents(2)),)
     results={name:np.zeros(shape) for name in ('22','13','loop')}
     gx,gw=np.polynomial.legendre.leggauss(quadrature.nx)
     phi=2*np.pi*np.arange(quadrature.nphi)/quadrature.nphi
     def fields(vectors):
-        return matter_kernel(vectors,f,rsd=rsd)
+        return galaxy_kernel(vectors,f) if biased else matter_kernel(vectors,f,rsd=rsd)
+    def square(a,b):
+        return product_coefficients(a,b) if biased else a*b
+    def expand(w):
+        return w[...,None] if biased else w
     for ik,ki in enumerate(k):
         p,rw=radial_rule(quadrature.qmin,quadrature.qmax,quadrature.nq,breaks=(ki/2,ki,2*ki))
         for start in range(0,len(p),quadrature.chunk):
@@ -268,9 +277,9 @@ def loop_integrals(k,mu,power,f,convention=EFTLoopConvention(),quadrature=Quadra
                 Pp=power(pp)[None,:,None,None]
                 gamma=fields(np.stack([kv,pv,-pv],axis=-2))
                 lin=fields(kv[...,None,:])
-                i13=6*lin*power(ki)*Pp*gamma
+                i13=6*expand(power(ki)*Pp)*square(lin,gamma)
                 if convention is not None:
-                    i13=i13*convention.covariance(pp)[None,:,None,None]
+                    i13=i13*expand(convention.covariance(pp)[None,:,None,None])
                 i22=np.zeros_like(i13)
                 for sign in (1.,-1.):
                     leg=sign*pv; remainder=kv-leg
@@ -280,11 +289,11 @@ def loop_integrals(k,mu,power,f,convention=EFTLoopConvention(),quadrature=Quadra
                     weight=2*Pp*power(pr)*(pr>pp[None,:,None,None])
                     if convention is not None:
                         weight*=convention.weights(ki,pp[None,:,None,None],pr)[0]
-                    i22+=K2*K2*weight
+                    i22+=square(K2,K2)*expand(weight)
                 weight=rrw[:,None]*pp[:,None]**3*wx/(2*np.pi**2*quadrature.nphi)
                 # x now covers [0,1] and the integrand is the parity average;
                 # angular normalization is dphi/(2pi) dx, with no extra 1/2.
-                weight=weight[None,:,:,None]
+                weight=expand(weight[None,:,:,None])
                 for name,value in (('22',i22),('13',i13),('loop',i22+i13)):
                     results[name][ik]+=np.sum(weight*value,axis=(1,2,3))
     return results

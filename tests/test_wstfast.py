@@ -195,3 +195,74 @@ def test_torch_line_of_sight_matches_numpy():
     assert set(result) == set(reference)
     for name in ("S1m", "S2m", "Umean_m", "PUU_m"):
         np.testing.assert_allclose(result[name], reference[name], rtol=2e-4, atol=1e-9)
+
+
+def test_rsd_moments_reduce_to_isotropic_limit():
+    from wstfast.theory.rsd import anisotropic_moment, edgeworth_tensors, multiplicity
+
+    q, s2 = 0.8, 0.37
+    for ell in (0, 1, 3):
+        n = 2 * ell + 1
+        lam = np.full(ell + 1, s2)
+        exact = (2 * s2) ** (q / 2) * np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
+        assert float(anisotropic_moment(lam, multiplicity(ell), q)) == pytest.approx(exact, rel=1e-4)
+        moment, t4, t22 = edgeworth_tensors(lam, multiplicity(ell), q)
+        a4 = q * (q - 2) * exact / (n * (n + 2) * s2**2)  # E_G[d^4 r^q] per pairing, isotropic
+        assert float(t4[0]) == pytest.approx(3 * a4, rel=1e-8)
+        assert float(t22[0, -1]) == pytest.approx(a4, rel=1e-8)
+
+
+def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
+    from wstfast.theory.ap import QUIJOTE_FIDUCIAL as fid, ap_ratios, observed_to_true
+    from wstfast.theory.rsd import MultipoleProjection, RSDGrid, multipole_ap_projection
+
+    assert np.allclose(ap_ratios(0.5, fid.h, fid.omega_b, fid.omega_cdm), 1.0)
+    qpar, qperp = ap_ratios(0.5, 0.70, fid.omega_b, fid.omega_cdm)
+    assert qpar > 1.0 and qperp > 1.0  # larger h: shorter H^-1 in Mpc, longer in Mpc/h
+
+    grid = RSDGrid(kmax=0.12, nmu=8)
+    model = lambda k, mu: (1 + 0.7 * mu**2) ** 2 * np.exp(-((k / 0.05) ** 2))  # noqa: E731  (polynomial in mu^2)
+    rows = model(*np.meshgrid(grid.k, grid.mu, indexing="ij"))[None]
+    edges = np.linspace(0.02, 0.1, 9)
+    fixed, ap = MultipoleProjection(edges, grid, boxsize=500.0, nmesh=64), multipole_ap_projection(
+        edges, grid, boxsize=500.0, nmesh=64)
+    np.testing.assert_allclose(ap(rows, 1.0, 1.0, 2.0)[0], fixed.matrix @ rows[0].ravel() + 2.0 * fixed.shot,
+                               rtol=1e-10, atol=1e-12)
+    k, mu, volume = observed_to_true(ap.k, ap.mu, 1.03, 0.98)
+    exact = volume * (np.asarray(ap.weights) @ model(np.asarray(k), np.asarray(mu)))
+    np.testing.assert_allclose(ap(rows, 1.03, 0.98)[0], exact, rtol=1e-3, atol=1e-4)
+
+
+def test_block_pair_kernels_sum_to_isotropic_kernel():
+    from wstfast.theory.moduli import legendre
+    from wstfast.theory.rsd_moduli import _harmonic, s21m_entries
+    from wstfast.config import Coefficient
+
+    rng = np.random.default_rng(3)
+    p, q = rng.normal(size=(50, 3)), rng.normal(size=(50, 3))
+    cos = np.sum(p * q, axis=1) / np.linalg.norm(p, axis=1) / np.linalg.norm(q, axis=1)
+    for ell in (1, 2, 3, 4):
+        blocks = sum(4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
+                     * np.real(_harmonic(ell, m, p) * np.conj(_harmonic(ell, m, q))) for m in range(ell + 1))
+        np.testing.assert_allclose(blocks, np.asarray(legendre(ell, cos)), atol=1e-12)
+    entries = s21m_entries([Coefficient("S21", 2, 5, 9), Coefficient("S21", 1, 6, 9)])
+    assert len(entries) == 9 + 4 and entries[0] == (0, 0, 0) and entries[-1] == (1, 1, 1)
+
+
+def test_s1m_edgeworth_amplitude_per_coefficient():
+    from wstfast.theory.rsd import s1m_from_variances
+
+    ells, q = [0, 2, 1], 0.8
+    nblocks = sum(ell + 1 for ell in ells)
+    rng = np.random.default_rng(3)
+    variances = 1.0 + rng.random(nblocks)
+    linear = 0.9 * variances
+    kappa = 0.05 * rng.random((len(ells), 3))
+    skewness2 = 0.01 * rng.random(len(ells))
+    scalar = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=0.9)
+    uniform = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=[0.9] * 3)
+    np.testing.assert_allclose(uniform, scalar, rtol=1e-14)
+    gaussian = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=0.0)
+    mixed = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=[0.9, 0.0, 0.9])
+    np.testing.assert_allclose(mixed[1:4], gaussian[1:4], rtol=1e-14)  # the l = 2 blocks
+    np.testing.assert_allclose(mixed[:1], scalar[:1], rtol=1e-14)

@@ -12,7 +12,7 @@ from desilike import build, get_params
 from .calculators import (JointTheory, PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory,
                           build_cosmology)
 from .config import QUIJOTE_COSMOLOGY, WSTConfig
-from .data import PowerDataset, WSTDataset
+from .data import PowerDataset, WSTDataset, chi_squared
 from .theory.power import LatticeBinning, default_knodes
 
 
@@ -251,7 +251,7 @@ def plot_fit(path: Path, likelihood, dataset: WSTDataset, covariance: np.ndarray
     data, model = np.asarray(likelihood.flatdata), np.asarray(likelihood.flattheory)
     error = np.sqrt(np.diag(covariance))
     residual = data - model
-    chi2 = float(residual @ np.linalg.solve(covariance, residual))
+    chi2 = chi_squared(residual, covariance)
     coefficients = dataset.coefficients
     kinds = [kind for kind in ("S1", "S21") if any(c.kind == kind for c in coefficients)]
     counts = [sum(c.kind == kind for c in coefficients) for kind in kinds]

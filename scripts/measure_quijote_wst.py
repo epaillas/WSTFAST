@@ -27,6 +27,9 @@ measured. Examples:
 
     # line-of-sight-resolved moduli (S1m, S2m, ...; see wstfast.measure.measure_wst), written to {tag}_los
     python scripts/measure_quijote_wst.py --superset --los-resolved --backend torch
+
+    # FoF halos of mass >= 1e13 Msun/h (all Quijote FoF halos: >= 20 particles), written to halos_m13_{tag}_los
+    python scripts/measure_quijote_wst.py --tracer halos --mmin 1e13 --superset --los-resolved --spaces rsd
 """
 
 from __future__ import annotations
@@ -35,10 +38,12 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
+
 from wstfast.config import SUPERSET, WSTConfig
 from wstfast.data import save_measurement
 from wstfast.measure import Lattice, PowerMultipoles, measure_wst
-from wstfast.quijote import SNAPNUM, SNAPSHOT_ROOT, load_density
+from wstfast.quijote import HALO_ROOT, SNAPNUM, SNAPSHOT_ROOT, load_density, load_halo_density
 
 SUPERSET_QS = [0.5, 0.8, 1.0, 2.0]
 
@@ -60,11 +65,11 @@ def read_exclusions(items: list[str]) -> list[str]:
     return out
 
 
-def discover_realizations(root: Path, redshift: float) -> list[int]:
-    """Numeric sub-folders of ``root`` that contain the snapshot directory of ``redshift``."""
-    snapdir = f"snapdir_{SNAPNUM[redshift]}"
+def discover_realizations(root: Path, redshift: float, tracer: str = "matter") -> list[int]:
+    """Numeric sub-folders of ``root`` that contain the snapshot (or FoF catalogue) directory of ``redshift``."""
+    snapdir = f"snapdir_{SNAPNUM[redshift]}" if tracer == "matter" else f"groups_{SNAPNUM[redshift]}"
     found = sorted(int(path.name) for path in Path(root).iterdir()
-                   if path.name.isdigit() and (path / snapdir).is_dir())
+                   if path.name.isdigit() and (path / snapdir).is_dir() and any((path / snapdir).iterdir()))
     if not found:
         raise FileNotFoundError(f"no realizations with {snapdir} under {root}")
     return found
@@ -97,12 +102,17 @@ def parse_args():
     parser.add_argument("--backend", choices=("numpy", "torch"), default="numpy",
                         help="torch runs painting and the WST on --device (e.g. a GPU)")
     parser.add_argument("--device", default="auto", help="torch device: auto, cpu or cuda")
-    parser.add_argument("--snapshot-root", type=Path, default=SNAPSHOT_ROOT)
+    parser.add_argument("--tracer", choices=("matter", "halos"), default="matter")
+    parser.add_argument("--mmin", type=float, default=1e13, help="halos: smallest FoF mass [Msun/h]")
+    parser.add_argument("--snapshot-root", type=Path, default=None,
+                        help=f"default {SNAPSHOT_ROOT} (matter) or {HALO_ROOT} (halos)")
     parser.add_argument("--output-dir", type=Path, default=Path("data/quijote/fiducial/z0.5"))
     args = parser.parse_args()
     if args.superset:
         args.J, args.L, args.L2, args.min_dj, args.step = SUPERSET.J, SUPERSET.L, SUPERSET.L2, SUPERSET.min_dj, SUPERSET.step
         args.sigma0, args.q = [SUPERSET.sigma0], SUPERSET_QS
+    if args.snapshot_root is None:
+        args.snapshot_root = SNAPSHOT_ROOT if args.tracer == "matter" else HALO_ROOT
     return args
 
 
@@ -126,7 +136,7 @@ def main():
     configs = [WSTConfig(J=args.J, L=args.L, L2=args.L2, min_dj=args.min_dj, step=args.step, sigma0=sigma0,
                          q=args.q[0]) for sigma0 in args.sigma0]
     if args.realizations is None:
-        realizations = discover_realizations(args.snapshot_root, args.redshift)
+        realizations = discover_realizations(args.snapshot_root, args.redshift, args.tracer)
     else:
         realizations = parse_realizations(args.realizations)
     excluded = set(parse_realizations(read_exclusions(args.exclude)))
@@ -137,7 +147,8 @@ def main():
     for realization in realizations:
         for space in args.spaces:
             suffix = "_los" if args.los_resolved else ""
-            paths = {config: args.output_dir / (config.tag(args.nmesh) + suffix) / space / f"wst_r{realization:05d}.npz"
+            prefix = "" if args.tracer == "matter" else f"halos_m{np.log10(args.mmin):g}_"
+            paths = {config: args.output_dir / (prefix + config.tag(args.nmesh) + suffix) / space / f"wst_r{realization:05d}.npz"
                      for config in configs}
             pending = {config: path for config, path in paths.items() if not path.exists()}
             for path in set(paths.values()) - set(pending.values()):
@@ -145,13 +156,19 @@ def main():
             if not pending:
                 continue
             start = time.time()
-            delta, header = load_density(realization, redshift=args.redshift, nmesh=args.nmesh,
-                                         rsd=space == "rsd", root=args.snapshot_root, device=device)
+            if args.tracer == "matter":
+                delta, header = load_density(realization, redshift=args.redshift, nmesh=args.nmesh,
+                                             rsd=space == "rsd", root=args.snapshot_root, device=device)
+            else:
+                delta, header = load_halo_density(realization, redshift=args.redshift, nmesh=args.nmesh,
+                                                  rsd=space == "rsd", mmin=args.mmin, root=args.snapshot_root,
+                                                  device=device)
             spectra = spectra or multipoles(lattice, header["boxsize"], kmax=args.kmax)
             metadata = dict(realization=realization, space=space, los="z" if space == "rsd" else None,
                             redshift=round(header["redshift"], 6), boxsize=header["boxsize"], nmesh=args.nmesh,
                             nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend,
-                            los_resolved=args.los_resolved)
+                            los_resolved=args.los_resolved, tracer=args.tracer,
+                            **({"mmin": args.mmin} if args.tracer == "halos" else {}))
             for config, path in pending.items():
                 config = WSTConfig(**{**config.to_dict(), "cellsize": header["boxsize"] / args.nmesh})
                 result = estimator(delta, config, qs=args.q, lattice=lattice, spectra=spectra, los=args.los_resolved)

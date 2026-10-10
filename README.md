@@ -118,17 +118,42 @@ and `--s21-min-ratio`.
 The cosmology-dependent band integrals (`WSTBasis`) are what the emulator replaces. The nuisance
 parameters stay exact in `WSTTheory`, as in the DSC model.
 
-Not yet included:
-- one-loop responses;
-- redshift-space distortions;
-- galaxies.
+Not yet included in this real-space model: one-loop responses. Redshift space (line-of-sight-resolved
+S1m, S21m and P_ℓ, `wstfast/theory/rsd.py`, `rsd_moduli.py`, `scripts/fit_rsd.py`) and biased tracers are
+handled by the redshift-space model below.
+
+## Biased tracers (Quijote FoF halos)
+
+The redshift-space model extends to Eulerian-biased tracers (`wstfast/theory/bias.py`, `rsd_bias.py`).
+- **Bias expansion:** b1, b2, bG2, bΓ3 at one loop (the CLASS-PT basis, with the b2 parts of P13 and of the
+  k → 0 limit of P22 renormalized).
+- **Stochastic terms:** (1 + α0) V/N and α2 k²μ² V/N.
+- **Cumulants:** the Poisson terms of a discrete tracer enter the S1m cumulants, and the S21m response and
+  noise.
+- **Emulation:** every basis output is resolved into the coefficients of the monomials of
+  β = (1, b1, b2, bG2, bΓ3), so the emulator stays cosmology-only.
+- **Matter limit:** with β = (1, 1, 0, 0, 0) and no shot noise, the model is exactly the matter model
+  (`tests/test_bias.py`).
+
+```bash
+scripts/download_quijote_halos.sh 0 1999                      # Globus, ~26 MB per box
+python scripts/measure_quijote_wst.py --tracer halos --mmin 1e13 --superset --los-resolved --spaces rsd --backend torch
+python scripts/train_emulator.py --stat rsd --tracer biased --ir --vary omega_cdm logA n_s h \
+    --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \
+    --output outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5
+python scripts/fit_rsd.py --stats pk s1m s21m --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5 \
+    --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los ...
+```
+
+Quijote FoF catalogues stop at 20 particles (1.3e13 Msun/h), so `--mmin 1e13` keeps every halo
+(nbar ≈ 3.1e-4 (h/Mpc)^3 at z = 0.5).
 
 ## Layout
 
 - `wstfast/`
   - `config.py`: WST settings and coefficient selection.
   - `measure.py`: the WST estimator.
-  - `quijote.py`: snapshot reading and CIC painting.
+  - `quijote.py`: snapshot and FoF halo reading, CIC painting.
   - `data.py`: storage, data vectors and covariance.
   - `theory/`: SPT loops, zero-lag tree cumulants, modulus-field responses and noise, and model assembly (JAX);
     `eft_loop.py` (vendored from dsc-model) and `power.py` for the matter P(k).

@@ -49,6 +49,18 @@ def flatten(measurement: dict, coefficients) -> np.ndarray:
                      for c in coefficients])
 
 
+def precision_matrix(covariance: np.ndarray) -> np.ndarray:
+    """Inverse covariance, through the correlation matrix: data vectors that join statistics of very different
+    magnitude (P(k) ~ 1e4 and S21m ~ 1e-1) have variances spanning ~12 decades, beyond what a direct inverse resolves."""
+    scale = 1.0 / np.sqrt(np.diag(covariance))
+    return scale[:, None] * np.linalg.inv(scale[:, None] * covariance * scale[None, :]) * scale[None, :]
+
+
+def chi_squared(residual: np.ndarray, covariance: np.ndarray) -> float:
+    """residual^T C^-1 residual (``precision_matrix``)."""
+    return float(residual @ precision_matrix(covariance) @ residual)
+
+
 def sample_covariance(vectors: np.ndarray, kind: str = "sample", of_mean: bool = False) -> np.ndarray:
     """Covariance of one realization (or of the mean) of ``vectors`` (nreal, ndata), Hartlap-corrected for 'sample'.
 
@@ -69,6 +81,22 @@ def sample_covariance(vectors: np.ndarray, kind: str = "sample", of_mean: bool =
     else:
         raise ValueError(f"unknown covariance kind {kind!r}")
     return covariance / nreal if of_mean else covariance
+
+
+#: Settings every realization of a dataset must share (the number of objects may vary, for halos).
+SHARED_KEYS = ("redshift", "boxsize", "nmesh", "space")
+
+
+def common_metadata(metadatas, files) -> dict:
+    """Shared settings of the realizations, with ``nparticles`` replaced by the effective number V / <V / N> (the
+    mean shot noise; for particles all N are equal)."""
+    reference = {key: metadatas[0][key] for key in SHARED_KEYS}
+    for path, metadata in zip(files, metadatas):
+        if any(metadata[key] != reference[key] for key in SHARED_KEYS):
+            raise ValueError(f"{path} was measured with different settings")
+    reference["nparticles"] = 1.0 / float(np.mean([1.0 / m["nparticles"] for m in metadatas]))
+    reference["tracer"] = metadatas[0].get("tracer", "matter")
+    return reference
 
 
 @dataclass
@@ -100,10 +128,9 @@ def load_dataset(data_dir: Path, space: str, coefficients: list[Coefficient], q:
         raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
     measurements = [load_measurement(path, q=q) for path in files]
     config = measurements[0]["config"]
-    keys = ("redshift", "boxsize", "nmesh", "nparticles", "space")
-    reference = {key: measurements[0]["metadata"][key] for key in keys}
+    reference = common_metadata([m["metadata"] for m in measurements], files)
     for path, measurement in zip(files, measurements):
-        if measurement["config"] != config or any(measurement["metadata"][key] != reference[key] for key in keys):
+        if measurement["config"] != config:
             raise ValueError(f"{path} was measured with different settings")
     vectors = np.array([flatten(measurement, coefficients) for measurement in measurements])
     return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=config, metadata=reference,
@@ -135,37 +162,73 @@ class PowerDataset:
 
 
 def load_power_dataset(data_dir: Path, space: str = "real", kmin: float = 0.0, kmax: float = 0.2, rebin: int = 1,
-                       files=None) -> PowerDataset:
-    """P_dd monopole of every realization in bins of ``rebin`` x k_f, keeping bins with kmin <= k <= kmax.
+                       files=None, ells=(0,)) -> PowerDataset:
+    """P_dd multipoles ``ells`` (concatenated, ell-major) of every realization in bins of ``rebin`` x k_f, keeping bins
+    with kmin <= k <= kmax.
 
     Bins are merged from the first measured bin by mode-weighted averages; ``files`` fixes the
-    realizations (default: every ``wst_r*.npz`` of ``data_dir / space``).
+    realizations (default: every ``wst_r*.npz`` of ``data_dir / space``). The files store ell = 0, 2, 4.
     """
-    if space != "real":
-        raise ValueError("the P(k) model is real-space only")
+    if any(ell not in (0, 2, 4) for ell in ells):
+        raise ValueError("stored multipoles are ell = 0, 2, 4")
     files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
     if not files:
         raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
-    keys = ("redshift", "boxsize", "nmesh", "nparticles", "space")
     with np.load(files[0]) as data:
         k, nmodes, edges = data["k"], data["nmodes"], data["k_edges"]
-        reference = {key: json.loads(str(data["metadata"]))[key] for key in keys}
     nk = (k.size // rebin) * rebin
     weights = nmodes[:nk].reshape(-1, rebin)
     kbin = (k[:nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
     keep = (kbin >= kmin) & (kbin <= kmax)
     if not keep.any():
         raise ValueError(f"no bins with {kmin} <= k <= {kmax}")
-    vectors = []
+    vectors, metadatas = [], []
     for path in files:
         with np.load(path) as data:
-            metadata = json.loads(str(data["metadata"]))
-            if any(metadata[key] != reference[key] for key in keys) or not np.array_equal(data["k"], k):
+            metadatas.append(json.loads(str(data["metadata"])))
+            if not np.array_equal(data["k"], k):
                 raise ValueError(f"{path} was measured with different settings")
-            power = (data["Pdd"][0, :nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
-        vectors.append(power[keep])
+            power = [(data["Pdd"][ell // 2, :nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
+                     for ell in ells]
+        vectors.append(np.concatenate([p[keep] for p in power]))
+    reference = common_metadata(metadatas, files)
     bin_edges = edges[:nk + 1:rebin]
     first = np.flatnonzero(keep)[0]
     return PowerDataset(vectors=np.array(vectors), k=kbin[keep], nmodes=weights.sum(axis=1)[keep],
                         edges=bin_edges[first:first + keep.sum() + 1], metadata=reference,
                         files=[str(path) for path in files])
+
+
+def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
+    """Line-of-sight-resolved S1m of every |m| block of ``coefficients`` (coefficient-major, |m| = 0..l)."""
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    measurements = [load_measurement(path, q=q) for path in files]
+    if "S1m" not in measurements[0]:
+        raise ValueError(f"{files[0]} has no line-of-sight-resolved coefficients (measure with --los-resolved)")
+    vectors = np.array([np.concatenate([m["S1m"][c.j, c.ell, :c.ell + 1] for c in coefficients])
+                        for m in measurements])
+    metadata = common_metadata([m["metadata"] for m in measurements], files)
+    return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
+                      metadata=metadata, files=[str(path) for path in files])
+
+
+def load_s21m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
+    """Line-of-sight-resolved S21m = S2m(j1, j2, l, |m1|, |m2|) / S1m(j1, l, |m1|) of the S21 ``coefficients``
+    (coefficient-major, then |m1|, then |m2|; ``wstfast.theory.rsd_moduli.s21m_entries``)."""
+    from .theory.rsd_moduli import s21m_entries
+
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    measurements = [load_measurement(path, q=q) for path in files]
+    if "S2m" not in measurements[0]:
+        raise ValueError(f"{files[0]} has no line-of-sight-resolved coefficients (measure with --los-resolved)")
+    entries = s21m_entries(coefficients)
+    vectors = np.array([[m["S2m"][coefficients[i].j, coefficients[i].j2, coefficients[i].ell, m1, m2]
+                         / m["S1m"][coefficients[i].j, coefficients[i].ell, m1] for i, m1, m2 in entries]
+                        for m in measurements])
+    metadata = common_metadata([m["metadata"] for m in measurements], files)
+    return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
+                      metadata=metadata, files=[str(path) for path in files])
