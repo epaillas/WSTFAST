@@ -168,55 +168,130 @@ def real_harmonics(ell, theta, phi):
     return np.array(out)
 
 
-def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1):
+#: Mesh sizes of the 4th-chaos lattices (few distinct sizes: the harmonics are computed once per size and l).
+MESHES = (32, 48, 64, 80, 96, 128, 160, 192, 256)
+
+
+class HalfLattice:
+    """Half (rfft) Fourier lattice of an n^3 periodic box, with the real spherical harmonics cached per l."""
+
+    def __init__(self, nmesh: int, boxsize: float, dtype=np.float64):
+        self.n, self.boxsize, self.dtype = int(nmesh), float(boxsize), dtype
+        kf = 2 * np.pi / boxsize
+        f = np.fft.fftfreq(self.n, 1.0 / self.n) * kf
+        fz = np.fft.rfftfreq(self.n, 1.0 / self.n) * kf
+        kx, ky, kz = np.meshgrid(f, f, fz, indexing="ij")
+        self.k = np.sqrt(kx**2 + ky**2 + kz**2)
+        self.positive = self.k > 0
+        self.kpos = np.where(self.positive, self.k, 1.0)
+        self.theta = np.arccos(np.clip(np.where(self.positive, kz / self.kpos, 1.0), -1, 1))
+        self.phi = np.arctan2(ky, kx)
+        # Number of lattice modes each half-lattice cell stands for (k and -k).
+        self.multiplicity = np.full(self.k.shape, 2.0)
+        self.multiplicity[..., 0] = 1.0
+        if self.n % 2 == 0:
+            self.multiplicity[..., -1] = 1.0
+        self._harmonics, self._radial = {}, {}
+
+    def harmonics(self, ell):
+        """Real Y_l^m for m = -l..l with sum_m Y^2 = 1, shape (2l + 1, n, n, n // 2 + 1), in ``dtype``."""
+        if ell not in self._harmonics:
+            self._harmonics[ell] = real_harmonics(ell, self.theta, self.phi).astype(self.dtype)
+        return self._harmonics[ell]
+
+    def radial(self, sigma, ell):
+        """(sigma k)^l exp(-sigma^2 k^2 / 2): psi^m = (-i)^l radial Y^m."""
+        if (sigma, ell) not in self._radial:
+            x = sigma * self.k
+            self._radial[sigma, ell] = x**ell * np.exp(-0.5 * x**2)
+        return self._radial[sigma, ell]
+
+
+def pair_mesh(sigma_a, ell_a, sigma_b, ell_b, power, boxsize, nmax, tol=1e-8):
+    """Smallest mesh of ``MESHES`` on which the mean of a product of four C_ab is alias-free, capped at nmax.
+
+    The mean of a product of four fields band-limited to kc is exact on an n^3 lattice if kc < pi n / (2 L); kc is
+    where the envelope P_ab(k) R_a(k) R_b(k) of C_ab falls below ``tol`` of its maximum.
+    """
+    k = np.linspace(1e-4, np.pi * nmax / boxsize, 4096)
+    envelope = np.abs(power(k)) * (sigma_a * k) ** ell_a * (sigma_b * k) ** ell_b \
+        * np.exp(-0.5 * (sigma_a**2 + sigma_b**2) * k**2)
+    above = np.flatnonzero(envelope > tol * envelope.max())
+    kc = k[above[-1]] if above.size else k[-1]
+    needed = 2 * boxsize * kc / np.pi
+    return min([n for n in MESHES if n > needed] + [nmax])
+
+
+def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1, tol=1e-8, single=True):
     """2nd- and 4th-chaos covariance of ln <|Z_a|^q> for wavelet vectors Z_a, exactly on a periodic FFT lattice.
 
     ``fields`` is a list of (sigma, l); ``spectra(a, b, k)`` the cross power of the fields filtered by a and b. The
-    cross-covariance C_{mm'}(r) = (1/V) sum_k P_ab psi_a^m psi_b^m'* e^{ikr} of every component pair is one FFT, then
+    cross-covariance C_{mm'}(r) = (1/V) sum_k P_ab psi_a^m psi_b^m'* e^{ikr} of every component pair is one real FFT:
+    psi_a^m psi_b^m'* = (-i)^(l_a - l_b) R_a R_b Y_a^m Y_b^m' with real R and Y, a real (l_a - l_b even) or imaginary
+    (odd) Hermitian spectrum. Then
         Cov_2 = q^2 / (4 n_a n_b) < 2 tr rho rho^T >_r,
-        Cov_4 = q^2 (q - 2)^2 / (64 n_a (n_a + 2) n_b (n_b + 2)) < 8 (tr rho rho^T)^2 + 16 tr (rho rho^T)^2 >_r.
-    Returns (cov2, cov4).
+        Cov_4 = q^2 (q - 2)^2 / (64 n_a (n_a + 2) n_b (n_b + 2)) < 8 (tr rho rho^T)^2 + 16 tr (rho rho^T)^2 >_r,
+    which are even in rho, so the overall sign of the phase is irrelevant.
+
+    Each pair is evaluated on the smallest mesh that is alias-free for its band limit (``pair_mesh`` with ``tol``), at
+    most ``nmesh``; ``tol = 0`` uses ``nmesh`` for every pair. ``single`` runs the FFTs and contractions in float32
+    (lattice means accumulated in float64; ~1e-6 relative). Returns (cov2, cov4).
     """
-    kf = 2 * np.pi / boxsize
-    f = np.fft.fftfreq(nmesh, 1.0 / nmesh) * kf
-    kx, ky, kz = np.meshgrid(f, f, f, indexing="ij")
-    k = np.sqrt(kx**2 + ky**2 + kz**2)
-    positive = k > 0
-    kpos = np.where(positive, k, 1.0)
-    theta = np.arccos(np.clip(np.where(positive, kz / kpos, 1.0), -1, 1))
-    phi = np.arctan2(ky, kx)
-    V, ncell = boxsize**3, nmesh**3
-    filters = []
-    for sigma, ell in fields:
-        x = sigma * k
-        filters.append((-1j) ** ell * x**ell * np.exp(-0.5 * x**2) * real_harmonics(ell, theta, phi))
-    power = lambda a, b: np.where(positive, spectra(a, b, kpos), 0.0)  # noqa: E731
+    V = boxsize**3
+    real = np.float32 if single else np.float64
+    lattices = {}
 
-    def cross(a, b):
-        pab = power(a, b)
-        fa, fb = filters[a], filters[b]
-        out = np.empty((len(fa), len(fb)) + (nmesh,) * 3)
-        for i in range(len(fa)):
-            for j in range(len(fb)):
-                out[i, j] = sfft.ifftn(pab * fa[i] * np.conj(fb[j]), workers=workers).real * ncell / V
-        return out
+    def lattice(n):
+        if n not in lattices:
+            lattices[n] = HalfLattice(n, boxsize, dtype=real)
+        return lattices[n]
 
-    # Variance per component, s^2 = (1/V) sum_k P |psi^m|^2 averaged over m.
-    variance = [(power(a, a) * np.sum(np.abs(filters[a]) ** 2, axis=0)).sum() / V / len(filters[a])
-                for a in range(len(fields))]
+    def mesh(a, b):
+        (sa, la), (sb, lb) = fields[a], fields[b]
+        if tol <= 0:
+            return nmesh
+        return pair_mesh(sa, la, sb, lb, lambda k: spectra(a, b, k), boxsize, nmesh, tol)
+
+    def envelope(a, b, lat):
+        """P_ab R_a R_b on the half lattice (real)."""
+        (sa, la), (sb, lb) = fields[a], fields[b]
+        return np.where(lat.positive, spectra(a, b, lat.kpos), 0.0) * lat.radial(sa, la) * lat.radial(sb, lb)
+
+    # Variance per component, s^2 = (1/V) sum_k P R^2 / (2l + 1) (sum_m Y^2 = 1), on the field's own mesh.
+    variance = []
+    for a, (_, ell) in enumerate(fields):
+        lat = lattice(mesh(a, a))
+        variance.append((envelope(a, a, lat) * lat.multiplicity).sum() / V / (2 * ell + 1))
     nf = len(fields)
     cov2, cov4 = np.zeros((nf, nf)), np.zeros((nf, nf))
     for a in range(nf):
-        na = 2 * fields[a][1] + 1
         for b in range(a, nf):
-            nb = 2 * fields[b][1] + 1
-            rho = cross(a, b) / np.sqrt(variance[a] * variance[b])
-            t2 = np.einsum("ijxyz,ijxyz->xyz", rho, rho)
-            m = np.einsum("ijxyz,kjxyz->ikxyz", rho, rho)
-            t4 = np.einsum("ikxyz,ikxyz->xyz", m, m)
-            cov2[a, b] = cov2[b, a] = q**2 / (4 * na * nb) * 2 * t2.mean()
+            (_, la), (_, lb) = fields[a], fields[b]
+            n = mesh(a, b)
+            lat = lattice(n)
+            base = (envelope(a, b, lat) * (n**3 / V / np.sqrt(variance[a] * variance[b]))).astype(real)
+            ya, yb = lat.harmonics(la), lat.harmonics(lb)
+            if len(ya) > len(yb):  # tr (rho rho^T)^2 = tr (rho^T rho)^2: keep the smaller dimension first
+                ya, yb = yb, ya
+            # One complex buffer per pair: the spectrum is written into its real (l_a - l_b even) or imaginary part.
+            spectrum = np.zeros(base.shape, dtype=np.complex64 if single else np.complex128)
+            part = spectrum.imag if (la - lb) % 2 else spectrum.real
+            rho = np.empty((len(ya), len(yb), n**3), dtype=real)
+            for i in range(len(ya)):
+                gi = base * ya[i]
+                for j in range(len(yb)):
+                    np.multiply(gi, yb[j], out=part)
+                    rho[i, j] = sfft.irfftn(spectrum, s=(n, n, n), workers=workers).ravel()
+            t2 = np.einsum("ijx,ijx->x", rho, rho)
+            t4 = np.zeros_like(t2)
+            for i in range(len(ya)):
+                for k in range(i, len(ya)):
+                    s = np.einsum("jx,jx->x", rho[i], rho[k])
+                    t4 += (1.0 if i == k else 2.0) * s * s
+            na, nb = 2 * la + 1, 2 * lb + 1
+            cov2[a, b] = cov2[b, a] = q**2 / (4 * na * nb) * 2 * t2.mean(dtype=np.float64)
             cov4[a, b] = cov4[b, a] = q**2 * (q - 2) ** 2 / (64 * na * (na + 2) * nb * (nb + 2)) \
-                * (8 * (t2**2).mean() + 16 * t4.mean())
+                * (8 * (t2.astype(np.float64) ** 2).mean() + 16 * t4.mean(dtype=np.float64))
     return cov2, cov4
 
 
@@ -231,9 +306,10 @@ def last_layers(config, coefficients, pfield, plin, moduli: ModulusSpectra | Non
     cache = {}
 
     def spectra(a, b, k):
-        key = (sources[a], sources[b])
+        k = np.asarray(k)
+        key = (sources[a], sources[b], k.shape, float(k.flat[1]), float(k.flat[-1]))  # one entry per k grid
         if key not in cache:
-            ua, ub = key
+            ua, ub = key[:2]
             if ua is None and ub is None:
                 cache[key] = pfield(k)
             elif ua is None or ub is None:

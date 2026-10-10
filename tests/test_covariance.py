@@ -45,6 +45,17 @@ def test_lattice_second_chaos_matches_shell_sums():
     np.testing.assert_allclose(cov4_q2, 0.0, atol=1e-30)
 
 
+def test_chaos_adaptive_mesh_and_single_precision_are_exact():
+    """Pair meshes below nmesh (alias-free for the band limit) and float32 reproduce the fixed-mesh float64 result."""
+    fields = [(50.0, 0), (50.0, 3), (70.7, 4), (35.4, 2)]
+    spectra = lambda a, b, k: toy_power(k)  # noqa: E731
+    ref2, ref4 = chaos_covariances(fields, 0.8, BOX, 96, spectra, tol=0, single=False)
+    for tol, single in ((1e-8, False), (0, True), (1e-8, True)):
+        cov2, cov4 = chaos_covariances(fields, 0.8, BOX, 96, spectra, tol=tol, single=single)
+        np.testing.assert_allclose(cov2, ref2, rtol=1e-5)
+        np.testing.assert_allclose(cov4, ref4, rtol=1e-5)
+
+
 def test_s21_covariance_is_symmetric_positive():
     coefficients = [Coefficient("S1", 1, 9), Coefficient("S21", 1, 4, 8), Coefficient("S21", 1, 4, 9),
                     Coefficient("S21", 2, 5, 9)]

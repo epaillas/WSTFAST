@@ -172,9 +172,15 @@ def main():
                                  chaos_nmesh=args.chaos_nmesh or None, include=tuple(args.terms))
     print(f"covariance of {len(coefficients)} coefficients in {time.time() - t1:.0f}s", flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    ktab = np.geomspace(1e-3, 3.0, 4000)  # field power, for Gaussian-field mocks with the same spectrum
+    # Input tables: the field power (also for Gaussian-field mocks with the same spectrum), the linear power and the
+    # modulus spectra, so that the covariance can be recomputed without the inputs (benchmark_chaos.py).
+    ktab = np.geomspace(1e-3, 3.0, 4000)
+    tables = dict(pfield_k=ktab, pfield=pfield(ktab), plin=plin(ktab), moduli_fields=np.array(fields).reshape(-1, 2))
+    if moduli is not None:
+        tables.update(moduli_k=moduli.k, moduli_response=np.array([moduli.response[key] for key in fields]),
+                      moduli_cross=np.array([[moduli.cross[a, b] for b in fields] for a in fields]))
     np.savez(args.output, labels=[c.label for c in coefficients], q=args.q, inputs=args.inputs, terms=args.terms,
-             data_dir=str(args.data_dir), fit=str(args.fit), cs2=cs2, pfield_k=ktab, pfield=pfield(ktab), **result)
+             data_dir=str(args.data_dir), fit=str(args.fit), cs2=cs2, **tables, **result)
     print(f"wrote {args.output}")
 
 
