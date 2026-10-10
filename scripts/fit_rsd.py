@@ -70,6 +70,9 @@ def parse_args(argv=None):
                         choices=("constant", "slope", "per-scale"),
                         help="free amplitude of the S1m Edgeworth correction: one a_ng (default when given without a "
                              "value), a_ng + b_ng [(25 / sigma)^2 - 1], or one a_ng_j per scale")
+    parser.add_argument("--gaussian-prior", nargs="+", default=[], metavar="NAME=LOC,SCALE",
+                        help="Gaussian prior on an emulated cosmological parameter, truncated to the emulator box, "
+                             "e.g. n_s=0.9649,0.042 (Planck 2018 x 10, as the desi-clustering full-shape fits)")
     parser.add_argument("--shared-counterterms", action="store_true",
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
@@ -91,6 +94,17 @@ def load_basis(path: Path, vary):
     basis = Emulator.read(str(path)).to_calculator()
     _bound_to_emulator(basis, _fix_unvaried(basis, settings, vary, path))
     return basis, settings
+
+
+def apply_gaussian_priors(basis, settings, items):
+    """Gaussian priors ['n_s=0.9649,0.042', ...] on varied emulated parameters, within the emulator bounds."""
+    params = get_params(basis)
+    for item in items:
+        name, _, values = item.partition("=")
+        loc, scale = (float(v) for v in values.split(","))
+        if name not in settings["vary"] or params[name].fixed:
+            raise ValueError(f"--gaussian-prior: {name} is not a varied emulated parameter")
+        params[name].update(prior=dict(dist="norm", loc=loc, scale=scale, limits=list(settings["bounds"][name])))
 
 
 def load_correction(args, config, coefficients, settings):
@@ -128,6 +142,7 @@ def build_problem(args, basis=None, settings=None):
     config = load_measurement(first, q=args.q)["config"]
     if basis is None:
         basis, settings = load_basis(args.emulator, args.vary)
+        apply_gaussian_priors(basis, settings, args.gaussian_prior)
     tracer = settings.get("tracer", "matter")
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
@@ -238,7 +253,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
