@@ -28,6 +28,9 @@ measured. Examples:
     # line-of-sight-resolved moduli (S1m, S2m, ...; see wstfast.measure.measure_wst), written to {tag}_los
     python scripts/measure_quijote_wst.py --superset --los-resolved --backend torch
 
+    # matter particles randomly subsampled to nbar (a Poisson tracer with b1 = 1), written to matter_n{nbar}_{tag}_los
+    python scripts/measure_quijote_wst.py --tracer subsample --nbar 3.1e-4 --superset --los-resolved --spaces rsd
+
     # FoF halos of mass >= 1e13 Msun/h (all Quijote FoF halos: >= 20 particles), written to halos_m13_{tag}_los
     python scripts/measure_quijote_wst.py --tracer halos --mmin 1e13 --superset --los-resolved --spaces rsd
 """
@@ -102,7 +105,9 @@ def parse_args():
     parser.add_argument("--backend", choices=("numpy", "torch"), default="numpy",
                         help="torch runs painting and the WST on --device (e.g. a GPU)")
     parser.add_argument("--device", default="auto", help="torch device: auto, cpu or cuda")
-    parser.add_argument("--tracer", choices=("matter", "halos"), default="matter")
+    parser.add_argument("--tracer", choices=("matter", "halos", "subsample"), default="matter")
+    parser.add_argument("--nbar", type=float, default=3.1e-4,
+                        help="subsample: number density [(h/Mpc)^3] of the random subsample of matter particles")
     parser.add_argument("--mmin", type=float, default=1e13, help="halos: smallest FoF mass [Msun/h]")
     parser.add_argument("--snapshot-root", type=Path, default=None,
                         help=f"default {SNAPSHOT_ROOT} (matter) or {HALO_ROOT} (halos)")
@@ -112,7 +117,7 @@ def parse_args():
         args.J, args.L, args.L2, args.min_dj, args.step = SUPERSET.J, SUPERSET.L, SUPERSET.L2, SUPERSET.min_dj, SUPERSET.step
         args.sigma0, args.q = [SUPERSET.sigma0], SUPERSET_QS
     if args.snapshot_root is None:
-        args.snapshot_root = SNAPSHOT_ROOT if args.tracer == "matter" else HALO_ROOT
+        args.snapshot_root = HALO_ROOT if args.tracer == "halos" else SNAPSHOT_ROOT
     return args
 
 
@@ -136,7 +141,8 @@ def main():
     configs = [WSTConfig(J=args.J, L=args.L, L2=args.L2, min_dj=args.min_dj, step=args.step, sigma0=sigma0,
                          q=args.q[0]) for sigma0 in args.sigma0]
     if args.realizations is None:
-        realizations = discover_realizations(args.snapshot_root, args.redshift, args.tracer)
+        realizations = discover_realizations(args.snapshot_root, args.redshift,
+                                             "halos" if args.tracer == "halos" else "matter")
     else:
         realizations = parse_realizations(args.realizations)
     excluded = set(parse_realizations(read_exclusions(args.exclude)))
@@ -147,7 +153,8 @@ def main():
     for realization in realizations:
         for space in args.spaces:
             suffix = "_los" if args.los_resolved else ""
-            prefix = "" if args.tracer == "matter" else f"halos_m{np.log10(args.mmin):g}_"
+            prefix = dict(matter="", halos=f"halos_m{np.log10(args.mmin):g}_",
+                          subsample=f"matter_n{args.nbar:g}_")[args.tracer]
             paths = {config: args.output_dir / (prefix + config.tag(args.nmesh) + suffix) / space / f"wst_r{realization:05d}.npz"
                      for config in configs}
             pending = {config: path for config, path in paths.items() if not path.exists()}
@@ -156,9 +163,10 @@ def main():
             if not pending:
                 continue
             start = time.time()
-            if args.tracer == "matter":
+            if args.tracer in ("matter", "subsample"):
                 delta, header = load_density(realization, redshift=args.redshift, nmesh=args.nmesh,
-                                             rsd=space == "rsd", root=args.snapshot_root, device=device)
+                                             rsd=space == "rsd", root=args.snapshot_root, device=device,
+                                             nbar=args.nbar if args.tracer == "subsample" else None)
             else:
                 delta, header = load_halo_density(realization, redshift=args.redshift, nmesh=args.nmesh,
                                                   rsd=space == "rsd", mmin=args.mmin, root=args.snapshot_root,
@@ -168,7 +176,8 @@ def main():
                             redshift=round(header["redshift"], 6), boxsize=header["boxsize"], nmesh=args.nmesh,
                             nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend,
                             los_resolved=args.los_resolved, tracer=args.tracer,
-                            **({"mmin": args.mmin} if args.tracer == "halos" else {}))
+                            **({"mmin": args.mmin} if args.tracer == "halos" else {}),
+                            **({"nbar": args.nbar} if args.tracer == "subsample" else {}))
             for config, path in pending.items():
                 config = WSTConfig(**{**config.to_dict(), "cellsize": header["boxsize"] / args.nmesh})
                 result = estimator(delta, config, qs=args.q, lattice=lattice, spectra=spectra, los=args.los_resolved)

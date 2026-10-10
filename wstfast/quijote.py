@@ -74,15 +74,27 @@ def paint_cic(chunks, nmesh: int, boxsize: float) -> np.ndarray:
 
 
 def load_density(realization: int | str, redshift: float = 0.5, nmesh: int = 256, rsd: bool = False,
-                 los: int = 2, root: Path = SNAPSHOT_ROOT, device=None):
+                 los: int = 2, root: Path = SNAPSHOT_ROOT, device=None, nbar: float | None = None):
     """CIC density contrast of one Quijote fiducial snapshot, and its header.
 
-    With a torch ``device`` the particles are painted there (see ``wstfast.measure_torch``).
+    With a torch ``device`` the particles are painted there (see ``wstfast.measure_torch``). With ``nbar``
+    [(h/Mpc)^3], a random subsample of that mean density is painted (a Poisson tracer with b1 = 1 and no other bias,
+    seeded by the realization); ``header["nparticles"]`` is then the number kept.
     """
     snapdir = Path(root) / str(realization) / f"snapdir_{SNAPNUM[redshift]}"
     files = snapshot_files(snapdir)
     header = read_header(files)
     positions = iter_positions(files, header, rsd=rsd, los=los)
+    if nbar is not None:
+        fraction = nbar * header["boxsize"] ** 3 / header["nparticles"]
+        if not 0 < fraction <= 1:
+            raise ValueError(f"nbar = {nbar} needs a fraction {fraction} of the particles")
+        rng = np.random.default_rng([int(realization), 20261010])
+        kept = []
+        for chunk in positions:
+            kept.append(chunk[rng.random(len(chunk)) < fraction])
+        positions = kept
+        header = {**header, "nparticles": int(sum(len(chunk) for chunk in kept)), "nbar": nbar}
     if device is None:
         delta = paint_cic(positions, nmesh, header["boxsize"])
     else:
