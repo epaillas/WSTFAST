@@ -27,14 +27,14 @@ from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, linear_components, 
 from wstfast.theory.rsd_moduli import SIGMA_V_FACTOR, _harmonic, first_layer_fields
 
 
-def model(fields, kvals, f, klin, pklin, beta, noise):
+def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FACTOR):
     """b_U(K) and g(K) (monopoles over mu) per field."""
     nmu = 6
     x, wx = np.polynomial.legendre.leggauss(2 * nmu)
     mu, wmu = x[nmu:], wx[nmu:]
     logk, logp = np.log(klin), np.log(pklin)
     pk = lambda q: np.exp(np.interp(np.log(np.maximum(q, 1e-30)), logk, logp))  # noqa: E731
-    sigma_v = SIGMA_V_FACTOR * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+    sigma_v = sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
     spectra = BiasedModulusSpectraRSD(fields, kvals, mu)
     grids, norms = spectra(pk, f, sigma_v)  # grids (nfield, nk, nmu, 296), norms (nfield, 16)
     m2, m4 = np.asarray(monomials(beta, 2)), np.asarray(monomials(beta, 4))
@@ -58,6 +58,8 @@ def main():
     parser.add_argument("--alpha0", type=float, default=0.0)
     parser.add_argument("--nbins", type=int, default=10, help="lowest K bins used")
     parser.add_argument("--max-files", type=int, default=None)
+    parser.add_argument("--sigma-v-factor", type=float, default=SIGMA_V_FACTOR,
+                        help="velocity damping of the modulus spectra, in units of the linear sigma_v")
     args = parser.parse_args()
     files = sorted(glob.glob(f"{args.data_dir}/rsd/wst_r*.npz"))[:args.max_files]
     config = load_measurement(files[0], q=0.8)["config"]
@@ -89,7 +91,7 @@ def main():
     b = [float(v) for v in args.bias.split(",")]
     beta = np.array([1.0, *b])
     fields = [(config.sigma(j), l, m) for j, l, m in keys]
-    bU_model, g_model = model(fields, k, f, klin, pklin, beta, sn * (1 + args.alpha0))
+    bU_model, g_model = model(fields, k, f, klin, pklin, beta, sn * (1 + args.alpha0), args.sigma_v_factor)
     # response ratio s per field: P_Ud/<U> = s bU_model(K) (P_dd - N) + C, on the box mean; error by bootstrap
     x = (Pdd - N[:, None]).mean(0)
     yb = PUd / U[:, :, None]

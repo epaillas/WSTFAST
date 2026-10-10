@@ -227,12 +227,12 @@ class RSDBasis(Calculator):
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                 s21_coefficients=(), tracer: str = "matter"):
+                 s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                      s21_coefficients=(), tracer: str = "matter"):
+                      s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -246,7 +246,10 @@ class RSDBasis(Calculator):
         self.cumulant_model = ((BiasedRSDS1Basis if biased else RSDS1Basis)(config, self.coefficients, damping=damping,
                                                                              npoints=npoints, lattice=False)
                                if self.coefficients else None)
-        self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients))
+        if s21_damping is not None and not biased:
+            raise ValueError("s21_damping is only implemented for tracer='biased'")
+        s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
+        self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients), **s21_kwargs)
                           if len(s21_coefficients) else None)
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_m", "z": self.z, "k": self.klin}],

@@ -117,9 +117,9 @@ def train_rsd(args):
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
-                    bounds=bounds, tracer=args.tracer)
+                    bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping)
     basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
-                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer)
+                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer, s21_damping=args.s21_damping)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -170,6 +170,9 @@ def main():
     parser.add_argument("--s1-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j of the S1m cumulants")
     parser.add_argument("--ir", action="store_true", help="rsd: BAO infrared resummation of the P_s grid")
     parser.add_argument("--no-s21", action="store_true", help="rsd: leave out the S21m terms")
+    parser.add_argument("--s21-damping", type=float, default=None,
+                        help="rsd, biased tracer: velocity damping of the S21m modulus spectra in units of the linear "
+                             "sigma_v (default: the matter value 2; 1 for halos)")
     parser.add_argument("--tracer", choices=("matter", "biased"), default="matter",
                         help="rsd: biased-tracer basis (bias-monomial coefficients; wstfast.theory.rsd_bias)")
     parser.add_argument("--s21-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j1 of the S21m terms")

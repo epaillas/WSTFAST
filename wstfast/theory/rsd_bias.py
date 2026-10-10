@@ -280,10 +280,14 @@ class BiasedRSDS21mBasis:
     """S21m terms of a biased tracer: (nentry, sum S21_SIZES), columns [R0 | R1 | R2 | G0 | G1 | G2 | n0 | n1]."""
 
     def __init__(self, config, coefficients, boxsize: float = 1000.0, nmesh: int = 256,
-                 kmax: float = 0.12, nk: int = 24, nmu: int = 6, **quadrature):
+                 kmax: float = 0.12, nk: int = 24, nmu: int = 6, sigma_v_factor: float = SIGMA_V_FACTOR, **quadrature):
         from numpy.polynomial.legendre import leggauss
 
         self.config, self.coefficients = config, list(coefficients)
+        #: Velocity damping of the modulus spectra in units of the linear sigma_v. The matter value (2) is too strong
+        #: for halos: 1 brings the measured response and noise of the halo moduli into agreement (and removes the
+        #: S21m amplitude systematic; scripts/feasibility/modulus_response_noise.py --sigma-v-factor).
+        self.sigma_v_factor = float(sigma_v_factor)
         self.fields = first_layer_fields(self.coefficients)
         x, _ = leggauss(2 * nmu)
         k, mu = np.geomspace(4e-3, kmax, nk), x[nmu:]
@@ -294,7 +298,7 @@ class BiasedRSDS21mBasis:
     def __call__(self, klin, pklin, f):
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp))  # noqa: E731
-        sigma_v = SIGMA_V_FACTOR * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+        sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
         grids, norms = self.spectra(pk, f, sigma_v)
         nfield, nk, nmu, ncol = grids.shape
         flat = np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu)
