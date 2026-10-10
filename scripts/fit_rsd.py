@@ -44,7 +44,7 @@ from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, mul
                                 s1m_ap_projection)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data-dir", type=Path,
                         default=Path("data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"))
@@ -77,7 +77,7 @@ def parse_args():
     parser.add_argument("--proposal-from", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, required=True)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_basis(path: Path, vary):
@@ -119,16 +119,13 @@ def load_correction(args, config, coefficients, settings):
     return kappa[index], skewness2[index]
 
 
-def main():
-    args = parse_args()
-    setup_logging()
-    if args.volume is not None and args.covariance_of_mean:
-        raise SystemExit("--volume and --covariance-of-mean are exclusive")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
+def build_problem(args, basis=None, settings=None):
+    """Theories, data vectors (nrealizations, ndata), labels and metadata of ``args.stats``, from the emulator
+    ``args.emulator`` (or the given ``basis`` and ``settings``); also returns the basis, its settings and the tracer."""
     first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
     config = load_measurement(first, q=args.q)["config"]
-    basis, settings = load_basis(args.emulator, args.vary)
+    if basis is None:
+        basis, settings = load_basis(args.emulator, args.vary)
     tracer = settings.get("tracer", "matter")
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
@@ -192,7 +189,19 @@ def main():
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
-    vectors = np.concatenate(vectors, axis=1)
+    return dict(theories=theories, vectors=np.concatenate(vectors, axis=1), labels=labels, meta=meta, basis=basis,
+                settings=settings, tracer=tracer)
+
+
+def main():
+    args = parse_args()
+    setup_logging()
+    if args.volume is not None and args.covariance_of_mean:
+        raise SystemExit("--volume and --covariance-of-mean are exclusive")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    problem = build_problem(args)
+    theories, vectors, labels, meta, tracer = (problem[k] for k in ("theories", "vectors", "labels", "meta", "tracer"))
     nreal, ndata = vectors.shape
     covariance = sample_covariance(vectors, of_mean=args.covariance_of_mean)
     if args.volume is not None:
