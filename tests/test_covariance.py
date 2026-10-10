@@ -67,3 +67,22 @@ def test_s21_covariance_is_symmetric_positive():
     cov = ShellCovariance(SUPERSET, coefficients, 0.8, BOX, 64, toy_power, toy_power, moduli).lncov
     np.testing.assert_allclose(cov, cov.T)
     assert np.linalg.eigvalsh(cov).min() > 0
+
+
+def test_rsd_blocks_match_lattice_second_chaos():
+    """|m| blocks: the FFT-lattice 2nd chaos equals the half-lattice sums of RSDGaussianCovariance (anisotropic P_s)."""
+    from wstfast.theory.covariance import RSDGaussianCovariance
+
+    def pfield(k, mu):
+        return toy_power(k) * (1 + 0.6 * np.asarray(mu) ** 2) ** 2 + 50.0
+
+    coefficients = [Coefficient("S1", 0, 9), Coefficient("S1", 2, 8), Coefficient("S1", 3, 9)]
+    edges = np.array([0.5, 2.5, 4.5]) * 2 * np.pi / BOX
+    gauss = RSDGaussianCovariance(SUPERSET, coefficients, 0.8, BOX, pfield, pk_edges=edges, nmesh=NMESH)
+    fields = [(SUPERSET.sigma(c.j), c.ell, m) for c in coefficients for m in range(c.ell + 1)]
+    cov2, cov4 = chaos_covariances(fields, 0.8, BOX, NMESH, lambda a, b, k, mu: pfield(k, mu), anisotropic=True,
+                                   tol=0, single=False)
+    n = gauss.ns1m
+    np.testing.assert_allclose(cov2, gauss.lncov[:n, :n], rtol=1e-6)
+    assert np.all(np.diag(cov4) > 0)
+    assert np.all(np.diag(gauss.lncov)[n:] > 0) and np.allclose(gauss.lncov, gauss.lncov.T)

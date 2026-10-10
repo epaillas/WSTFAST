@@ -184,7 +184,8 @@ class HalfLattice:
         self.k = np.sqrt(kx**2 + ky**2 + kz**2)
         self.positive = self.k > 0
         self.kpos = np.where(self.positive, self.k, 1.0)
-        self.theta = np.arccos(np.clip(np.where(self.positive, kz / self.kpos, 1.0), -1, 1))
+        self.mu = np.where(self.positive, kz / self.kpos, 0.0)  # cosine to the line of sight z
+        self.theta = np.arccos(np.clip(np.where(self.positive, self.mu, 1.0), -1, 1))
         self.phi = np.arctan2(ky, kx)
         # Number of lattice modes each half-lattice cell stands for (k and -k).
         self.multiplicity = np.full(self.k.shape, 2.0)
@@ -222,14 +223,24 @@ def pair_mesh(sigma_a, ell_a, sigma_b, ell_b, power, boxsize, nmax, tol=1e-8):
     return min([n for n in MESHES if n > needed] + [nmax])
 
 
-def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1, tol=1e-8, single=True):
+def components(ell, m=None):
+    """Indices (into m = -l..l) of the components of |m|: (m, -m) for m > 0, (0,) for m = 0, all for m = None."""
+    if m is None:
+        return list(range(2 * ell + 1))
+    return [ell] if m == 0 else [ell - m, ell + m]
+
+
+def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1, tol=1e-8, single=True, anisotropic=False):
     """2nd- and 4th-chaos covariance of ln <|Z_a|^q> for wavelet vectors Z_a, exactly on a periodic FFT lattice.
 
-    ``fields`` is a list of (sigma, l); ``spectra(a, b, k)`` the cross power of the fields filtered by a and b. The
+    ``fields`` is a list of (sigma, l) (all 2l + 1 components) or (sigma, l, m) (the components of |m| only, the
+    line-of-sight-resolved moduli); ``spectra(a, b, k)`` the cross power of the fields filtered by a and b, or
+    ``spectra(a, b, k, mu)`` with ``anisotropic`` (mu = cosine to the line of sight z). The components of a field must
+    be independent with equal variances (true for |m| blocks of a plane-parallel redshift-space field). The
     cross-covariance C_{mm'}(r) = (1/V) sum_k P_ab psi_a^m psi_b^m'* e^{ikr} of every component pair is one real FFT:
     psi_a^m psi_b^m'* = (-i)^(l_a - l_b) R_a R_b Y_a^m Y_b^m' with real R and Y, a real (l_a - l_b even) or imaginary
     (odd) Hermitian spectrum. Then
-        Cov_2 = q^2 / (4 n_a n_b) < 2 tr rho rho^T >_r,
+        Cov_2 = q^2 / (4 n_a n_b) < 2 tr rho rho^T >_r,          n_a = number of components,
         Cov_4 = q^2 (q - 2)^2 / (64 n_a (n_a + 2) n_b (n_b + 2)) < 8 (tr rho rho^T)^2 + 16 tr (rho rho^T)^2 >_r,
     which are even in rho, so the overall sign of the phase is irrelevant.
 
@@ -246,31 +257,42 @@ def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1, tol=1e-8, 
             lattices[n] = HalfLattice(n, boxsize, dtype=real)
         return lattices[n]
 
+    sigmas = [f[0] for f in fields]
+    ells = [f[1] for f in fields]
+    comps = [components(f[1], f[2] if len(f) > 2 else None) for f in fields]
+
+    def power(a, b, k, mu=None):
+        if not anisotropic:
+            return spectra(a, b, k)
+        if mu is None:  # envelope for the mesh choice: the largest |P| over the line-of-sight angle
+            return np.max([np.abs(spectra(a, b, k, np.full_like(k, m))) for m in (0.0, 0.5, 1.0)], axis=0)
+        return spectra(a, b, k, mu)
+
     def mesh(a, b):
-        (sa, la), (sb, lb) = fields[a], fields[b]
         if tol <= 0:
             return nmesh
-        return pair_mesh(sa, la, sb, lb, lambda k: spectra(a, b, k), boxsize, nmesh, tol)
+        return pair_mesh(sigmas[a], ells[a], sigmas[b], ells[b], lambda k: power(a, b, k), boxsize, nmesh, tol)
 
     def envelope(a, b, lat):
         """P_ab R_a R_b on the half lattice (real)."""
-        (sa, la), (sb, lb) = fields[a], fields[b]
-        return np.where(lat.positive, spectra(a, b, lat.kpos), 0.0) * lat.radial(sa, la) * lat.radial(sb, lb)
+        p = power(a, b, lat.kpos, lat.mu) if anisotropic else power(a, b, lat.kpos)
+        return np.where(lat.positive, p, 0.0) * lat.radial(sigmas[a], ells[a]) * lat.radial(sigmas[b], ells[b])
 
-    # Variance per component, s^2 = (1/V) sum_k P R^2 / (2l + 1) (sum_m Y^2 = 1), on the field's own mesh.
+    # Variance per component, s^2 = (1/V) sum_k P R^2 sum_{m in a} Y_m^2 / n_a, on the field's own mesh.
     variance = []
-    for a, (_, ell) in enumerate(fields):
+    for a in range(len(fields)):
         lat = lattice(mesh(a, a))
-        variance.append((envelope(a, a, lat) * lat.multiplicity).sum() / V / (2 * ell + 1))
+        y2 = np.sum(lat.harmonics(ells[a])[comps[a]].astype(np.float64) ** 2, axis=0)
+        variance.append((envelope(a, a, lat) * y2 * lat.multiplicity).sum() / V / len(comps[a]))
     nf = len(fields)
     cov2, cov4 = np.zeros((nf, nf)), np.zeros((nf, nf))
     for a in range(nf):
         for b in range(a, nf):
-            (_, la), (_, lb) = fields[a], fields[b]
+            la, lb = ells[a], ells[b]
             n = mesh(a, b)
             lat = lattice(n)
             base = (envelope(a, b, lat) * (n**3 / V / np.sqrt(variance[a] * variance[b]))).astype(real)
-            ya, yb = lat.harmonics(la), lat.harmonics(lb)
+            ya, yb = lat.harmonics(la)[comps[a]], lat.harmonics(lb)[comps[b]]
             if len(ya) > len(yb):  # tr (rho rho^T)^2 = tr (rho^T rho)^2: keep the smaller dimension first
                 ya, yb = yb, ya
             # One complex buffer per pair: the spectrum is written into its real (l_a - l_b even) or imaginary part.
@@ -288,7 +310,7 @@ def chaos_covariances(fields, q, boxsize, nmesh, spectra, workers=-1, tol=1e-8, 
                 for k in range(i, len(ya)):
                     s = np.einsum("jx,jx->x", rho[i], rho[k])
                     t4 += (1.0 if i == k else 2.0) * s * s
-            na, nb = 2 * la + 1, 2 * lb + 1
+            na, nb = len(comps[a]), len(comps[b])
             cov2[a, b] = cov2[b, a] = q**2 / (4 * na * nb) * 2 * t2.mean(dtype=np.float64)
             cov4[a, b] = cov4[b, a] = q**2 * (q - 2) ** 2 / (64 * na * (na + 2) * nb * (nb + 2)) \
                 * (8 * (t2.astype(np.float64) ** 2).mean() + 16 * t4.mean(dtype=np.float64))
@@ -336,3 +358,55 @@ def analytic_covariance(config, coefficients, q, boxsize, nmesh, pfield, plin, m
         out["chaos4"] = cov4
         out["lncov"] += cov4
     return out
+
+
+class RSDGaussianCovariance:
+    """2nd-chaos covariance of line-of-sight-resolved S1m blocks (log) and power-spectrum multipoles, redshift space.
+
+    Every entry is a linear functional of the band powers of the field on the lattice, dP(k), with
+    Cov(dP(k), dP(k')) = 2 P_s(k, mu)^2 per lattice mode (k and -k):
+
+    * ln S1m(j, l, |m|): q/2 W(k) / (V Sigma), W = R^2 sum_{m in |m|} Y_m^2 (anisotropic), Sigma = (1/V) sum_k P_s W;
+    * P_l in a |k| bin of N modes (the estimator of measure.PowerMultipoles): (2l + 1) L_l(mu) / N.
+
+    The order is [S1m blocks (coefficient-major, |m| = 0..l), P_l bins (l-major)]. ``pfield(k, mu)`` is the power of
+    the analysed field (window and shot noise included); the sums run over the half lattice of ``nmesh`` (exact for the
+    modes it holds: choose the Nyquist frequency above the filters' band limit and the last bin edge).
+    """
+
+    def __init__(self, config, coefficients, q, boxsize, pfield, pk_edges=None, pk_ells=(0, 2, 4), nmesh=128):
+        from scipy.special import eval_legendre
+
+        lat = HalfLattice(nmesh, boxsize)
+        V = boxsize**3
+        keep = lat.positive & (lat.k <= np.pi * nmesh / boxsize)
+        k, mu, mult = lat.k[keep], lat.mu[keep], lat.multiplicity[keep]
+        P = pfield(k, mu)
+        rows, self.labels = [], []
+        for c in coefficients:
+            radial2 = lat.radial(config.sigma(c.j), c.ell)[keep] ** 2
+            harmonics = lat.harmonics(c.ell)
+            for m in range(c.ell + 1):
+                w = radial2 * np.sum(harmonics[components(c.ell, m)][:, keep] ** 2, axis=0)
+                sigma = (P * w * mult).sum() / V
+                rows.append(q / 2 * w / (V * sigma))
+                self.labels.append(f"S1m_j{c.j}_l{c.ell}_m{m}")
+        self.ns1m = len(rows)
+        if pk_edges is not None:
+            index = np.digitize(k, pk_edges) - 1
+            for ell in pk_ells:
+                legendre = (2 * ell + 1) * eval_legendre(ell, mu)
+                for i in range(len(pk_edges) - 1):
+                    inside = index == i
+                    nmodes = mult[inside].sum()
+                    rows.append(np.where(inside, legendre / nmodes, 0.0))
+                    kmean = (mult[inside] * k[inside]).sum() / nmodes  # mode-weighted, as the measurements
+                    self.labels.append(f"P{ell}_k{kmean:.4f}")
+        D = np.array(rows)
+        self.lncov = (D * (2 * P**2 * mult)) @ D.T
+
+    def covariance(self, mean):
+        """Covariance of the data vector itself: S1m rows scaled by their mean (ln -> linear)."""
+        scale = np.ones(len(self.labels))
+        scale[:self.ns1m] = np.asarray(mean)[:self.ns1m]
+        return self.lncov * np.outer(scale, scale)
