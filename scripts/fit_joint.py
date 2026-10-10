@@ -24,7 +24,7 @@ import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import setup_logging
 from desilike.base import Posterior
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
-from wstfast.data import load_dataset, load_measurement, load_power_dataset, sample_covariance
+from wstfast.data import chi_squared, load_dataset, load_measurement, load_power_dataset, sample_covariance
 from wstfast.inference import (bestfit_values, build_joint_likelihood, fix_parameters, joint_vectors,
                                 parse_fixed, plot_fit, plot_power_fit, profile, sample_mh)
 
@@ -110,7 +110,7 @@ def main():
     residual = data - theory
     nw = len(coefficients)
     blocks = {"joint": slice(None), "wst": slice(0, nw), "pk": slice(nw, None)}
-    chi2 = {name: float(residual[s] @ np.linalg.solve(covariance[s, s], residual[s])) for name, s in blocks.items()}
+    chi2 = {name: chi_squared(residual[s], covariance[s, s]) for name, s in blocks.items()}
     summary = dict(bestfit=best, chi2=chi2, ndata=int(ndata), nvaried=len(varied), nrealizations=int(nreal),
                    vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    coefficients=[c.label for c in coefficients], k=power.k.tolist(), kmax=args.kmax,

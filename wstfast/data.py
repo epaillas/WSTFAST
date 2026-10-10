@@ -49,6 +49,18 @@ def flatten(measurement: dict, coefficients) -> np.ndarray:
                      for c in coefficients])
 
 
+def precision_matrix(covariance: np.ndarray) -> np.ndarray:
+    """Inverse covariance, through the correlation matrix: data vectors that join statistics of very different
+    magnitude (P(k) ~ 1e4 and S21m ~ 1e-1) have variances spanning ~12 decades, beyond what a direct inverse resolves."""
+    scale = 1.0 / np.sqrt(np.diag(covariance))
+    return scale[:, None] * np.linalg.inv(scale[:, None] * covariance * scale[None, :]) * scale[None, :]
+
+
+def chi_squared(residual: np.ndarray, covariance: np.ndarray) -> float:
+    """residual^T C^-1 residual (``precision_matrix``)."""
+    return float(residual @ precision_matrix(covariance) @ residual)
+
+
 def sample_covariance(vectors: np.ndarray, kind: str = "sample", of_mean: bool = False) -> np.ndarray:
     """Covariance of one realization (or of the mean) of ``vectors`` (nreal, ndata), Hartlap-corrected for 'sample'.
 

@@ -686,7 +686,9 @@ class WSTLikelihood(GaussianLikelihood):
         self._covariance = np.asarray(covariance, dtype="f8")
 
     def __post_init__(self, theory, data, covariance):
-        self.precision = jnp.asarray(np.linalg.inv(self._covariance))
+        from .data import precision_matrix
+
+        self.precision = jnp.asarray(precision_matrix(self._covariance))
 
     def __call__(self):
         self.flattheory = self.theory.flattheory

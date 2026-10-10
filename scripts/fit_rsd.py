@@ -36,7 +36,8 @@ from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
 from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood
 from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
-from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset, load_s21m_dataset, sample_covariance
+from wstfast.data import (chi_squared, load_measurement, load_power_dataset, load_s1m_dataset, load_s21m_dataset,
+                          sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh)
 from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
@@ -220,7 +221,7 @@ def main():
     varied = get_params(likelihood).select(varied=True, derived=False).names()
     build(likelihood)({name: value for name, value in best.items() if name in varied})
     residual = np.asarray(likelihood.flatdata) - np.asarray(likelihood.flattheory)
-    chi2 = float(residual @ np.linalg.solve(covariance, residual))
+    chi2 = chi_squared(residual, covariance)
     summary = dict(bestfit=best, chi2=chi2, ndata=int(ndata), nvaried=len(varied), nrealizations=int(nreal),
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
