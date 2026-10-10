@@ -49,7 +49,9 @@ def parse_args(argv=None):
     parser.add_argument("--data-dir", type=Path,
                         default=Path("data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"))
     parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m"), default=["pk", "s1m"])
-    parser.add_argument("--q", type=float, default=0.8)
+    parser.add_argument("--q", type=float, nargs="+", default=[0.8],
+                        help="S1m exponent(s): several values concatenate the S1m data vectors (shared nuisances, joint "
+                             "covariance); S21m uses the first")
     parser.add_argument("--s1-min-scale", type=float, default=25.0, help="smallest sigma_j [Mpc/h] of S1m")
     parser.add_argument("--s1-ells", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--s21-min-scale", type=float, default=17.6, help="smallest sigma_j1 [Mpc/h] of S21m")
@@ -142,7 +144,8 @@ def build_problem(args, basis=None, settings=None):
     """Theories, data vectors (nrealizations, ndata), labels and metadata of ``args.stats``, from the emulator
     ``args.emulator`` (or the given ``basis`` and ``settings``); also returns the basis, its settings and the tracer."""
     first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
-    config = load_measurement(first, q=args.q)["config"]
+    q0 = args.q[0]
+    config = load_measurement(first, q=q0)["config"]
     if basis is None:
         basis, settings = load_basis(args.emulator, args.vary)
         apply_gaussian_priors(basis, settings, args.gaussian_prior)
@@ -159,17 +162,19 @@ def build_problem(args, basis=None, settings=None):
         missing = [c.label for c in coefficients if c.label not in emulated]
         if missing:
             raise ValueError(f"the emulator has no cumulants for {missing}")
-        s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=args.q)
-        files = s1m.files
         correction = load_correction(args, config, coefficients, settings) if args.cumulant_points else None
         projection = s1m_ap_projection(config, coefficients, grid) if args.ap else S1mProjection(config, coefficients, grid)
-        theories.append(S1mTheory(projection, coefficients, q=args.q, basis=basis, shotnoise=s1m.shotnoise,
-                                  cumulant_index=[emulated.index(c.label) for c in coefficients],
-                                  correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
-                                  sigmas=[config.sigma(c.j) for c in coefficients],
-                                  k4_counterterm=args.k4_counterterm))
-        vectors.append(s1m.vectors)
-        labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
+        for q in args.q:
+            s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=q, files=files)
+            files = s1m.files
+            theories.append(S1mTheory(projection, coefficients, q=q, basis=basis, shotnoise=s1m.shotnoise,
+                                      cumulant_index=[emulated.index(c.label) for c in coefficients],
+                                      correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
+                                      sigmas=[config.sigma(c.j) for c in coefficients],
+                                      k4_counterterm=args.k4_counterterm))
+            vectors.append(s1m.vectors)
+            prefix = f"q{q:g}:" if len(args.q) > 1 else ""
+            labels += [f"{prefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
     if "s21m" in args.stats:
         from wstfast.theory.rsd_moduli import s21m_entries
@@ -191,9 +196,9 @@ def build_problem(args, basis=None, settings=None):
             raise ValueError(f"the emulator has no cumulants for the first-layer {missing}")
         basis_entries = {(emulated21[i].label, m1, m2): n for n, (i, m1, m2) in enumerate(s21m_entries(emulated21))}
         entry_index = [basis_entries[coefficients[i].label, m1, m2] for i, m1, m2 in s21m_entries(coefficients)]
-        s21m = load_s21m_dataset(args.data_dir, "rsd", coefficients, q=args.q, files=files)
+        s21m = load_s21m_dataset(args.data_dir, "rsd", coefficients, q=q0, files=files)
         files = s21m.files
-        theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=args.q,
+        theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=q0,
                                    basis=basis, entry_index=entry_index,
                                    cumulant_index=[emulated.index(c.label) for c in first_layer],
                                    shotnoise=s21m.shotnoise, tracer=tracer))
