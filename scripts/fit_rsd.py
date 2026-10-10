@@ -70,6 +70,8 @@ def parse_args(argv=None):
                         choices=("constant", "slope", "per-scale"),
                         help="free amplitude of the S1m Edgeworth correction: one a_ng (default when given without a "
                              "value), a_ng + b_ng [(25 / sigma)^2 - 1], or one a_ng_j per scale")
+    parser.add_argument("--shared-counterterms", action="store_true",
+                        help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
     parser.add_argument("--chains", type=int, default=4)
@@ -185,7 +187,8 @@ def build_problem(args, basis=None, settings=None):
                                    ells=(0, 2, 4))
         files = power.files
         projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
-        theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer))
+        theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer,
+                                       shared_counterterms=args.shared_counterterms))
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
@@ -235,7 +238,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),

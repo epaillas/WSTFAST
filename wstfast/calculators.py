@@ -412,14 +412,17 @@ class RSDPowerTheory(Calculator):
     With ``tracer="biased"`` (a biased-tracer basis), P_s is that of the tracer, with ``BiasParameters``.
     """
 
-    def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter"):
+    def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
+                 shared_counterterms: bool = False):
         self.basis = basis
-        self.counterterms = _rsd_counterterms("_pk", r"^{P}")
+        # Shared: the S1m names (c0, c2, c4), so that desilike merges them with the S1m counterterms of a joint fit.
+        self.counterterms = _rsd_counterterms("", "") if shared_counterterms else _rsd_counterterms("_pk", r"^{P}")
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
 
-    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter"):
+    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
+                      shared_counterterms: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         if ap is None:
