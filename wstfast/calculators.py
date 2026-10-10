@@ -354,8 +354,10 @@ def bias_beta(params):
 from .theory.rsd_bias import TREE as TREE_INDEX  # noqa: E402
 
 
-def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2):
-    """P_s grid and its tree part from the biased rows (BIASED_GRID_TERMS), with the stochastic k^2 mu^2 term."""
+def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None):
+    """P_s grid and its tree part from the biased rows (BIASED_GRID_TERMS), with the stochastic k^2 mu^2 term and,
+    with ``ck4`` [(Mpc/h)^4], the next-to-leading redshift-space counterterm -ck4 k^4 mu^4 (b1 + f mu^2)^2 P_L (the
+    f^4 of the usual c~ (f mu)^4 k^4 form is absorbed into ck4)."""
     from .theory.bias import monomials
     from .theory.rsd_bias import LOOP, TREE
 
@@ -365,6 +367,8 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2):
     loop = jnp.tensordot(m2[np.array(LOOP)], rows[nt:nt + nl], axes=1)
     c0, c2, c4 = counterterms
     grid = tree + loop - 2 * (c0 * rows[-3] + c2 * rows[-2] + c4 * rows[-1]) + shotnoise * alpha2 * k2mu2
+    if ck4 is not None:
+        grid = grid - ck4 * k2mu2**2 * tree
     return grid, tree
 
 
@@ -380,6 +384,14 @@ def biased_cumulants(kappa, skewness, beta, shotnoise):
     sk = split(skewness, SKEW_SIZES)
     skew = sk[0] @ monomials(beta, 3) + n * sk[1] @ monomials(beta, 2) + n**2 * sk[2][..., 0]
     return kappa, 15 * skew**2
+
+
+def _k4_counterterm(enabled, prefix, latex):
+    """{'ck4': Parameter} of the k^4 mu^4 counterterm (``biased_grid``), or {} when not ``enabled``."""
+    if not enabled:
+        return {}
+    return {"ck4": Parameter(f"ck4{prefix}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
+                             ref=dict(dist="norm", loc=0.0, scale=20.0), latex=rf"\tilde{{c}}{latex}")}
 
 
 def _rsd_counterterms(prefix, latex):
@@ -413,8 +425,10 @@ class RSDPowerTheory(Calculator):
     """
 
     def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
-                 shared_counterterms: bool = False):
+                 shared_counterterms: bool = False, k4_counterterm: bool = False):
         self.basis = basis
+        self.k4_params = _k4_counterterm(k4_counterterm, "" if shared_counterterms else "_pk",
+                                         "" if shared_counterterms else r"^{P}")
         # Shared: the S1m names (c0, c2, c4), so that desilike merges them with the S1m counterterms of a joint fit.
         self.counterterms = _rsd_counterterms("", "") if shared_counterterms else _rsd_counterterms("_pk", r"^{P}")
         self.ap = ap
@@ -422,7 +436,7 @@ class RSDPowerTheory(Calculator):
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
 
     def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
-                      shared_counterterms: bool = False):
+                      shared_counterterms: bool = False, k4_counterterm: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         if ap is None:
@@ -437,7 +451,9 @@ class RSDPowerTheory(Calculator):
             grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
         else:
             rows = biased_rows(self.basis)[0]
-            grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value)
+            ck4 = self.k4_params["ck4"].value if self.k4_params else None
+            grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
+                                  self.bias_params["alpha2"].value, ck4)
             noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
         if self.ap is None:
             self.flattheory = self.matrix @ grid.ravel() + noise * self.shot
@@ -473,17 +489,18 @@ class S1mTheory(Calculator):
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                 sigmas=None):
+                 sigmas=None, k4_counterterm: bool = False):
         self.basis = basis
         self.bias_params = BiasParameters().params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
+        self.k4_params = _k4_counterterm(k4_counterterm, "", "")
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
         self.ng_params = _ng_amplitudes(ng_amplitude, coefficients)
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                      sigmas=None):
+                      sigmas=None, k4_counterterm: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
@@ -518,7 +535,9 @@ class S1mTheory(Calculator):
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index] * self.kappa_ratio,
                                                 skewness[self.cumulant_index] * self.skewness_ratio, beta,
                                                 self.shotnoise)
-            grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value)
+            ck4 = self.k4_params["ck4"].value if self.k4_params else None
+            grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise,
+                                            self.bias_params["alpha2"].value, ck4)
             noise = linear_noise = 1 + self.bias_params["alpha0"].value
         if self.ap is None:
             variances = self.matrix @ grid.ravel() + noise * self.noise

@@ -73,6 +73,9 @@ def parse_args(argv=None):
     parser.add_argument("--gaussian-prior", nargs="+", default=[], metavar="NAME=LOC,SCALE",
                         help="Gaussian prior on an emulated cosmological parameter, truncated to the emulator box, "
                              "e.g. n_s=0.9649,0.042 (Planck 2018 x 10, as the desi-clustering full-shape fits)")
+    parser.add_argument("--k4-counterterm", action="store_true",
+                        help="biased tracers: next-to-leading redshift-space counterterm -ck4 k^4 mu^4 (b1 + f mu^2)^2 P_L "
+                             "(ck4 for S1m, ck4_pk for P_l unless --shared-counterterms)")
     parser.add_argument("--shared-counterterms", action="store_true",
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
@@ -163,7 +166,8 @@ def build_problem(args, basis=None, settings=None):
         theories.append(S1mTheory(projection, coefficients, q=args.q, basis=basis, shotnoise=s1m.shotnoise,
                                   cumulant_index=[emulated.index(c.label) for c in coefficients],
                                   correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
-                                  sigmas=[config.sigma(c.j) for c in coefficients]))
+                                  sigmas=[config.sigma(c.j) for c in coefficients],
+                                  k4_counterterm=args.k4_counterterm))
         vectors.append(s1m.vectors)
         labels += [f"S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
@@ -203,7 +207,8 @@ def build_problem(args, basis=None, settings=None):
         files = power.files
         projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
         theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer,
-                                       shared_counterterms=args.shared_counterterms))
+                                       shared_counterterms=args.shared_counterterms,
+                                       k4_counterterm=args.k4_counterterm))
         vectors.append(power.vectors)
         labels += [f"P{ell}_k{k:.4f}" for ell in (0, 2, 4) for k in power.k]
         meta = power.metadata
@@ -253,7 +258,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
