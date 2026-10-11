@@ -654,7 +654,7 @@ class S21mTheory(Calculator):
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                 cubic_biases: str | None = None):
+                 cubic_biases: str | None = None, noise_calibration=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
@@ -699,20 +699,34 @@ class S21mTheory(Calculator):
                                      ref=dict(dist="norm", loc=0.0, scale=0.05),
                                      latex=rf"a_{{N,{key[0]},{key[1]},{key[2]}}}")
                       for key in first_layer_fields(coefficients)}
+        # Simulation-calibrated noise: the per-field amplitudes and W are not free but a_i(theta) = a_i0 + grad_i . (theta -
+        # theta_0) of the basis's own cosmological parameters (scripts/feasibility/noise_calibration.py), as dict(names,
+        # value, gradient (nname, nparam), params, reference).
+        self.calibration_params = {}
+        if noise_calibration is not None:
+            self.noise, self.white_params = {}, {}
+            basis_params = get_params(basis)
+            self.calibration_params = {str(name): basis_params[str(name)] for name in noise_calibration["params"]}
 
     def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
                       cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                      cubic_biases: str | None = None):
+                      cubic_biases: str | None = None, noise_calibration=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
         #: Fixed relative correction (1 + c_e) of the Gaussian noise of every basis entry, for the tree-level connected
         #: noise of the moduli (scripts/feasibility/connected_noise_correction.py); rows of the basis, as entry_index.
         self.noise_correction = None if noise_correction is None else jnp.asarray(noise_correction)
-        if white_noise or k2_noise:  # second-layer lattice sums of 1 and K^2 in P_UU / <U>^2, per entry
+        if noise_calibration is not None:
+            names = [str(name) for name in noise_calibration["names"]]
+            self.calibration_names = [str(name) for name in noise_calibration["params"]]
+            self.calibration_value = {name: float(v) for name, v in zip(names, noise_calibration["value"])}
+            self.calibration_gradient = {name: jnp.asarray(g, dtype="f8") for name, g in zip(names, noise_calibration["gradient"])}
+            self.calibration_reference = jnp.asarray(noise_calibration["reference"], dtype="f8")
+        if white_noise or k2_noise or noise_calibration is not None:  # lattice sums of 1 and K^2 in P_UU / <U>^2
             from .theory.rsd_moduli import S21mProjection
 
             if config is None:
@@ -782,7 +796,14 @@ class S21mTheory(Calculator):
             e_1.append(block_edgeworth(lin, kappa[index, :ell + 1], skewness2[index], ell, 1.0))
             start += ell + 1
         e_q, e_1 = jnp.concatenate(e_q)[self.block_index], jnp.concatenate(e_1)[self.block_index]
-        amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
+        white = None
+        if self.calibration_params:  # noise nuisances from the simulation calibration at the trial cosmology
+            theta = jnp.stack([jnp.asarray(self.calibration_params[n].value, dtype="f8") for n in self.calibration_names])
+            value = lambda name: self.calibration_value[name] + self.calibration_gradient[name] @ (theta - self.calibration_reference)  # noqa: E731
+            amplitudes = jnp.stack([value(f"noise_j{j}_l{l}_m{m}") for j, l, m in self.keys])[self.field_index]
+            white = jnp.stack([value(f"W_j{j}") for j in self.entry_j]) * self.white_column
+        else:
+            amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
         if self.noise_correction is not None:
             correction = self.noise_correction[self.entry_index]
             if self.connected_params:
@@ -790,6 +811,7 @@ class S21mTheory(Calculator):
             terms = jnp.stack([terms[:, 0], terms[:, 1] * (1 + correction)], axis=1)
         if self.white_params:
             white = jnp.stack([self.white_params[f"W_j{j}"].value for j in self.entry_j]) * self.white_column
+        if white is not None:
             terms = jnp.stack([terms[:, 0] + white, terms[:, 1]], axis=1)
         if self.k2noise_params:
             k2 = jnp.stack([self.k2noise_params[f"WK2_j{j}"].value for j in self.entry_j]) * self.k2_column
