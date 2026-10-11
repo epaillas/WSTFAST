@@ -41,6 +41,8 @@ def main():
     parser.add_argument("--connected-f", type=float, default=0.0,
                         help="scale of f in the kernels of the connected terms: 0 (default) uses the real-space tracer "
                              "kernels (the tree-level redshift-space velocity terms over-predict the connected noise)")
+    parser.add_argument("--fog", action="store_true",
+                        help="also the per-entry FoG counterterm part correction_fog (noise: c_e - c_FoG c_e^fog)")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     settings = json.loads(open(args.emulator.replace(".h5", ".json")).read())
@@ -70,7 +72,7 @@ def main():
     g = (g0 @ m4 + shot * g1 @ m2 + shot**2 * g2[..., 0]) / norm2[:, None, None]  # (nfield, nk, nmu)
     t = time.time()
     rn = noise_ratio(fields, pk, args.connected_f * f, sigma_v, beta, cubic, shot, npoints=args.npoints,
-                     terms=tuple(args.terms))
+                     terms=tuple(args.terms), fog=args.fog)
     print(f"connected noise of {len(fields)} fields: {time.time() - t:.0f} s")
     rho = interpolate_ratio(rn["rho"], rn["unodes"], rn["munodes"], [s for s, _, _ in fields], kgrid, mugrid)
     proj = S21mProjection(config, e21, keys, kgrid, mugrid)
@@ -79,13 +81,18 @@ def main():
     num = np.einsum("eg,eg->e", proj.matrix, (flat_g * flat_rho)[proj.field_index])
     den = np.einsum("eg,eg->e", proj.matrix, flat_g[proj.field_index])
     correction = num / den
+    extra = {}
+    if args.fog:
+        rho_fog = interpolate_ratio(rn["rho_fog"], rn["unodes"], rn["munodes"], [s for s, _, _ in fields], kgrid, mugrid)
+        extra["correction_fog"] = np.einsum("eg,eg->e", proj.matrix,
+                                            (flat_g * rho_fog.reshape(len(fields), -1))[proj.field_index]) / den
     for j in sorted({c.j for c in e21}):
         sel = [n for n, (i, _, _) in enumerate(proj.entries) if e21[i].j == j]
         print(f"j1 = {j} (sigma1 {config.sigma(j):.1f}): c_e median {np.median(correction[sel]):+.3f}, "
               f"range {correction[sel].min():+.3f} .. {correction[sel].max():+.3f}")
     np.savez(args.output, correction=correction, labels=np.array([f"{e21[i].label}_m{m1}_m{m2}" for i, m1, m2 in proj.entries]),
              beta=beta, cubic=cubic, shotnoise=shot, terms=np.array(args.terms), fields=np.array(keys),
-             connected_f=args.connected_f,
+             connected_f=args.connected_f, **extra,
              **{f"rho_{k}": v for k, v in rn.items()})
     print(f"wrote {args.output}")
 

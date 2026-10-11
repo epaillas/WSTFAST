@@ -21,6 +21,11 @@ velocity-damped on every leg, D(k) = exp(-(f k mu sigma_v)^2 / 2), the Poisson p
 The terms are evaluated at fixed biases (no monomial expansion), on nodes in u = sigma K and mu_K, with scrambled
 Sobol points importance-sampled on the filters (modulus_noise.LegSampler). The Z kernels depend on directions only,
 so for a given (l, u, mu_K) they are shared by every sigma and |m|.
+
+With ``fog=True``, every term also comes with its first-order Fingers-of-God counterterm (``<name>_fog``): the tree
+clustering bispectra and trispectra of the connected correlators are multiplied by [1 - c_FoG sum_i k_i^2 mu_i^2 /
+k_r^2] over their legs, k_r = ``KR`` (the form of Tucci & Philcox 2026 for the trispectrum), so that the noise is
+term - c_FoG term_fog. The Poisson parts and the Gaussian links are left as they are.
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ from scipy.special import sph_harm_y
 from .bias import cubic_kernel, galaxy_kernel
 from .modulus_noise import LegSampler
 from .rsd_bias import linear_components
+
+#: Reference wavenumber [h/Mpc] of the Fingers-of-God counterterm of the connected correlators.
+KR = 0.3
 
 
 def _norm(v):
@@ -85,14 +93,22 @@ class _Tracer:
             out = out + 2 * self.z2(q[a], q[b]) * z1[a] * z1[b] * p[a] * p[b]
         return out
 
-    def bispectrum_d(self, q):
-        """B_d = damped B + N (P_g + P_g + P_g) + N^2."""
+    @staticmethod
+    def fog(legs):
+        """Fingers-of-God weight sum_i (k_i mu_i)^2 / k_r^2 of a correlator's legs."""
+        return sum(x[..., 2] ** 2 for x in legs) / KR**2
+
+    def bispectrum_d(self, q, fog=False):
+        """B_d = damped B + N (P_g + P_g + P_g) + N^2; with ``fog``, the FoG-weighted clustering part alone."""
         damp = np.prod([self.damp(x) for x in q], axis=0)
+        if fog:
+            return self.bispectrum_g(q) * damp * self.fog(q)
         return self.bispectrum_g(q) * damp + self.N * sum(self.pg(x) for x in q) + self.N**2
 
-    def trispectrum_d(self, legs, response_pairs=()):
+    def trispectrum_d(self, legs, response_pairs=(), fog=False):
         """T_d at legs[0] + ... + legs[3] = 0. ``response_pairs``: leg pairs (i, j) with legs[i] + legs[j] = +-K whose
-        response pieces are left out (internal P(K) in 2211, P_g(K) / n^2, P(K) parts of B(K, ., .) / n)."""
+        response pieces are left out (internal P(K) in 2211, P_g(K) / n^2, P(K) parts of B(K, ., .) / n). With ``fog``,
+        the FoG-weighted clustering part alone."""
         idx = range(4)
         z1 = [self.z1(x) for x in legs]
         p = [self.plin(x) for x in legs]
@@ -111,6 +127,8 @@ class _Tracer:
                     tree = tree + 4 * self.z2(-legs[c_], s) * self.z2(-legs[d_], -s) * z1[c_] * z1[d_] * p[c_] * p[d_] \
                         * self.plin(s)
         tree = tree * np.prod([self.damp(x) for x in legs], axis=0)
+        if fog:
+            return tree * self.fog(legs)
         shot = 0.0
         for i in idx:  # N B(k_i + k_j, k_c, k_d)
             for j in range(i + 1, 4):
@@ -183,13 +201,14 @@ class ConnectedNoiseRSD:
         return 2.0 * self.ell + 1 if m < 0 else (1.0 if m == 0 else 2.0)
 
     # -------------------------------------------------------------------------------------------- one-point
-    def _zero_lag(self, tracer, sigma, m):
-        """Block cumulants sum_{a,b in M} kappa_aabb and (m = 0, even l) the third cumulant of X_0."""
+    def _zero_lag(self, tracer, sigma, m, fog=False):
+        """Block cumulants sum_{a,b in M} kappa_aabb and (m = 0, even l) the third cumulant of X_0 (with ``fog``,
+        their FoG counterterm parts)."""
         legs = _legs(self.zl4, np.zeros(3))
         ys = self._harmonics(legs)
         phys = [x / sigma for x in legs]
         f12, f34 = self._pair(legs, ys, 0, 1, m), self._pair(legs, ys, 2, 3, m)
-        kappa = np.sum(self.zl4.weights * tracer.trispectrum_d(phys) * f12 * f34) / sigma**9
+        kappa = np.sum(self.zl4.weights * tracer.trispectrum_d(phys, fog=fog) * f12 * f34) / sigma**9
         skew = 0.0
         if m == 0 and self.ell % 2 == 0:
             legs = _legs(self.zl3, np.zeros(3))
@@ -197,7 +216,7 @@ class ConnectedNoiseRSD:
             c = np.sqrt(4 * np.pi / (2 * self.ell + 1))
             factors = np.prod([_norm(x) ** self.ell * np.exp(-0.5 * _norm(x) ** 2) * c * np.real(y[0])
                                for x, y in zip(legs, ys)], axis=0)
-            skew = np.sum(self.zl3.weights * tracer.bispectrum_d([x / sigma for x in legs]) * factors) / sigma**6
+            skew = np.sum(self.zl3.weights * tracer.bispectrum_d([x / sigma for x in legs], fog=fog) * factors) / sigma**6
         return kappa, skew
 
     def _gaussian(self, tracer, sigma, m, kvec):
@@ -225,10 +244,12 @@ class ConnectedNoiseRSD:
         return g, norm
 
     # ------------------------------------------------------------------------------------------------- terms
-    def __call__(self, pk, f, sigma_v, beta, cubic, shotnoise, terms=("E", "T40", "T22", "T31", "B22", "B21", "G4")):
+    def __call__(self, pk, f, sigma_v, beta, cubic, shotnoise, terms=("E", "T40", "T22", "T31", "B22", "B21", "G4"),
+                 fog=False):
         tracer = _Tracer(pk, f, sigma_v, beta, cubic, shotnoise)
         nf, nu, nm = len(self.fields), len(self.unodes), len(self.munodes)
-        out = {name: np.zeros((nf, nu, nm)) for name in terms + ("g", "norm")}
+        names = terms + tuple(f"{name}_fog" for name in terms) if fog else terms
+        out = {name: np.zeros((nf, nu, nm)) for name in names + ("g", "norm")}
         one_point = {}
         for i, (sigma, ell, m) in enumerate(self.fields):
             n = self._size(m)
@@ -249,14 +270,22 @@ class ConnectedNoiseRSD:
                     out["E"][i] = -2 * e1 * out["g"][i]
                 if "T40" in terms:
                     out["T40"][i] = 3 * k4 / (4 * n * (n + 2)) * out["g"][i]
+                if fog:  # linear in the FoG parts of kappa and of the third cumulant
+                    kappa_f, skew_f = self._zero_lag(tracer, sigma, m, fog=True)
+                    k4_f = kappa_f / lam**2
+                    e1_f = -k4_f / (8 * n * (n + 2)) + (6 * skew * skew_f / (72 * lam**3) if m == 0 and ell % 2 == 0 else 0.0)
+                    if "E" in terms:
+                        out["E_fog"][i] = -2 * e1_f * out["g"][i]
+                    if "T40" in terms:
+                        out["T40_fog"][i] = 3 * k4_f / (4 * n * (n + 2)) * out["g"][i]
         self.one_point = one_point
         for a, u in enumerate(self.unodes):
             for b, mu in enumerate(self.munodes):
                 khat = np.array([np.sqrt(1 - mu**2), 0.0, mu])
-                self._terms_at(tracer, u * khat, a, b, out, terms)
+                self._terms_at(tracer, u * khat, a, b, out, terms, fog)
         return out
 
-    def _terms_at(self, tracer, kvec_u, a, b, out, terms):
+    def _terms_at(self, tracer, kvec_u, a, b, out, terms, fog=False):
         """All 6- to 12-dimensional terms at one node, for every field (kernels shared across sigma and m)."""
         jobs = []
         if "T22" in terms:
@@ -278,18 +307,33 @@ class ConnectedNoiseRSD:
             members = [i for i, (s, _, _) in enumerate(self.fields) if s == sigma]
             for name, sampler, legs, ys in jobs:
                 phys = [x / sigma for x in legs]
-                # tracer correlators: shared by the |m| fields of this sigma
+                # tracer correlators: shared by the |m| fields of this sigma (and their FoG parts)
+                common_fog = None
                 if name == "T22":
                     common = tracer.trispectrum_d(phys, response_pairs=((0, 1), (2, 3)))
+                    if fog:
+                        common_fog = tracer.trispectrum_d(phys, response_pairs=((0, 1), (2, 3)), fog=True)
                 elif name == "T31":
-                    common = tracer.trispectrum_d(phys[:4]) * tracer.pd(phys[4])
+                    link = tracer.pd(phys[4])
+                    common = tracer.trispectrum_d(phys[:4]) * link
+                    if fog:
+                        common_fog = tracer.trispectrum_d(phys[:4], fog=True) * link
                 elif name in ("B22", "B21"):
-                    common = tracer.bispectrum_d(phys[0:3]) * tracer.bispectrum_d(phys[3:6])
+                    ba, bb = tracer.bispectrum_d(phys[0:3]), tracer.bispectrum_d(phys[3:6])
+                    common = ba * bb
+                    if fog:
+                        common_fog = tracer.bispectrum_d(phys[0:3], fog=True) * bb + ba * tracer.bispectrum_d(phys[3:6], fog=True)
                     if name == "B21":
-                        common = common * tracer.pd(phys[6])
+                        link = tracer.pd(phys[6])
+                        common = common * link
+                        common_fog = None if common_fog is None else common_fog * link
                 else:
                     common = tracer.pd(phys[0]) * tracer.pd(phys[1]) * tracer.pd(phys[2]) * tracer.pd(phys[3])
+                    if fog:
+                        common_fog = np.zeros_like(common)  # Gaussian: no connected correlator
                 common = sampler.weights * common / sigma ** (3 * sampler.nfree)
+                if common_fog is not None:
+                    common_fog = sampler.weights * common_fog / sigma ** (3 * sampler.nfree)
                 for i in members:
                     m = self.fields[i][2]
                     n = self._size(m)
@@ -313,6 +357,8 @@ class ConnectedNoiseRSD:
                                   + 6 * F(0, 1) * F(1, 2) * F(2, 3, (1, -1)) * F(0, 3, (1, -1)))
                         scale = a4a4 / 24
                     out[name][i, a, b] = scale * np.sum(common * kernel)
+                    if common_fog is not None:
+                        out[f"{name}_fog"][i, a, b] = scale * np.sum(common_fog * kernel)
 
 
 #: Default nodes in u = sigma K (the second-layer filters with sigma_2 >= 70 Mpc/h weight sigma_1 K <~ 1.5 for
@@ -323,18 +369,22 @@ TERMS = ("E", "T40", "T22", "T31", "B22", "B21", "G4")
 
 
 def noise_ratio(fields, pk, f, sigma_v, beta, cubic, shotnoise, unodes=UNODES, nmu=NMU_NODES, npoints=2**14,
-                terms=TERMS):
+                terms=TERMS, fog=False):
     """rho = Delta N / g of every field (sigma, l, m) at the nodes: (nfield, nu, nmu) arrays of the total and of each
-    term, the Gaussian noise g, and the nodes (unodes, munodes)."""
+    term, the Gaussian noise g, and the nodes (unodes, munodes). With ``fog``, also rho_fog, the FoG counterterm part
+    (the noise is g (1 + rho - c_FoG rho_fog))."""
     munodes = np.polynomial.legendre.leggauss(2 * nmu)[0][nmu:]
-    out = {name: np.zeros((len(fields), len(unodes), nmu)) for name in terms + ("g",)}
+    names = terms + tuple(f"{name}_fog" for name in terms) if fog else terms
+    out = {name: np.zeros((len(fields), len(unodes), nmu)) for name in names + ("g",)}
     for ell in sorted({ell for _, ell, _ in fields}):
         members = [i for i, (_, l, _) in enumerate(fields) if l == ell]
         cn = ConnectedNoiseRSD([fields[i] for i in members], unodes, munodes, npoints=npoints)
-        values = cn(pk, f, sigma_v, beta, cubic, shotnoise, terms=terms)
+        values = cn(pk, f, sigma_v, beta, cubic, shotnoise, terms=terms, fog=fog)
         for name in out:
             out[name][members] = values[name]
     out["rho"] = sum(out[name] for name in terms) / out["g"]
+    if fog:
+        out["rho_fog"] = sum(out[f"{name}_fog"] for name in terms) / out["g"]
     out["unodes"], out["munodes"] = np.asarray(unodes), munodes
     return out
 

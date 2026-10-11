@@ -44,3 +44,22 @@ def test_real_space_matter_limit():
     np.testing.assert_allclose(out["g"][0, :, 0], g, rtol=2e-3)
     for name in ("E", "T40", "T22", "T31", "B22", "G4"):
         np.testing.assert_allclose(out[name][0, :, 0] / g, terms[name] / g, atol=3e-3, err_msg=name)
+
+
+def test_fog_counterterm_parts():
+    """With a constant FoG weight and no shot noise, each FoG part is its term at first order (x 2 for products of
+    two bispectra, none for the Gaussian G4)."""
+    import wstfast.theory.connected_noise_rsd as module
+
+    k, pl = linear_power()
+    pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), np.log(k), np.log(pl)))  # noqa: E731
+    cn = module.ConnectedNoiseRSD([(25.0, 2, 0), (25.0, 2, 1)], [0.4], [0.5], npoints=2**10)
+    weight = module._Tracer.__dict__["fog"]  # the staticmethod itself
+    try:
+        module._Tracer.fog = staticmethod(lambda legs: np.ones_like(legs[0][..., 0]))
+        out = cn(pk, 0.7, 4.0, [1, 1.9, -0.5, -0.3, 0.4], [0.5, -0.3, 0.1], 0.0, terms=("T40", "T22", "T31", "B22", "G4"),
+                 fog=True)
+    finally:
+        module._Tracer.fog = weight
+    for name, factor in (("T40", 1), ("T22", 1), ("T31", 1), ("B22", 2), ("G4", 0)):
+        np.testing.assert_allclose(out[f"{name}_fog"], factor * out[name], rtol=1e-12, atol=1e-14, err_msg=name)

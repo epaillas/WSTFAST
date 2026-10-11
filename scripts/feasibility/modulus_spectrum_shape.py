@@ -59,11 +59,13 @@ def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=
 
         f_c = connected.get("f_scale", 1.0) * f
         sv_c = connected.get("damping_scale", 1.0) * sigma_v
+        fog = connected.get("fog", None)
         rn = noise_ratio(fields, lambda q: np.where(np.asarray(q) > 0, pk(q), 0.0), f_c, sv_c, beta,
                          connected["cubic"], noise, terms=connected.get("terms", None) or
-                         ("E", "T40", "T22", "T31", "B22", "B21", "G4"))
+                         ("E", "T40", "T22", "T31", "B22", "B21", "G4"), fog=fog is not None)
         model.connected = rn
-        g = g * (1 + interpolate_ratio(rn["rho"], rn["unodes"], rn["munodes"], [s for s, _, _ in fields], kgrid, x[nmu:]))
+        rho = rn["rho"] if fog is None else rn["rho"] - fog * rn["rho_fog"]  # FoG counterterm: c_FoG = fog
+        g = g * (1 + interpolate_ratio(rho, rn["unodes"], rn["munodes"], [s for s, _, _ in fields], kgrid, x[nmu:]))
     return np.array([project(r) for r in resp]), np.array([project(n) for n in g])
 
 
@@ -81,6 +83,8 @@ def main():
     parser.add_argument("--save", default=None, help="save the per-field comparison (npz)")
     parser.add_argument("--connected-f", type=float, default=1.0, help="scale of f in the connected terms (tests)")
     parser.add_argument("--connected-damping", type=float, default=1.0, help="scale of sigma_v in the connected terms")
+    parser.add_argument("--connected-fog", type=float, default=None,
+                        help="c_FoG of the FoG counterterm of the connected correlators (connected_noise_rsd.KR)")
     args = parser.parse_args()
     files = sorted(glob.glob(f"{args.data_dir}/rsd/wst_r*.npz"))
     config = load_measurement(files[0], q=0.8)["config"]
@@ -108,7 +112,7 @@ def main():
         from wstfast.theory.bias import cubic_priors
 
         cubic = cubic_priors(beta[1], beta[2]) if args.cubic == "prior" else np.array([float(v) for v in args.cubic.split(",")])
-        connected = dict(cubic=cubic, f_scale=args.connected_f, damping_scale=args.connected_damping)
+        connected = dict(cubic=cubic, f_scale=args.connected_f, damping_scale=args.connected_damping, fog=args.connected_fog)
         print(f"connected noise with cubic biases (b3, bG3, bdG2) = {np.round(cubic, 3)}")
     resp, noise = model([(config.sigma(j), l, m) for j, l, m in keys], edges, f, klin, pklin, beta,
                         sn * (1 + args.alpha0), args.sigma_v_factor, connected=connected)
