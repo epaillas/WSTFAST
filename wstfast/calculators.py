@@ -606,10 +606,15 @@ class S21mTheory(Calculator):
                  cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
-                 k2_noise: bool = False, noise_correction=None):
+                 k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        # Free amplitude A_c_j of the tree-level connected noise (``noise_correction``) per first-layer scale: the
+        # predicted shape of the connected noise in (K, mu_K) and across fields, with a fitted amplitude (1 = predicted).
+        self.connected_params = ({f"A_c_j{j}": Parameter(f"A_c_j{j}", value=1.0, prior=dict(limits=[-20.0, 20.0]),
+                                                         ref=dict(dist="norm", loc=1.0, scale=0.1), latex=rf"A_{{c,{j}}}")
+                                  for j in sorted({c.j for c in coefficients})} if connected_amplitude else {})
         # K^2 term of the modulus power spectra P_UU / <U>^2, per first-layer scale [(Mpc/h)^5]: the scale dependence
         # of the noise beyond the Gaussian one (the analog of c_s^2 for U), next to the white term W.
         self.k2noise_params = ({f"WK2_j{j}": Parameter(f"WK2_j{j}", value=0.0, prior=dict(limits=[-1e7, 1e7]),
@@ -651,7 +656,7 @@ class S21mTheory(Calculator):
                       cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
-                      k2_noise: bool = False, noise_correction=None):
+                      k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
@@ -730,7 +735,10 @@ class S21mTheory(Calculator):
         e_q, e_1 = jnp.concatenate(e_q)[self.block_index], jnp.concatenate(e_1)[self.block_index]
         amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
         if self.noise_correction is not None:
-            terms = jnp.stack([terms[:, 0], terms[:, 1] * (1 + self.noise_correction[self.entry_index])], axis=1)
+            correction = self.noise_correction[self.entry_index]
+            if self.connected_params:
+                correction = correction * jnp.stack([self.connected_params[f"A_c_j{j}"].value for j in self.entry_j])
+            terms = jnp.stack([terms[:, 0], terms[:, 1] * (1 + correction)], axis=1)
         if self.white_params:
             white = jnp.stack([self.white_params[f"W_j{j}"].value for j in self.entry_j]) * self.white_column
             terms = jnp.stack([terms[:, 0] + white, terms[:, 1]], axis=1)

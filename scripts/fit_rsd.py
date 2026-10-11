@@ -96,6 +96,10 @@ def parse_args(argv=None):
                         help="free K^2 term WK2_j of the S21m modulus spectra per first-layer scale (with or without --s21-white)")
     parser.add_argument("--s21-connected", type=Path, default=None,
                         help="npz of per-entry connected-noise corrections c_e (connected_noise_correction.py)")
+    parser.add_argument("--s21-connected-fog", type=float, default=None,
+                        help="c_FoG: use c_e - c_FoG c_e^fog (an npz made with connected_noise_correction.py --fog)")
+    parser.add_argument("--s21-connected-amplitude", action="store_true",
+                        help="free amplitude A_c_j of the connected-noise correction per first-layer scale")
     parser.add_argument("--shared-counterterms", action="store_true",
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
@@ -156,6 +160,16 @@ def load_correction(args, config, coefficients, settings):
     labels = [c.label for c in every]
     index = [labels.index(c.label) for c in coefficients]
     return kappa[index], skewness2[index]
+
+
+def connected_correction(args):
+    """Per-entry connected-noise correction c_e of the emulator's S21m entries (--s21-connected, --s21-connected-fog)."""
+    if args.s21_connected is None:
+        return None
+    stored = np.load(args.s21_connected)
+    if args.s21_connected_fog is None:
+        return stored["correction"]
+    return stored["correction"] - args.s21_connected_fog * stored["correction_fog"]
 
 
 def build_problem(args, basis=None, settings=None):
@@ -223,8 +237,8 @@ def build_problem(args, basis=None, settings=None):
                                    noise_shot=args.noise_shot, full_norm=args.full_norm,
                                    response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic,
                                    white_noise=args.s21_white, config=config, k2_noise=args.s21_k2,
-                                   noise_correction=(np.load(args.s21_connected)["correction"]
-                                                     if args.s21_connected is not None else None)))
+                                   noise_correction=connected_correction(args),
+                                   connected_amplitude=args.s21_connected_amplitude))
         vectors.append(s21m.vectors)
         labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -286,7 +300,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
