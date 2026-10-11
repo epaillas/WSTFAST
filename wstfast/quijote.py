@@ -135,13 +135,15 @@ def read_fof(groupdir) -> dict:
 
 
 def halo_positions(realization: int | str, redshift: float = 0.5, mmin: float = 1e13, rsd: bool = False,
-                   los: int = 2, root: Path = HALO_ROOT, boxsize: float = 1000.0):
-    """Positions [Mpc/h] of the FoF halos of mass >= ``mmin`` [Msun/h], optionally in redshift space along ``los``."""
+                   los: int = 2, root: Path = HALO_ROOT, boxsize: float = 1000.0, omega_m: float | None = None):
+    """Positions [Mpc/h] of the FoF halos of mass >= ``mmin`` [Msun/h], optionally in redshift space along ``los``.
+    ``omega_m``: matter density of the simulation (flat, massless neutrinos) for H(z) of the redshift-space shift;
+    default the fiducial one (Om_p / Om_m: 0.3275 / 0.3075)."""
     catalogue = read_fof(Path(root) / str(realization) / f"groups_{SNAPNUM[redshift]}")
     keep = catalogue["mass"] >= mmin
     pos = catalogue["pos"][keep]
     if rsd:
-        omega_m, omega_l = QUIJOTE_OMEGA
+        omega_m, omega_l = QUIJOTE_OMEGA if omega_m is None else (omega_m, 1.0 - omega_m)
         hubble = 100.0 * np.sqrt(omega_m * (1 + redshift) ** 3 + omega_l)  # km/s / (Mpc/h)
         velocity = catalogue["vel"][keep, los] * (1 + redshift)  # peculiar km/s
         pos[:, los] += velocity * (1 + redshift) / hubble
@@ -149,16 +151,19 @@ def halo_positions(realization: int | str, redshift: float = 0.5, mmin: float = 
 
 
 def load_halo_density(realization: int | str, redshift: float = 0.5, nmesh: int = 256, rsd: bool = False,
-                      los: int = 2, mmin: float = 1e13, root: Path = HALO_ROOT, boxsize: float = 1000.0, device=None):
-    """CIC density contrast of the halos of one Quijote fiducial FoF catalogue, and a header with their number."""
-    pos = halo_positions(realization, redshift=redshift, mmin=mmin, rsd=rsd, los=los, root=root, boxsize=boxsize)
+                      los: int = 2, mmin: float = 1e13, root: Path = HALO_ROOT, boxsize: float = 1000.0, device=None,
+                      omega_m: float | None = None):
+    """CIC density contrast of the halos of one Quijote FoF catalogue, and a header with their number (``omega_m``:
+    of the simulation, as ``halo_positions``)."""
+    pos = halo_positions(realization, redshift=redshift, mmin=mmin, rsd=rsd, los=los, root=root, boxsize=boxsize,
+                         omega_m=omega_m)
     if device is None:
         delta = paint_cic([pos], nmesh, boxsize)
     else:
         from .measure_torch import paint_cic_torch
 
         delta = paint_cic_torch([pos], nmesh, boxsize, device=device)
-    omega_m, omega_l = QUIJOTE_OMEGA
+    omega_m, omega_l = QUIJOTE_OMEGA if omega_m is None else (omega_m, 1.0 - omega_m)
     header = dict(boxsize=boxsize, redshift=redshift, omega_m=omega_m, omega_l=omega_l, nparticles=len(pos),
                   hubble_z=100.0 * np.sqrt(omega_m * (1 + redshift) ** 3 + omega_l), mmin=mmin)
     return delta, header

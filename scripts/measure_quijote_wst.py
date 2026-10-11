@@ -109,6 +109,9 @@ def parse_args():
     parser.add_argument("--nbar", type=float, default=3.1e-4,
                         help="subsample: number density [(h/Mpc)^3] of the random subsample of matter particles")
     parser.add_argument("--mmin", type=float, default=1e13, help="halos: smallest FoF mass [Msun/h]")
+    parser.add_argument("--omega-m", type=float, default=None,
+                        help="halos: Omega_m of the simulation for the redshift-space shift (Om_p 0.3275, Om_m 0.3075; "
+                             "default fiducial 0.3175)")
     parser.add_argument("--snapshot-root", type=Path, default=None,
                         help=f"default {SNAPSHOT_ROOT} (matter) or {HALO_ROOT} (halos)")
     parser.add_argument("--output-dir", type=Path, default=Path("data/quijote/fiducial/z0.5"))
@@ -170,13 +173,13 @@ def main():
             else:
                 delta, header = load_halo_density(realization, redshift=args.redshift, nmesh=args.nmesh,
                                                   rsd=space == "rsd", mmin=args.mmin, root=args.snapshot_root,
-                                                  device=device)
+                                                  device=device, omega_m=args.omega_m)
             spectra = spectra or multipoles(lattice, header["boxsize"], kmax=args.kmax)
             metadata = dict(realization=realization, space=space, los="z" if space == "rsd" else None,
                             redshift=round(header["redshift"], 6), boxsize=header["boxsize"], nmesh=args.nmesh,
                             nparticles=header["nparticles"], mass_assignment="cic", backend=args.backend,
                             los_resolved=args.los_resolved, tracer=args.tracer,
-                            **({"mmin": args.mmin} if args.tracer == "halos" else {}),
+                            **({"mmin": args.mmin, "omega_m": header["omega_m"]} if args.tracer == "halos" else {}),
                             **({"nbar": args.nbar} if args.tracer == "subsample" else {}))
             for config, path in pending.items():
                 config = WSTConfig(**{**config.to_dict(), "cellsize": header["boxsize"] / args.nmesh})
