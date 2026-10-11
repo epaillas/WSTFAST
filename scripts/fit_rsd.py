@@ -65,6 +65,11 @@ def parse_args(argv=None):
     parser.add_argument("--volume", type=float, default=None,
                         help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true", help="errors of the realization mean")
+    parser.add_argument("--covariance-data-dir", type=Path, default=None,
+                        help="estimate the covariance from the realizations of this directory (e.g. the fiducial "
+                             "ones for a derivative set with few boxes); the data are still those of --data-dir")
+    parser.add_argument("--realizations-like", type=Path, default=None,
+                        help="use only the realizations of --data-dir that also exist in this directory (paired seeds)")
     parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE")
     parser.add_argument("--cumulant-points", type=int, default=2**20,
                         help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
@@ -188,6 +193,11 @@ def build_problem(args, basis=None, settings=None):
 
     theories, vectors, labels = [], [], []
     files = None
+    if getattr(args, "realizations_like", None) is not None:
+        ids = {path.name for path in (args.realizations_like / "rsd").glob("wst_r*.npz")}
+        files = [path for path in sorted((args.data_dir / "rsd").glob("wst_r*.npz")) if path.name in ids]
+        if not files:
+            raise SystemExit(f"no realizations of {args.data_dir} in {args.realizations_like}")
     if "s1m" in args.stats:
         coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale, s1_ells=args.s1_ells)
                         if c.kind == "S1"]
@@ -268,7 +278,16 @@ def main():
     problem = build_problem(args)
     theories, vectors, labels, meta, tracer = (problem[k] for k in ("theories", "vectors", "labels", "meta", "tracer"))
     nreal, ndata = vectors.shape
-    covariance = sample_covariance(vectors, of_mean=args.covariance_of_mean)
+    if args.covariance_data_dir is None:
+        covariance = sample_covariance(vectors, of_mean=args.covariance_of_mean)
+    else:  # one-box covariance of another set; of the mean of this set's nreal boxes with --covariance-of-mean
+        import copy
+
+        other = copy.copy(args)
+        other.data_dir, other.realizations_like = args.covariance_data_dir, None
+        covariance = sample_covariance(build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"])
+        if args.covariance_of_mean:
+            covariance = covariance / nreal
     if args.volume is not None:
         covariance = covariance * (meta["boxsize"] / 1000.0) ** 3 / args.volume
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
@@ -300,7 +319,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, gaussian_prior=args.gaussian_prior, shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
