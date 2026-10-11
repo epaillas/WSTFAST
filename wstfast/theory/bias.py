@@ -176,3 +176,29 @@ def monomial_position(exponents) -> int:
     exponents = np.asarray(exponents)
     table = monomial_exponents(int(exponents.sum()))
     return int(np.flatnonzero(np.all(table == exponents, axis=1))[0])
+
+
+#: Cubic bias operators that enter only at third order (tree-level trispectrum, not the one-loop P(k), where they
+#: renormalize b1): delta^3 / 6, G3 and delta G2, in the Galileon convention of Tucci & Philcox (2026),
+#:     delta_g > b3 / 6 delta^3 + bG3 G3 + bdG2 delta G2,
+#: G3 = -1/2 [2 Pi_ij Pi_jk Pi_ki - 3 Pi_ii Pi_jk Pi_kj + (Pi_ii)^3] with Pi_ij = d_i d_j Phi_g.
+CUBIC_NAMES = ("b3", "bG3", "bdG2")
+
+
+def cubic_kernel(vectors):
+    """Third-order kernels (..., 3) of (delta^3 / 6, G3, delta G2) for three wavevectors (..., 3, 3) (symmetric; zero
+    for one or two vectors). They enter Z_3 directly: at third order the redshift-space map adds no velocity term."""
+    vectors = np.asarray(vectors, dtype=float)
+    if vectors.shape[-2] != 3:
+        return np.zeros(vectors.shape[:-2] + (3,))
+    unit = vectors / np.linalg.norm(vectors, axis=-1, keepdims=True)
+    c12, c23, c31 = (_dot(unit[..., i, :], unit[..., j, :]) for i, j in ((0, 1), (1, 2), (2, 0)))
+    cube = np.full(c12.shape, 1.0 / 6.0)
+    g3 = -0.5 * (2 * c12 * c23 * c31 - (c12**2 + c23**2 + c31**2) + 1.0)
+    dg2 = ((c12**2 - 1) + (c23**2 - 1) + (c31**2 - 1)) / 3.0
+    return np.stack([cube, g3, dg2], axis=-1)
+
+
+def cubic_priors(b1, b2):
+    """Centres of the priors of Tucci & Philcox (2026): b3(b1) fitted to halos, coevolution for bG3 and bdG2."""
+    return np.array([-1.028 + 7.646 * b1 - 6.227 * b1**2 + 0.912 * b1**3, -22.0 / 63.0 * (b1 - 1.0), -2.0 / 7.0 * b2])

@@ -605,10 +605,16 @@ class S21mTheory(Calculator):
     def __init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
                  cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
-                 k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None):
+                 k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
+                 k2_noise: bool = False, noise_correction=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        # K^2 term of the modulus power spectra P_UU / <U>^2, per first-layer scale [(Mpc/h)^5]: the scale dependence
+        # of the noise beyond the Gaussian one (the analog of c_s^2 for U), next to the white term W.
+        self.k2noise_params = ({f"WK2_j{j}": Parameter(f"WK2_j{j}", value=0.0, prior=dict(limits=[-1e7, 1e7]),
+                                                       ref=dict(dist="norm", loc=0.0, scale=1e3), latex=rf"W^{{(2)}}_{{{j}}}")
+                                for j in sorted({c.j for c in coefficients})} if k2_noise else {})
         # K-independent (white) term of the modulus power spectra P_UU / <U>^2, one amplitude per first-layer scale
         # [(Mpc/h)^3]: stands for the connected (non-Gaussian) noise of the moduli, which the Gaussian noise lacks.
         self.white_params = ({f"W_j{j}": Parameter(f"W_j{j}", value=0.0, prior=dict(limits=[-1e5, 1e5]),
@@ -644,20 +650,25 @@ class S21mTheory(Calculator):
     def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
                       cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
-                      k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None):
+                      k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
+                      k2_noise: bool = False, noise_correction=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
-        if white_noise:  # second-layer lattice sum of a constant P_UU / <U>^2, per entry (the weights of lambda_2)
+        #: Fixed relative correction (1 + c_e) of the Gaussian noise of every basis entry, for the tree-level connected
+        #: noise of the moduli (scripts/feasibility/connected_noise_correction.py); rows of the basis, as entry_index.
+        self.noise_correction = None if noise_correction is None else jnp.asarray(noise_correction)
+        if white_noise or k2_noise:  # second-layer lattice sums of 1 and K^2 in P_UU / <U>^2, per entry
             from .theory.rsd_moduli import S21mProjection
 
             if config is None:
-                raise ValueError("white_noise needs the WST config")
+                raise ValueError("white_noise / k2_noise need the WST config")
             x, _ = np.polynomial.legendre.leggauss(12)
             kgrid = np.geomspace(4e-3, 0.12, 24)
             proj = S21mProjection(config, list(coefficients), first_layer_fields(coefficients),
                                   kgrid, x[6:])
             self.white_column = jnp.asarray(proj.matrix.sum(axis=1))
+            self.k2_column = jnp.asarray(proj.matrix @ np.repeat(kgrid**2, 6))
         self.entry_j = np.array([coefficients[i].j for i, _, _ in s21m_entries(coefficients)])
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         self.k2 = jnp.asarray(projection.k2)
@@ -718,9 +729,14 @@ class S21mTheory(Calculator):
             start += ell + 1
         e_q, e_1 = jnp.concatenate(e_q)[self.block_index], jnp.concatenate(e_1)[self.block_index]
         amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
+        if self.noise_correction is not None:
+            terms = jnp.stack([terms[:, 0], terms[:, 1] * (1 + self.noise_correction[self.entry_index])], axis=1)
         if self.white_params:
             white = jnp.stack([self.white_params[f"W_j{j}"].value for j in self.entry_j]) * self.white_column
             terms = jnp.stack([terms[:, 0] + white, terms[:, 1]], axis=1)
+        if self.k2noise_params:
+            k2 = jnp.stack([self.k2noise_params[f"WK2_j{j}"].value for j in self.entry_j]) * self.k2_column
+            terms = jnp.stack([terms[:, 0] + k2, terms[:, 1]], axis=1)
         if self.response_params:
             scale = jnp.stack([(1 + self.response_params[f"a_R_j{j}"].value) ** 2 for j in self.entry_j])
             terms = jnp.stack([terms[:, 0] * scale, terms[:, 1]], axis=1)

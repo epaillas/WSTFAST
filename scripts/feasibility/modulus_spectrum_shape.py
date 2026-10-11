@@ -26,7 +26,7 @@ from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, split
 from wstfast.theory.rsd_moduli import first_layer_fields
 
 
-def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=28, **quadrature):
+def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=28, connected=None, **quadrature):
     """Monopoles of the response R^2 P_L and the noise g per field and K bin, (nfield, nbin) each, averaged over the
     lattice modes of each bin (as the measurement), from the model on a (K, mu) grid."""
     from types import SimpleNamespace
@@ -54,6 +54,16 @@ def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=
     norm2 = (norms[:, :15] @ m2 + noise * norms[:, 15]) ** 2
     resp = (r0r0 @ m4 + noise * r0r1 @ m4 + noise**2 * r1r1 @ m4) / norm2[:, None, None]
     g = (g0 @ m4 + noise * g1 @ m2 + noise**2 * g2[..., 0]) / norm2[:, None, None]
+    if connected is not None:  # tree-level connected noise: g -> g (1 + rho(K, mu)) (connected_noise_rsd.py)
+        from wstfast.theory.connected_noise_rsd import interpolate_ratio, noise_ratio
+
+        f_c = connected.get("f_scale", 1.0) * f
+        sv_c = connected.get("damping_scale", 1.0) * sigma_v
+        rn = noise_ratio(fields, lambda q: np.where(np.asarray(q) > 0, pk(q), 0.0), f_c, sv_c, beta,
+                         connected["cubic"], noise, terms=connected.get("terms", None) or
+                         ("E", "T40", "T22", "T31", "B22", "B21", "G4"))
+        model.connected = rn
+        g = g * (1 + interpolate_ratio(rn["rho"], rn["unodes"], rn["munodes"], [s for s, _, _ in fields], kgrid, x[nmu:]))
     return np.array([project(r) for r in resp]), np.array([project(n) for n in g])
 
 
@@ -66,6 +76,11 @@ def main():
     parser.add_argument("--nbins", type=int, default=10)
     parser.add_argument("--min-scale", type=float, default=25.0, help="smallest sigma_j1 of the S21m fields")
     parser.add_argument("--white", action="store_true", help="add a free K-independent term W per field")
+    parser.add_argument("--connected", action="store_true", help="add the tree-level connected noise (connected_noise_rsd)")
+    parser.add_argument("--cubic", default="0,0,0", help="b3,bG3,bdG2 for --connected ('prior': coevolution / fit)")
+    parser.add_argument("--save", default=None, help="save the per-field comparison (npz)")
+    parser.add_argument("--connected-f", type=float, default=1.0, help="scale of f in the connected terms (tests)")
+    parser.add_argument("--connected-damping", type=float, default=1.0, help="scale of sigma_v in the connected terms")
     args = parser.parse_args()
     files = sorted(glob.glob(f"{args.data_dir}/rsd/wst_r*.npz"))
     config = load_measurement(files[0], q=0.8)["config"]
@@ -88,8 +103,15 @@ def main():
     pklin = fourier.pk_interpolator(of="delta_m")(klin, z=0.5)
     f = float(fourier.sigma8_z(0.5, of="theta_cb") / fourier.sigma8_z(0.5, of="delta_cb"))
     beta = np.array([1.0, *(float(v) for v in args.bias.split(","))])
+    connected = None
+    if args.connected:
+        from wstfast.theory.bias import cubic_priors
+
+        cubic = cubic_priors(beta[1], beta[2]) if args.cubic == "prior" else np.array([float(v) for v in args.cubic.split(",")])
+        connected = dict(cubic=cubic, f_scale=args.connected_f, damping_scale=args.connected_damping)
+        print(f"connected noise with cubic biases (b3, bG3, bdG2) = {np.round(cubic, 3)}")
     resp, noise = model([(config.sigma(j), l, m) for j, l, m in keys], edges, f, klin, pklin, beta,
-                        sn * (1 + args.alpha0), args.sigma_v_factor)
+                        sn * (1 + args.alpha0), args.sigma_v_factor, connected=connected)
     print(f"{nbox} boxes, bias {args.bias}, alpha0 {args.alpha0}, damping {args.sigma_v_factor}; K {k[0]:.4f}-{k[-1]:.4f}")
     print(f"{'field':12s} | resp share | A_R (noise free)  A_N | chi2/dof  | data/model(A=1) at K bins")
     rng = np.random.default_rng(0)
@@ -104,14 +126,25 @@ def main():
         chi2 = r @ prec @ r
         ratio = mean[i] / (resp[i] + noise[i])
         share = np.mean(resp[i] / (resp[i] + noise[i]))
-        summary.append((j, l, m, amp[0], err[0], amp[1], chi2))
+        # the model's own freedom: response fixed, one noise amplitude
+        an = float(noise[i] @ prec @ (mean[i] - resp[i]) / (noise[i] @ prec @ noise[i]))
+        rn = mean[i] - resp[i] - an * noise[i]
+        chi2n = rn @ prec @ rn
+        summary.append((j, l, m, amp[0], err[0], amp[1], chi2, an, chi2n, ratio))
         white = f" W/noise {amp[2] / noise[i].mean():+.3f}" if args.white else ""
         print(f"j{j} l{l} m{m:<5d} | {share:9.2f} | {amp[0]:.3f} ± {err[0]:.3f}  {amp[1]:.3f} | {chi2:5.1f}/{len(k) - A.shape[1]:<3d}"
-              + white + " | resid/err " + " ".join(f"{x:+.1f}" for x in r / np.sqrt(np.diag(cov))))
-    s = np.array([x[3:] for x in summary])
+              + white + f" | A_N only: {an:.3f} chi2 {chi2n:6.1f}/{len(k) - 1} | data/model " + " ".join(f"{x:.3f}" for x in ratio))
+    s = np.array([x[3:9] for x in summary])
     w = 1 / s[:, 1] ** 2
     print(f"weighted mean A_R {np.sum(s[:, 0] * w) / w.sum():.3f} ± {w.sum() ** -0.5:.3f}; mean A_N {s[:, 2].mean():.3f}; "
-          f"total chi2 {s[:, 3].sum():.1f} / {len(keys) * (len(k) - 2 - args.white)}")
+          f"total chi2 {s[:, 3].sum():.1f} / {len(keys) * (len(k) - 2 - args.white)}; "
+          f"noise-amplitude-only total chi2 {s[:, 5].sum():.1f} / {len(keys) * (len(k) - 1)}")
+    if args.save:
+        extra = {}
+        if connected is not None:
+            extra = {f"connected_{n}": v for n, v in model.connected.items()}
+        np.savez(args.save, keys=np.array(keys), k=k, mean=mean, resp=resp, noise=noise,
+                 ratio=np.array([x[9] for x in summary]), A_N=s[:, 4], chi2_noise_only=s[:, 5], **extra)
 
 
 if __name__ == "__main__":
