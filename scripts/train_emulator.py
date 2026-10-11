@@ -117,9 +117,10 @@ def train_rsd(args):
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
-                    bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping)
+                    bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases)
     basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
-                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer, s21_damping=args.s21_damping)
+                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer, s21_damping=args.s21_damping,
+                     cubic_biases=args.cubic_biases)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -175,6 +176,8 @@ def main():
                              "sigma_v (default: the matter value 2; 1 for halos)")
     parser.add_argument("--tracer", choices=("matter", "biased"), default="matter",
                         help="rsd: biased-tracer basis (bias-monomial coefficients; wstfast.theory.rsd_bias)")
+    parser.add_argument("--cubic-biases", action="store_true",
+                        help="rsd, biased tracer: also emulate the S1m trispectrum of the cubic operators b3, bG3, bdG2")
     parser.add_argument("--s21-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j1 of the S21m terms")
     parser.add_argument("--s21-min-scale2", type=float, default=70.0, help="rsd: smallest sigma_j2 of the S21m terms")
     parser.add_argument("--s21-min-ratio", type=float, default=2.8, help="rsd: smallest sigma_j2 / sigma_j1 of S21m")

@@ -201,4 +201,9 @@ def cubic_kernel(vectors):
 
 def cubic_priors(b1, b2):
     """Centres of the priors of Tucci & Philcox (2026): b3(b1) fitted to halos, coevolution for bG3 and bdG2."""
+    numeric = all(isinstance(b, (int, float, np.integer, np.floating, np.ndarray)) for b in (b1, b2))
+    if not numeric:  # JAX values (inside a likelihood)
+        import jax.numpy as jnp
+
+        return jnp.stack([-1.028 + 7.646 * b1 - 6.227 * b1**2 + 0.912 * b1**3, -22.0 / 63.0 * (b1 - 1.0), -2.0 / 7.0 * b2])
     return np.array([-1.028 + 7.646 * b1 - 6.227 * b1**2 + 0.912 * b1**3, -22.0 / 63.0 * (b1 - 1.0), -2.0 / 7.0 * b2])

@@ -105,6 +105,10 @@ def parse_args(argv=None):
                         help="c_FoG: use c_e - c_FoG c_e^fog (an npz made with connected_noise_correction.py --fog)")
     parser.add_argument("--s21-connected-amplitude", action="store_true",
                         help="free amplitude A_c_j of the connected-noise correction per first-layer scale")
+    parser.add_argument("--cubic-biases", choices=("zero", "relation"), default=None,
+                        help="biased tracers: vary the cubic biases b3, bG3, bdG2 of the S1m tree trispectrum, with "
+                             "Gaussian priors centred on zero or on the halo relations of bias.cubic_priors (then the "
+                             "parameters are the offsets db3, dbG3, dbdG2); needs an emulator trained with --cubic-biases")
     parser.add_argument("--shared-counterterms", action="store_true",
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
@@ -159,7 +163,8 @@ def load_correction(args, config, coefficients, settings):
     klin = np.geomspace(1e-4, 10.0, 1024)
     pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
     f = float(fourier.sigma8_z(settings["z"], of="theta_cb") / fourier.sigma8_z(settings["z"], of="delta_cb"))
-    kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=args.cumulant_points)
+    cubic = dict(cubic=True) if settings.get("cubic_biases") else {}
+    kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=args.cumulant_points, **cubic)
     np.savez(cache, kappa=kappa, skewness2=skewness2, labels=np.array([c.label for c in every]))
     print(f"wrote {cache}")
     labels = [c.label for c in every]
@@ -187,6 +192,9 @@ def build_problem(args, basis=None, settings=None):
         basis, settings = load_basis(args.emulator, args.vary)
         apply_gaussian_priors(basis, settings, args.gaussian_prior)
     tracer = settings.get("tracer", "matter")
+    cubic_biases = getattr(args, "cubic_biases", None)
+    if cubic_biases is not None and not settings.get("cubic_biases"):
+        raise SystemExit(f"--cubic-biases needs an emulator trained with --cubic-biases ({args.emulator} is not)")
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
     ap = APGeometry(basis, settings["z"]) if args.ap else None
@@ -213,7 +221,8 @@ def build_problem(args, basis=None, settings=None):
                                       cumulant_index=[emulated.index(c.label) for c in coefficients],
                                       correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
                                       sigmas=[config.sigma(c.j) for c in coefficients],
-                                      k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic))
+                                      k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic,
+                                      cubic_biases=cubic_biases))
             vectors.append(s1m.vectors)
             prefix = f"q{q:g}:" if len(args.q) > 1 else ""
             labels += [f"{prefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
@@ -248,7 +257,7 @@ def build_problem(args, basis=None, settings=None):
                                    response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic,
                                    white_noise=args.s21_white, config=config, k2_noise=args.s21_k2,
                                    noise_correction=connected_correction(args),
-                                   connected_amplitude=args.s21_connected_amplitude))
+                                   connected_amplitude=args.s21_connected_amplitude, cubic_biases=cubic_biases))
         vectors.append(s21m.vectors)
         labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -319,7 +328,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),

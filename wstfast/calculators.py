@@ -227,12 +227,14 @@ class RSDBasis(Calculator):
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                 s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None):
+                 s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
+                 cubic_biases: bool = False):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                      s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None):
+                      s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
+                      cubic_biases: bool = False):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -241,10 +243,15 @@ class RSDBasis(Calculator):
             raise ValueError(f"unknown tracer {tracer!r}")
         self.z, self.tracer = float(z), tracer
         biased = tracer == "biased"
+        if cubic_biases and not biased:
+            raise ValueError("cubic_biases needs tracer='biased'")
+        #: The kappa columns also hold the trispectrum of the cubic operators (``rsd_bias.CUBIC_KAPPA_SIZES``).
+        self.cubic_biases = bool(cubic_biases)
         self.grid = (BiasedRSDGrid if biased else RSDGrid)(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
+        cubic = dict(cubic=True) if self.cubic_biases else {}
         self.cumulant_model = ((BiasedRSDS1Basis if biased else RSDS1Basis)(config, self.coefficients, damping=damping,
-                                                                             npoints=npoints, lattice=False)
+                                                                             npoints=npoints, lattice=False, **cubic)
                                if self.coefficients else None)
         if s21_damping is not None and not biased:
             raise ValueError("s21_damping is only implemented for tracer='biased'")
@@ -265,7 +272,7 @@ class RSDBasis(Calculator):
         if self.tracer == "biased":
             from .theory.rsd_bias import biased_scalings
 
-            scale = biased_scalings(ratio)
+            scale = biased_scalings(ratio, cubic=self.cubic_biases)
             self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
             if self.cumulant_model is not None:
                 kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
@@ -314,9 +321,9 @@ def s21m_rows(basis):
 
 def biased_rows(basis):
     """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude."""
-    from .theory.rsd_bias import biased_scalings
+    from .theory.rsd_bias import KAPPA_SIZES, biased_scalings
 
-    scale = biased_scalings(jnp.exp(basis.dlogA))
+    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=basis.kappa.shape[-1] > sum(KAPPA_SIZES))
     return (basis.grid_terms * scale["grid"][:, None, None], basis.kappa * scale["kappa"],
             basis.skewness2 * scale["skewness"], basis.s21m_terms * scale["s21m"])
 
@@ -328,6 +335,11 @@ class BiasParameters:
     is (1 + alpha0) V / N + alpha2 k^2 mu^2 V / N. Theories hold ``params`` as the attribute ``bias_params`` and
     must read the values from that attribute (desilike substitutes its own Parameter instances there):
     ``bias_beta(self.bias_params)``.
+
+    ``cubic`` adds the cubic biases of the tree trispectrum (``bias.CUBIC_NAMES``), with Gaussian priors of widths
+    CUBIC_WIDTHS: ``"zero"`` varies b3, bG3, bdG2 themselves, centred on zero; ``"relation"`` varies their offsets
+    db3, dbG3, dbdG2 from the halo-calibrated and coevolution relations of ``bias.cubic_priors`` (b1, b2), so the
+    priors are centred on the relations (``cubic_values``).
     """
 
     #: name: (fiducial value, limits, Gaussian prior sigma (None: flat within the limits), reference scale, latex).
@@ -339,12 +351,39 @@ class BiasParameters:
              "alpha0": (0.0, [-1.0, 2.0], 0.3, 0.05, r"\alpha_0"),
              "alpha2": (0.0, [-100.0, 100.0], 10.0, 2.0, r"\alpha_2")}
 
-    def __init__(self):
+    #: Gaussian prior widths of (b3, bG3, bdG2), or of their offsets from the relations.
+    CUBIC_WIDTHS = (2.0, 1.0, 1.0)
+    CUBIC_LATEX = ("b_3", r"b_{\mathcal{G}_3}", r"b_{\delta\mathcal{G}_2}")
+
+    def __init__(self, cubic: str | None = None):
+        from .theory.bias import CUBIC_NAMES
+
         self.params = {}
         for name, (value, limits, sigma, scale, latex) in self.SPECS.items():
             prior = dict(limits=limits) if sigma is None else dict(dist="norm", loc=0.0, scale=sigma, limits=limits)
             self.params[name] = Parameter(name, value=value, prior=prior, ref=dict(dist="norm", loc=value, scale=scale),
                                           latex=latex)
+        if cubic not in (None, "zero", "relation"):
+            raise ValueError(f"unknown cubic biases {cubic!r}")
+        if cubic is not None:
+            offset = cubic == "relation"
+            for name, width, latex in zip(CUBIC_NAMES, self.CUBIC_WIDTHS, self.CUBIC_LATEX):
+                name, latex = ("d" + name, r"\Delta " + latex) if offset else (name, latex)
+                self.params[name] = Parameter(name, value=0.0, latex=latex,
+                                              prior=dict(dist="norm", loc=0.0, scale=width, limits=[-30.0, 30.0]),
+                                              ref=dict(dist="norm", loc=0.0, scale=0.1 * width))
+
+
+def cubic_values(params):
+    """(b3, bG3, bdG2) from a theory's ``bias_params`` (``BiasParameters(cubic=...)``), or None without them."""
+    from .theory.bias import CUBIC_NAMES, cubic_priors
+
+    if CUBIC_NAMES[0] in params:
+        return jnp.stack([jnp.asarray(params[name].value, dtype="f8") for name in CUBIC_NAMES])
+    if "d" + CUBIC_NAMES[0] in params:
+        offsets = jnp.stack([jnp.asarray(params["d" + name].value, dtype="f8") for name in CUBIC_NAMES])
+        return cubic_priors(jnp.asarray(params["b1"].value, dtype="f8"), jnp.asarray(params["b2"].value, dtype="f8")) + offsets
+    return None
 
 
 
@@ -381,15 +420,22 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2
     return grid, tree
 
 
-def biased_cumulants(kappa, skewness, beta, shotnoise):
-    """Per-block kappa (ncoef, L + 1) and 15 skewness^2 (ncoef,) of a tracer of Poisson shot noise ``shotnoise``."""
+def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None):
+    """Per-block kappa (ncoef, L + 1) and 15 skewness^2 (ncoef,) of a tracer of Poisson shot noise ``shotnoise``.
+    ``cubic`` = (b3, bG3, bdG2) adds the cubic-operator trispectrum (needs the basis columns CUBIC_KAPPA_SIZES)."""
     from .theory.bias import monomials
-    from .theory.rsd_bias import KAPPA_SIZES, SKEW_SIZES, split
+    from .theory.rsd_bias import CUBIC_KAPPA_SIZES, KAPPA_SIZES, SKEW_SIZES, split
 
     n = shotnoise
-    k = split(kappa, KAPPA_SIZES)
+    k = split(kappa, KAPPA_SIZES + CUBIC_KAPPA_SIZES)
+    base = kappa
     kappa = (k[0] @ monomials(beta, 4) + n * k[1] @ monomials(beta, 3) + n**2 * k[2] @ monomials(beta, 2)
              + n**3 * k[3][..., 0])
+    if cubic is not None:
+        if base.shape[-1] != sum(KAPPA_SIZES + CUBIC_KAPPA_SIZES):
+            raise ValueError("cubic biases need an emulator trained with --cubic-biases")
+        m3 = monomials(beta, 3)
+        kappa = kappa + sum(cubic[c] * (k[4 + c] @ m3) for c in range(len(CUBIC_KAPPA_SIZES)))
     sk = split(skewness, SKEW_SIZES)
     skew = sk[0] @ monomials(beta, 3) + n * sk[1] @ monomials(beta, 2) + n**2 * sk[2][..., 0]
     return kappa, 15 * skew**2
@@ -508,10 +554,10 @@ class S1mTheory(Calculator):
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                 sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False):
+                 sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None):
         self.basis = basis
         self.k2_params = _k2_stochastic(k2_stochastic)
-        self.bias_params = BiasParameters().params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(cubic_biases).params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
         self.k4_params = _k4_counterterm(k4_counterterm, "", "")
         self.ap = ap
@@ -520,7 +566,8 @@ class S1mTheory(Calculator):
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                      sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False):
+                      sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
+                      cubic_biases: str | None = None):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
@@ -555,7 +602,7 @@ class S1mTheory(Calculator):
             beta = bias_beta(self.bias_params)
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index] * self.kappa_ratio,
                                                 skewness[self.cumulant_index] * self.skewness_ratio, beta,
-                                                self.shotnoise)
+                                                self.shotnoise, cubic_values(self.bias_params))
             ck4 = self.k4_params["ck4"].value if self.k4_params else None
             grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise,
                                             self.bias_params["alpha2"].value, ck4, self.k2,
@@ -606,7 +653,8 @@ class S21mTheory(Calculator):
                  cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
-                 k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False):
+                 k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
+                 cubic_biases: str | None = None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
@@ -634,7 +682,7 @@ class S21mTheory(Calculator):
                                  for j in sorted({c.j for c in coefficients})} if response_amplitude else {})
         # With full_norm, the S1m counterterms (shared by name) enter the first-layer variance.
         self.counterterms = _rsd_counterterms("", "") if full_norm and tracer == "biased" else {}
-        self.bias_params = BiasParameters().params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(cubic_biases).params if tracer == "biased" else {}
         # Free amplitude of the Poisson ("same-object") bispectrum term of the response, B > (1 + B_shot) P(K) / nbar:
         # halos are not Poisson, and this stochastic term is independent of the power-spectrum one (alpha0).
         self.bshot_params = ({"B_shot": Parameter("B_shot", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
@@ -656,7 +704,8 @@ class S21mTheory(Calculator):
                       cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
-                      k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False):
+                      k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
+                      cubic_biases: str | None = None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
@@ -713,7 +762,7 @@ class S21mTheory(Calculator):
             tree = jnp.tensordot(m2[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
             linear = self.matrix @ tree.ravel() + noise * self.shot
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
-                                                self.shotnoise)
+                                                self.shotnoise, cubic_values(self.bias_params))
             r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
             norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
             if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block

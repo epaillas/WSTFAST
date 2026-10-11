@@ -7,7 +7,9 @@ coefficients of the monomials of beta = (1, b1, b2, bG2, bGamma3) so that the ba
   The loop is renormalized as in CLASS-PT: the b2 part of P13 (a constant times Z1(k) P_L(k)) is absorbed into b1
   and the k -> 0 constant of the b2^2 part of P22 into the shot noise.
 - S1m cumulants: per block, the tree trispectrum (degree 4) and the Poisson terms of a discrete tracer,
-  T + B / n + P / n^2 + 1 / n^3 (degrees 3, 2, 0), and the m = 0 third cumulant B + P / n + 1 / n^2.
+  T + B / n + P / n^2 + 1 / n^3 (degrees 3, 2, 0), and the m = 0 third cumulant B + P / n + 1 / n^2. With ``cubic``,
+  also the T_3111 of the cubic operators delta^3, G3 and delta G2 (``bias.CUBIC_NAMES``), which enter the tree
+  trispectrum but not the one-loop P_s: one block per operator, linear in its bias times degree 3 in beta.
 - S21m: per entry, the response R0 + N R1 + N^2 R2 (degree 4), the noise G0 + N G1 + N^2 G2 (degrees 4, 2, 0) and
   the first-layer normalization n0 + N n1 (degrees 2, 0):
 
@@ -25,8 +27,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.special import sph_harm_y
 
-from .bias import (galaxy_kernel, monomial_exponents, monomial_position, monomial_product,
-                   product_coefficients)
+from .bias import (CUBIC_NAMES, cubic_kernel, galaxy_kernel, monomial_exponents, monomial_position,
+                   monomial_product, product_coefficients)
 from .eft_loop import LinearSpectrum, Quadrature, radial_rule
 from .rsd import RSDGrid, RSDS1Basis
 from .rsd_moduli import SIGMA_V_FACTOR, ModulusSpectraRSD, S21mProjection, _harmonic, first_layer_fields
@@ -39,6 +41,8 @@ LOOP = tuple(i for i, e in enumerate(monomial_exponents(2)) if not (e[4] and (e[
 BIASED_GRID_TERMS = (tuple(f"tree_{i}" for i in TREE) + tuple(f"loop_{i}" for i in LOOP) + ("ct0", "ct2", "ct4"))
 #: Columns of the per-block cumulants: tree (deg 4), B / n (deg 3), P / n^2 (deg 2), 1 / n^3.
 KAPPA_SIZES = (len(monomial_exponents(4)), len(monomial_exponents(3)), len(monomial_exponents(2)), 1)
+#: Columns of the cubic-operator trispectrum (``cubic``), appended to KAPPA_SIZES: one degree-3 block per cubic bias.
+CUBIC_KAPPA_SIZES = (len(monomial_exponents(3)),) * len(CUBIC_NAMES)
 #: Columns of the m = 0 third cumulant: tree (deg 3), P / n (deg 2), 1 / n^2.
 SKEW_SIZES = (len(monomial_exponents(3)), len(monomial_exponents(2)), 1)
 #: Columns of the S21m terms: R0, R1, R2 (deg 4), G0 (deg 4), G1 (deg 2), G2, n0 (deg 2), n1.
@@ -156,6 +160,21 @@ def _trispectrum_terms(legs, f):
     return terms
 
 
+def _cubic_trispectrum_terms(legs, f):
+    """T_3111 of the cubic operators at unit legs: one term group per operator (keyed by its name), each the
+    coefficients of degree 3 in beta of sum_i 6 K_c(k_j, k_l, k_m) Z1(k_j) Z1(k_l) Z1(k_m) P P P."""
+    terms = _ScaleFreeTerms()
+    z1 = [linear_components(x, f) for x in legs]
+    for i in range(4):
+        j, l, m = (x for x in range(4) if x != i)
+        kernels = cubic_kernel(np.stack([legs[j], legs[l], legs[m]], axis=-2))  # (N, 3)
+        z111 = product_coefficients(z1[j], z1[l], z1[m])
+        for c, name in enumerate(CUBIC_NAMES):
+            terms.add(name, 6.0 * kernels[:, c, None] * z111, [legs[j], legs[l], legs[m]])
+    terms.freeze()
+    return terms
+
+
 def _add_bispectrum(terms, q, f):
     """Tree bispectrum terms 2 Z2(q_a, q_b) Z1(q_a) Z1(q_b) P(q_a) P(q_b) (degree 3) for q_0 + q_1 + q_2 = 0."""
     z1 = [linear_components(x, f) for x in q]
@@ -177,24 +196,31 @@ def _bispectrum_terms(legs, f):
 
 
 class BiasedRSDS1Basis(RSDS1Basis):
-    """Monomial-resolved S1m cumulants of a biased tracer (``cumulants`` only; see the module docstring)."""
+    """Monomial-resolved S1m cumulants of a biased tracer (``cumulants`` only; see the module docstring). With
+    ``cubic``, the kappa columns also hold the cubic-operator trispectrum (CUBIC_KAPPA_SIZES)."""
+
+    def __init__(self, *args, cubic: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cubic = bool(cubic)
 
     def cumulants(self, klin, pklin, f):
-        """``kappa`` (ncoef, L + 1, sum KAPPA_SIZES): per block sum_{a,b in M} kappa_aabb in the columns
-        [tree | B/n | P/n^2 | 1/n^3]; ``skewness`` (ncoef, sum SKEW_SIZES): the m = 0 third cumulant (even l) in
-        [tree | P/n | 1/n^2]."""
+        """``kappa`` (ncoef, L + 1, sum KAPPA_SIZES [+ sum CUBIC_KAPPA_SIZES]): per block sum_{a,b in M} kappa_aabb in
+        the columns [tree | B/n | P/n^2 | 1/n^3 [| b3 | bG3 | bdG2]]; ``skewness`` (ncoef, sum SKEW_SIZES): the m = 0
+        third cumulant (even l) in [tree | P/n | 1/n^2]."""
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.where(np.asarray(x) > 0, np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp)), 0.0)  # noqa
         self.sigma_v = (0.0 if self.damping is None else float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
                         if self.damping == "linear" else float(self.damping))
         self.f = f
         nb = self.lmax + 1
-        kappa = np.zeros((len(self.coefficients), nb, sum(KAPPA_SIZES)))
+        ncol = sum(KAPPA_SIZES) + (sum(CUBIC_KAPPA_SIZES) if self.cubic else 0)
+        kappa = np.zeros((len(self.coefficients), nb, ncol))
         skewness = np.zeros((len(self.coefficients), sum(SKEW_SIZES)))
         for ell in sorted({c.ell for c in self.coefficients}):  # kernels once per l, spectra per sigma
             members = [i for i, c in enumerate(self.coefficients) if c.ell == ell]
             legs = [np.asarray(x) for x in self.samplers[ell].legs(0.0)]
             terms = _trispectrum_terms(legs, f)
+            cubic = _cubic_trispectrum_terms(legs, f) if self.cubic else None
             (pair12, pair34), _ = self.block_angles[ell]
             angles = (pair12 * pair34).T  # (N, l + 1): diagonal block sums
             for index in members:
@@ -203,9 +229,12 @@ class BiasedRSDS1Basis(RSDS1Basis):
                 damping = np.prod([self._damp(x / sigma) for x in legs], axis=0)
                 weight = (self.samplers[ell].weights * filters / sigma**9)[:, None] * angles
                 # velocity-damped legs for the clustering piece only: the Poisson pieces are not
-                kappa[index, :ell + 1] = np.concatenate([terms(4, sigma, pk, weight * damping[:, None])]
-                                                        + [terms(d, sigma, pk, weight) for d in (3, 2, 0)], axis=-1)
-            del terms
+                columns = ([terms(4, sigma, pk, weight * damping[:, None])]
+                           + [terms(d, sigma, pk, weight) for d in (3, 2, 0)])
+                if cubic is not None:  # clustering pieces: damped like the tree trispectrum
+                    columns += [cubic(name, sigma, pk, weight * damping[:, None]) for name in CUBIC_NAMES]
+                kappa[index, :ell + 1] = np.concatenate(columns, axis=-1)
+            del terms, cubic
             if ell % 2:
                 continue
             legs = [np.asarray(x) for x in self.bis_samplers[ell].legs(0.0)]
@@ -314,25 +343,28 @@ def split(values, sizes):
 
 
 
-def biased_scalings(ratio):
+def biased_scalings(ratio, cubic: bool = False):
     """Powers of A_s / A_s,fid of every biased basis output (grid rows, kappa / skewness / S21m columns), so that a
-    Taylor emulator is nearly exact in logA."""
+    Taylor emulator is nearly exact in logA. ``cubic``: the kappa columns include CUBIC_KAPPA_SIZES (P^3, like the
+    tree trispectrum)."""
     import jax.numpy as jnp
 
     xp = np if isinstance(ratio, (float, np.floating)) else jnp
     powers = lambda counts: xp.concatenate([xp.full((n,), 1.0) * ratio**p for p, n in counts])  # noqa: E731
     return dict(grid=powers([(1, len(TREE)), (2, len(LOOP)), (1, 3)]),
-                kappa=powers(zip((3, 2, 1, 0), KAPPA_SIZES)),
+                kappa=powers(list(zip((3, 2, 1, 0), KAPPA_SIZES))
+                             + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else [])),
                 skewness=powers(zip((2, 1, 0), SKEW_SIZES)),
                 s21m=powers(zip((3, 2, 1, 2, 1, 0, 1, 0), S21_SIZES)))
 
 
 def biased_cumulant_correction(config, coefficients, klin, pklin, f, npoints: int = 2**16,
-                               npoints_reference: int = 2**20, damping="linear"):
+                               npoints_reference: int = 2**20, damping="linear", cubic: bool = False):
     """``rsd.cumulant_correction`` of the biased cumulants: column-wise reference / base ratios (1 where the base
     column is negligible)."""
-    base = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints, lattice=False)
-    reference = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints_reference, lattice=False)
+    base = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints, lattice=False, cubic=cubic)
+    reference = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints_reference, lattice=False,
+                                 cubic=cubic)
     out = []
     for b, r in zip(base.cumulants(klin, pklin, f), reference.cumulants(klin, pklin, f)):
         tiny = 1e-8 * np.max(np.abs(b), axis=tuple(range(b.ndim - 1)), keepdims=True)
