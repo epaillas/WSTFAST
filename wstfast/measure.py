@@ -13,6 +13,22 @@ from .config import WSTConfig
 WORKERS = int(os.environ.get("WST_FFT_WORKERS", os.cpu_count()))
 
 
+def real_harmonics(ell: int, theta, phi) -> list[np.ndarray]:
+    """Real spherical harmonics m = -l..l at polar angles (theta, phi), scaled so that sum_m Y_lm^2 = 1."""
+    norm = np.sqrt(4 * np.pi / (2 * ell + 1))
+    out = []
+    for m in range(-ell, ell + 1):
+        ylm = sph_harm_y(ell, abs(m), theta, phi)
+        if m == 0:
+            y = ylm.real
+        elif m > 0:
+            y = np.sqrt(2) * (-1) ** m * ylm.real
+        else:
+            y = np.sqrt(2) * (-1) ** m * ylm.imag
+        out.append(norm * y)
+    return out
+
+
 class Lattice:
     """Fourier lattice of an n^3 periodic mesh, wavenumbers in radians per cell."""
 
@@ -34,18 +50,7 @@ class Lattice:
 
     def harmonics(self, ell: int) -> list[np.ndarray]:
         """Real spherical harmonics scaled so that sum_m Y_lm^2 = 1."""
-        norm = np.sqrt(4 * np.pi / (2 * ell + 1))
-        out = []
-        for m in range(-ell, ell + 1):
-            ylm = sph_harm_y(ell, abs(m), self.theta, self.phi)
-            if m == 0:
-                y = ylm.real
-            elif m > 0:
-                y = np.sqrt(2) * (-1) ** m * ylm.real
-            else:
-                y = np.sqrt(2) * (-1) ** m * ylm.imag
-            out.append((norm * y).astype(np.float32))
-        return out
+        return [y.astype(np.float32) for y in real_harmonics(ell, self.theta, self.phi)]
 
     def radial(self, sigma: float, ell: int) -> np.ndarray:
         """(sigma k)^l exp(-sigma^2 k^2 / 2), sigma in cells."""

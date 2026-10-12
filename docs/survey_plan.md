@@ -13,6 +13,10 @@ remove each assumption, and the validation ladder that has to pass before data.
 - **Weights:** FKP-like (E3).
 - **Mocks** are HOD galaxies. For now we assume the halo bias model (cubic biases, W, damping 1 × σ_v) carries over to
   them unchanged. A box-level HOD check is deferred, not dropped (§8).
+- **Covariance:** analytic (C2) for now. The EZmocks (C1) come later.
+- **Fibre assignment (V4):** deferred.
+- **Priority:** recover the AbacusSummit c000 truth from the mean of the 25 DR1 LRG Abacus mocks (V3). The rungs below
+  it exist to make that fit trustworthy.
 
 ### DR1 inputs (public, `https://data.desi.lbl.gov/public/dr1/survey/catalogs/dr1/`)
 
@@ -169,6 +173,41 @@ The covariance (C1) comes from the 1000 EZmock LRG ffa mocks.
 7. M4 + V3, then M5 + V4.
 
 Steps 1–5 use only data already on disk.
+
+### Status
+
+**Done (2026-10-12):** step 1 and E2.
+- `wstfast/survey.py` (estimator) and `tests/test_survey.py`. Exact checks: the box limit reproduces `measure_wst`, a
+  constant line of sight matches the rotated box, and a mode along the line of sight is pure m = 0.
+
+**V0a on Gaussian fields** (`scripts/survey/v0a_gaussian.py`). Run on a 200³ mesh of a 2 Gpc/h box: a 1.4 (Gpc/h)³
+cone, n̄ = 1.5–6 × 10⁻⁴ (h/Mpc)³, b = 2, f = 0.75, q = 0.8, S1m at σ = 25–71 Mpc/h with l ≤ 4. The edge test (A)
+used 4 realisations, the varying-noise test (B) 16. The output is in outputs/survey/v0a.
+
+- **Edges (A).** The table gives the largest edge bias of S1m over blocks, in units of the error of one survey
+  (fractional in brackets).
+
+  | Erosion c | σ = 25 | σ = 35 | σ = 50 | σ = 71 Mpc/h |
+  |---|---|---|---|---|
+  | 0 | 14 (3.8%) | 15 (5.5%) | 15 (7.9%) | 7.8 (10.7%) |
+  | 1 | 4.8 (1.6%) | 6.1 (2.4%) | 4.2 (3.3%) | 2.6 (4.3%) |
+  | 2 | 1.2 (0.4%) | 0.9 (0.5%) | 0.7 (0.7%) | 0.4 (1.0%) |
+  | 3 | 0.09 | 0.04 | 0.02 | 0.05 |
+
+  Erosion by 3σ works, but at σ = 71 it removes 210 Mpc/h from every edge, which is too much for DR1 LRG z-bins.
+  So an edge-transfer model (M2) is needed, not optional.
+- **Varying noise (B, erosion 3).** All three predictions match the mean: χ² = 54, 46 and 55 for 60 blocks
+  (diagonal), with a largest residual of 0.65σ against an error of the mean of 0.25σ. They differ from each other by
+  ≤ 0.08σ (exact vs local) and ≤ 0.03σ (exact vs effective). At LRG densities n̄P ≫ 1 on these scales, so the noise is
+  a few per cent of λ and S1m is nearly linear in it. **A single effective noise level suffices for S1m.** The
+  n̄ histogram of M1 is not needed for the LRGs, though it could still matter for S21m (the noise of U) and for the
+  Poisson cumulants.
+
+**Next:** the M2 edge model, then V0b (Quijote halos with the mask).
+- Planned M2: a locally flat boundary. Tabulate λ_s,m(d, μ_n), where d is the distance to the edge and μ_n is the
+  edge normal against the line of sight, as 1D integrals of P against the half-space-masked wavelet.
+- The model moment is then averaged over the support histogram in (d, μ_n).
+- Validate on the V0a cone at erosion 0–1.
 
 ## 8. Open decisions
 
