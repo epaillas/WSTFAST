@@ -39,7 +39,7 @@ from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
 from wstfast.data import (chi_squared, load_measurement, load_power_dataset, load_s1m_dataset, load_s21m_dataset,
                           sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
-                                profile, sample_mh)
+                                profile, sample_mh, sample_nuts)
 from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
                                 s1m_ap_projection)
 
@@ -121,8 +121,13 @@ def parse_args(argv=None):
                         help="one set of counterterms (c0, c2, c4) for P_l and S1m: both are maps of the same P_s")
     parser.add_argument("--ap", action="store_true", help="Alcock-Paczynski distortions of the trial cosmology")
     parser.add_argument("--method", choices=("profile", "sample"), default="sample")
+    parser.add_argument("--sampler", choices=("nuts", "mh"), default="nuts",
+                        help="nuts: BlackJAX NUTS whitened by the exact Hessian at the best fit (minutes); mh: "
+                             "Metropolis-Hastings with an adapted proposal (hours on the halo WST)")
+    parser.add_argument("--warmup", type=int, default=1000, help="NUTS: step-size and mass-matrix adaptation steps")
     parser.add_argument("--chains", type=int, default=4)
-    parser.add_argument("--max-steps", type=int, default=200000)
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="largest number of steps per chain (default 20000 for NUTS, 200000 for MH)")
     parser.add_argument("--proposal-from", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -327,8 +332,13 @@ def main():
             from desilike.samples import Samples
 
             proposal = Samples.read(str(args.proposal_from))
-        samples = sample_mh(posterior, profiles, args.output_dir / "chains", chains=args.chains, proposal=proposal,
-                            seed=args.seed, max_steps=args.max_steps)
+        if args.sampler == "nuts":
+            samples = sample_nuts(posterior, profiles, args.output_dir / "chains", chains=args.chains,
+                                  proposal=proposal, seed=args.seed, max_steps=args.max_steps or 20000,
+                                  warmup=args.warmup)
+        else:
+            samples = sample_mh(posterior, profiles, args.output_dir / "chains", chains=args.chains,
+                                proposal=proposal, seed=args.seed, max_steps=args.max_steps or 200000)
         samples.write(str(args.output_dir / "samples.h5"))
         print(samples.to_stats(tablefmt="pretty"))
 
@@ -341,7 +351,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),

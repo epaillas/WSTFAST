@@ -188,13 +188,63 @@ def bestfit_values(profiles) -> dict[str, float]:
     return {str(name): float(np.asarray(value).reshape(-1)[-1]) for name, value in chosen.best.items()}
 
 
+def hessian_covariance(graph, center: dict, varied):
+    """Inverse of minus the exact (JAX) Hessian of the compiled log-posterior ``graph`` at ``center``, as a desilike
+    Covariance (``graph`` is reused: building the posterior again would invalidate it).
+
+    Minuit's profile covariance can underestimate the posterior widths of these fits several-fold (2-19x on the
+    halo WST), which makes it a poor proposal / whitening; the exact Hessian at the best fit does not.
+    Non-positive curvature directions are clipped.
+    """
+    import jax
+    import jax.numpy as jnp
+    from desilike.samples.covariance import Covariance
+
+    names = varied.names()
+    point = jnp.asarray([center[name] for name in names], dtype="f8")
+    hessian = np.asarray(jax.hessian(lambda x: graph(dict(zip(names, x))))(point))
+    w, v = np.linalg.eigh(-hessian)
+    w = np.clip(w, w.max() * 1e-12, None)
+    return Covariance((v / w) @ v.T, params=list(varied))
+
+
+def sample_nuts(posterior, profiles, output_dir: Path, chains: int = 4, seed: int = 42, max_steps: int = 20000,
+                gelman_rubin: float = 1.03, ess: float = 300.0, check_every: int = 200, warmup: int = 1000,
+                dense: bool = True, proposal=None):
+    """NUTS chains (BlackJAX via desilike) started around the best fit.
+
+    The parameters are whitened by the covariance of ``proposal`` (samples of an earlier run) or else by the exact
+    Hessian at the best fit (``hessian_covariance``); the step size and a dense (or diagonal) mass matrix are then
+    adapted over ``warmup`` steps. The halo WST posteriors that took hours with MH converge in a few minutes.
+    """
+    from desilike.conditioning import AffineConditioner
+    from desilike.samplers import BlackjaxNUTS, Sampler
+    from desilike.samplers.proposals import GaussianProposal
+
+    graph = build(posterior)
+    varied = graph.params.select(varied=True, derived=False)
+    center = {name: value for name, value in bestfit_values(profiles).items() if name in varied.names()}
+    if proposal is None:
+        covariance = hessian_covariance(graph, center, varied)
+    else:
+        covariance = proposal.remove_burnin(0.3).covariance().select(varied)
+    sampler = Sampler(graph, kernel=BlackjaxNUTS(), nparallel=chains, rng=seed, output_dir=output_dir,
+                      conditioner=AffineConditioner(covariance=covariance, rescale="full"),
+                      proposal=GaussianProposal(covariance, center=center))
+    adaptation = dict(steps=warmup, **({"is_mass_matrix_diagonal": False} if dense else {}))
+    return sampler.run(gelman_rubin=gelman_rubin, ess=ess, min_steps=check_every, check_every=check_every,
+                       max_steps=max_steps, adaptation=adaptation)
+
+
 def sample_mh(posterior, profiles, output_dir: Path, chains: int = 4, seed: int = 42, max_steps: int = 50000,
-              gelman_rubin: float = 1.03, ess: float = 300.0, check_every: int = 500, proposal=None):
+              gelman_rubin: float = 1.03, ess: float = 300.0, check_every: int = 500, proposal=None,
+              adaptation_steps: int = 10000):
     """Metropolis-Hastings chains started at the best fit, with the profile covariance as proposal.
 
     ``proposal`` (samples of an earlier run of the same posterior) replaces the profile covariance by the
     covariance of those chains (first 30% dropped as burn-in), for posteriors where Minuit's Hessian is a poor
-    proposal.
+    proposal. The proposal covariance is learnt from the chains over the first ``adaptation_steps`` steps
+    (0: never; desilike's MH only adapts when asked to).
     """
     from desilike.conditioning import AffineConditioner
     from desilike.samplers import MH, Sampler
@@ -213,7 +263,7 @@ def sample_mh(posterior, profiles, output_dir: Path, chains: int = 4, seed: int 
                       output_dir=output_dir, conditioner=AffineConditioner(covariance=covariance, rescale="full"),
                       proposal=GaussianProposal(covariance, center=center))
     return sampler.run(gelman_rubin=gelman_rubin, ess=ess, min_steps=check_every, check_every=check_every,
-                       max_steps=max_steps)
+                       max_steps=max_steps, adaptation={"steps": adaptation_steps} if adaptation_steps else None)
 
 
 def summarize(likelihood, profiles, samples, dataset: WSTDataset | PowerDataset, covariance_kind: str) -> dict:
