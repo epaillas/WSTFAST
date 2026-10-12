@@ -61,6 +61,21 @@ def chi_squared(residual: np.ndarray, covariance: np.ndarray) -> float:
     return float(residual @ precision_matrix(covariance) @ residual)
 
 
+def hartlap_factor(nsims: int, ndata: int) -> float:
+    """Factor (N - 1) / (N - n - 2) by which ``sample_covariance`` inflates the sample covariance (Hartlap et al. 2007),
+    so that its inverse is an unbiased precision matrix."""
+    return (nsims - 1.0) / (nsims - ndata - 2.0)
+
+
+def percival_m1(nsims: int, ndata: int, nparams: int) -> float:
+    """Factor m1 of Percival et al. (2014, eq. 18) by which the parameter covariance of a fit with a covariance
+    estimated from ``nsims`` simulations is underestimated (after the Hartlap correction): the noise of the estimate
+    propagates into the parameters. Multiplying the likelihood covariance by m1 widens the posterior accordingly."""
+    a = 2.0 / ((nsims - ndata - 1.0) * (nsims - ndata - 4.0))
+    b = (nsims - ndata - 2.0) / ((nsims - ndata - 1.0) * (nsims - ndata - 4.0))
+    return (1.0 + b * (ndata - nparams)) / (1.0 + a + b * (nparams + 1.0))
+
+
 def sample_covariance(vectors: np.ndarray, kind: str = "sample", of_mean: bool = False) -> np.ndarray:
     """Covariance of one realization (or of the mean) of ``vectors`` (nreal, ndata), Hartlap-corrected for 'sample'.
 
@@ -75,7 +90,7 @@ def sample_covariance(vectors: np.ndarray, kind: str = "sample", of_mean: bool =
         if nreal < ndata + 3:
             raise ValueError(f"{nreal} realizations cannot estimate a {ndata}-point covariance; "
                              "measure more realizations or use kind='diagonal'")
-        covariance = covariance / ((nreal - ndata - 2.0) / (nreal - 1.0))
+        covariance = covariance * hartlap_factor(nreal, ndata)
     elif kind == "diagonal":
         covariance = np.diag(np.diag(covariance))
     else:

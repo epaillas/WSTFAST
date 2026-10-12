@@ -36,8 +36,8 @@ from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
 from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood
 from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
-from wstfast.data import (chi_squared, load_measurement, load_power_dataset, load_s1m_dataset, load_s21m_dataset,
-                          sample_covariance)
+from wstfast.data import (chi_squared, hartlap_factor, load_measurement, load_power_dataset, load_s1m_dataset,
+                          load_s21m_dataset, percival_m1, sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh, sample_nuts)
 from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
@@ -65,6 +65,9 @@ def parse_args(argv=None):
     parser.add_argument("--volume", type=float, default=None,
                         help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true", help="errors of the realization mean")
+    parser.add_argument("--no-percival", action="store_true",
+                        help="do not multiply the likelihood covariance by the Percival et al. (2014) factor m1 (the "
+                             "posterior widening from the noise of the sample covariance; applied by default)")
     parser.add_argument("--covariance-data-dir", type=Path, default=None,
                         help="estimate the covariance from the realizations of this directory (e.g. the fiducial "
                              "ones for a derivative set with few boxes); the data are still those of --data-dir")
@@ -305,6 +308,7 @@ def main():
     problem = build_problem(args)
     theories, vectors, labels, meta, tracer = (problem[k] for k in ("theories", "vectors", "labels", "meta", "tracer"))
     nreal, ndata = vectors.shape
+    nsims = nreal  # realizations of the covariance estimate
     if args.covariance_data_dir is None:
         covariance = sample_covariance(vectors, of_mean=args.covariance_of_mean)
     else:  # one-box covariance of another set; of the mean of this set's nreal boxes with --covariance-of-mean
@@ -312,7 +316,9 @@ def main():
 
         other = copy.copy(args)
         other.data_dir, other.realizations_like, other.exclude_like = args.covariance_data_dir, None, None
-        covariance = sample_covariance(build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"])
+        cov_vectors = build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"]
+        nsims = cov_vectors.shape[0]
+        covariance = sample_covariance(cov_vectors)
         if args.covariance_of_mean:
             covariance = covariance / nreal
     if args.volume is not None:
@@ -320,8 +326,13 @@ def main():
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
 
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)
-    likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance)
-    fix_parameters(likelihood, parse_fixed(args.fix))
+    fixed = parse_fixed(args.fix)
+    nparams = len([n for n in get_params(theory).select(varied=True, derived=False).names() if n not in fixed])
+    m1 = 1.0 if args.no_percival else percival_m1(nsims, ndata, nparams)
+    print(f"Hartlap factor {hartlap_factor(nsims, ndata):.4f} ({nsims} realizations, {ndata} data points); "
+          f"Percival m1 {m1:.4f} for {nparams} parameters", flush=True)
+    likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance * m1)
+    fix_parameters(likelihood, fixed)
     posterior = Posterior(likelihood)
     profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed)
     print(profiles.to_stats(tablefmt="pretty"))
@@ -351,7 +362,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), hartlap_factor=hartlap_factor(nsims, ndata), percival_m1=m1, nsims=int(nsims), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
