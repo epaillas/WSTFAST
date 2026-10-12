@@ -355,10 +355,19 @@ class BiasParameters:
     CUBIC_WIDTHS = (2.0, 1.0, 1.0)
     CUBIC_LATEX = ("b_3", r"b_{\mathcal{G}_3}", r"b_{\delta\mathcal{G}_2}")
 
-    def __init__(self, cubic: str | None = None):
+    #: Stochastic amplitudes of the Poisson pieces of the tree trispectrum, kappa > k0 + A_TN N k1 + A_TN2 N^2 k2 + N^3 k3
+    #: (1 = Poisson; halos are not Poisson), with Gaussian priors N(1, 1) as the shot amplitudes of Tucci & Philcox (2026).
+    KAPPA_SHOT = ("A_TN", "A_TN2")
+
+    def __init__(self, cubic: str | None = None, kappa_shot: bool = False):
         from .theory.bias import CUBIC_NAMES
 
         self.params = {}
+        if kappa_shot:
+            for name, latex in zip(self.KAPPA_SHOT, (r"A_{T,N}", r"A_{T,N^2}")):
+                self.params[name] = Parameter(name, value=1.0, latex=latex,
+                                              prior=dict(dist="norm", loc=1.0, scale=1.0, limits=[-5.0, 10.0]),
+                                              ref=dict(dist="norm", loc=1.0, scale=0.1))
         for name, (value, limits, sigma, scale, latex) in self.SPECS.items():
             prior = dict(limits=limits) if sigma is None else dict(dist="norm", loc=0.0, scale=sigma, limits=limits)
             self.params[name] = Parameter(name, value=value, prior=prior, ref=dict(dist="norm", loc=value, scale=scale),
@@ -385,6 +394,13 @@ def cubic_values(params):
         return cubic_priors(jnp.asarray(params["b1"].value, dtype="f8"), jnp.asarray(params["b2"].value, dtype="f8")) + offsets
     return None
 
+
+
+def kappa_shot_values(params):
+    """(A_TN, A_TN2) from a theory's ``bias_params`` (``BiasParameters(kappa_shot=True)``), or None without them."""
+    if "A_TN" not in params:
+        return None
+    return tuple(jnp.asarray(params[name].value, dtype="f8") for name in BiasParameters.KAPPA_SHOT)
 
 
 def bias_beta(params):
@@ -420,16 +436,18 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2
     return grid, tree
 
 
-def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None):
+def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None, shot=None):
     """Per-block kappa (ncoef, L + 1) and 15 skewness^2 (ncoef,) of a tracer of Poisson shot noise ``shotnoise``.
-    ``cubic`` = (b3, bG3, bdG2) adds the cubic-operator trispectrum (needs the basis columns CUBIC_KAPPA_SIZES)."""
+    ``cubic`` = (b3, bG3, bdG2) adds the cubic-operator trispectrum (needs the basis columns CUBIC_KAPPA_SIZES);
+    ``shot`` = (A_TN, A_TN2) scales the N and N^2 pieces of kappa (non-Poisson stochasticity)."""
     from .theory.bias import monomials
     from .theory.rsd_bias import CUBIC_KAPPA_SIZES, KAPPA_SIZES, SKEW_SIZES, split
 
     n = shotnoise
     k = split(kappa, KAPPA_SIZES + CUBIC_KAPPA_SIZES)
     base = kappa
-    kappa = (k[0] @ monomials(beta, 4) + n * k[1] @ monomials(beta, 3) + n**2 * k[2] @ monomials(beta, 2)
+    a1, a2 = (1.0, 1.0) if shot is None else shot
+    kappa = (k[0] @ monomials(beta, 4) + a1 * n * k[1] @ monomials(beta, 3) + a2 * n**2 * k[2] @ monomials(beta, 2)
              + n**3 * k[3][..., 0])
     if cubic is not None:
         if base.shape[-1] != sum(KAPPA_SIZES + CUBIC_KAPPA_SIZES):
@@ -554,10 +572,11 @@ class S1mTheory(Calculator):
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
-                 sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None):
+                 sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None,
+                 kappa_shot: bool = False):
         self.basis = basis
         self.k2_params = _k2_stochastic(k2_stochastic)
-        self.bias_params = BiasParameters(cubic_biases).params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(cubic_biases, kappa_shot).params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
         self.k4_params = _k4_counterterm(k4_counterterm, "", "")
         self.ap = ap
@@ -567,7 +586,7 @@ class S1mTheory(Calculator):
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
                       sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
-                      cubic_biases: str | None = None):
+                      cubic_biases: str | None = None, kappa_shot: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
@@ -602,7 +621,8 @@ class S1mTheory(Calculator):
             beta = bias_beta(self.bias_params)
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index] * self.kappa_ratio,
                                                 skewness[self.cumulant_index] * self.skewness_ratio, beta,
-                                                self.shotnoise, cubic_values(self.bias_params))
+                                                self.shotnoise, cubic_values(self.bias_params),
+                                                kappa_shot_values(self.bias_params))
             ck4 = self.k4_params["ck4"].value if self.k4_params else None
             grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise,
                                             self.bias_params["alpha2"].value, ck4, self.k2,
@@ -654,7 +674,7 @@ class S21mTheory(Calculator):
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                 cubic_biases: str | None = None, noise_calibration=None):
+                 cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
@@ -682,7 +702,7 @@ class S21mTheory(Calculator):
                                  for j in sorted({c.j for c in coefficients})} if response_amplitude else {})
         # With full_norm, the S1m counterterms (shared by name) enter the first-layer variance.
         self.counterterms = _rsd_counterterms("", "") if full_norm and tracer == "biased" else {}
-        self.bias_params = BiasParameters(cubic_biases).params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(cubic_biases, kappa_shot).params if tracer == "biased" else {}
         # Free amplitude of the Poisson ("same-object") bispectrum term of the response, B > (1 + B_shot) P(K) / nbar:
         # halos are not Poisson, and this stochastic term is independent of the power-spectrum one (alpha0).
         self.bshot_params = ({"B_shot": Parameter("B_shot", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
@@ -713,7 +733,7 @@ class S21mTheory(Calculator):
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                      cubic_biases: str | None = None, noise_calibration=None):
+                      cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.q, self.shotnoise = float(q), float(shotnoise)
@@ -776,7 +796,8 @@ class S21mTheory(Calculator):
             tree = jnp.tensordot(m2[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
             linear = self.matrix @ tree.ravel() + noise * self.shot
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
-                                                self.shotnoise, cubic_values(self.bias_params))
+                                                self.shotnoise, cubic_values(self.bias_params),
+                                                kappa_shot_values(self.bias_params))
             r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
             norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
             if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block

@@ -110,6 +110,9 @@ def parse_args(argv=None):
                              "amplitudes and W follow the trial cosmology instead of being free")
     parser.add_argument("--s21-connected-amplitude", action="store_true",
                         help="free amplitude A_c_j of the connected-noise correction per first-layer scale")
+    parser.add_argument("--kappa-shot", action="store_true",
+                        help="biased tracers: free amplitudes A_TN, A_TN2 (priors N(1, 1)) of the N and N^2 Poisson pieces "
+                             "of the tree trispectrum (S1m Edgeworth and the S21m one-point factor)")
     parser.add_argument("--cubic-biases", choices=("zero", "relation"), default=None,
                         help="biased tracers: vary the cubic biases b3, bG3, bdG2 of the S1m tree trispectrum, with "
                              "Gaussian priors centred on zero or on the halo relations of bias.cubic_priors (then the "
@@ -230,7 +233,7 @@ def build_problem(args, basis=None, settings=None):
                                       correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
                                       sigmas=[config.sigma(c.j) for c in coefficients],
                                       k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic,
-                                      cubic_biases=cubic_biases))
+                                      cubic_biases=cubic_biases, kappa_shot=args.kappa_shot))
             vectors.append(s1m.vectors)
             prefix = f"q{q:g}:" if len(args.q) > 1 else ""
             labels += [f"{prefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
@@ -267,7 +270,7 @@ def build_problem(args, basis=None, settings=None):
                                    noise_correction=connected_correction(args),
                                    connected_amplitude=args.s21_connected_amplitude,
                                    noise_calibration=(dict(np.load(args.s21_noise_calibration))
-                                                      if args.s21_noise_calibration is not None else None), cubic_biases=cubic_biases))
+                                                      if args.s21_noise_calibration is not None else None), cubic_biases=cubic_biases, kappa_shot=args.kappa_shot))
         vectors.append(s21m.vectors)
         labels += [f"S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -338,7 +341,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
