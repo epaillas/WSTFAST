@@ -1,0 +1,182 @@
+# From periodic boxes to survey geometry: plan
+
+Status: planning draft, 2026-10-12. Nothing here is implemented yet.
+
+Goal: fit the halo/galaxy WST baseline to mock catalogues with a realistic footprint and radial selection n(z). The
+baseline is S1m (σ ≥ 25 Mpc/h, q = 0.8) + S21m (σ1 ≥ 25, σ2 ≥ 70 Mpc/h), with cubic biases and a free white term W.
+After the mocks, the same pipeline should run on data. This note lists what assumes a periodic box today, how to
+remove each assumption, and the validation ladder that has to pass before data.
+
+## 0. Decisions (2026-10-12)
+
+- **Target sample:** DESI DR1 LRG, in the standard redshift bins 0.4–0.6, 0.6–0.8 and 0.8–1.1, NGC and SGC.
+- **Weights:** FKP-like (E3).
+- **Mocks** are HOD galaxies. For now we assume the halo bias model (cubic biases, W, damping 1 × σ_v) carries over to
+  them unchanged. A box-level HOD check is deferred, not dropped (§8).
+
+### DR1 inputs (public, `https://data.desi.lbl.gov/public/dr1/survey/catalogs/dr1/`)
+
+| What | Path | Notes |
+|---|---|---|
+| Data | `LSS/iron/LSScats/v1.5/LRG_{NGC,SGC}_clustering.dat.fits` | 143 MB per cap. Columns RA, DEC, Z, WEIGHT (completeness × imaging), WEIGHT_FKP, NX |
+| Randoms | `LSS/iron/LSScats/v1.5/LRG_{NGC,SGC}_{0..17}_clustering.ran.fits` | ~1 GB each; a few files are enough for the WST |
+| Covariance mocks | `mocks/EZmock/dark/v1/mock{1..1000}/LRG_ffa_{NGC,SGC}_clustering.{dat,ran}.fits`, `LRG_ffa_nz.txt` | Fast fibre assignment (ffa), not altmtl |
+| Validation mocks | `mocks/AbacusSummit/dark/v4.2/altmtl{0..24}/mock*/LSScats/LRG_{NGC,SGC}_clustering.dat.fits` | Full fibre assignment (altmtl), AbacusSummit c000 cosmology |
+
+These catalogues are ~100 GB in total, so V2 onwards runs at NERSC (the public tree is mirrored there under
+`/global/cfs/cdirs/desi/public/dr1/`). V0 and V1 run locally on the Quijote halo boxes.
+
+**Not public, but needed for a clean V3/V4 split:** AbacusSummit LRG cutsky mocks without fibre assignment (the
+"complete" version of the same 25 realisations), and the matching LRG HOD cubic boxes. Without them, the light-cone
+test (V3) and the fibre-assignment test (V4) can only be run together, on altmtl.
+
+## 1. What assumes a periodic, uniform box today
+
+| Where | Assumption |
+|---|---|
+| `measure.py`: `Lattice`, `wavelet_modulus`, `measure_wst` | Periodic FFT convolution; a single fixed line of sight (z); moments are averaged over every mesh cell with equal weight; the second layer subtracts one global mean of U |
+| `measure.py`: `PowerMultipoles` | Lattice binning, with no window |
+| `theory/rsd.py`: `RSDS1Basis`, `lattice_modes` | Block variances λ_\|m\| are sums over the modes of the measurement mesh, with the CIC window and a uniform shot noise V/N |
+| `theory/rsd.py`: Edgeworth, `rsd_bias.py`: `--kappa-shot` | Cumulants at a single n̄ |
+| `theory/rsd_moduli.py`, `rsd_bias.py`: S21m | P_UU/⟨U⟩² is stationary; λ_2 is a lattice sum; the U noise uses a single n̄ |
+| `theory/covariance_rsd.py` | Periodic volume V, Gaussian band powers per lattice mode |
+| `theory/ap.py` | Already survey-ready: it maps fiducial-frame k, μ to the true frame. It needs no change, but it has to be applied at each effective redshift |
+| Emulator / `fit_rsd.py` | One redshift (z = 0.5); data come from `.npz` box files |
+
+## 2. Strategy: keep the box basis, add an observational layer
+
+The emulated, cosmology-dependent basis stays the box basis. Survey effects are applied at assembly, the way AP is
+already applied. Two things make this possible:
+
+1. **Normalise the signal, not the noise.** Measure the overdensity δ(x) = (n_g − α n_r) / (α n_r), not the FKP field.
+   Inside the footprint, the signal part of every block variance λ_\|m\| is then the box value. Only the noise part
+   varies with position: λ_N(x) ∝ 1/n̄(x), and it can be computed exactly by FFT from the randoms, as
+   (|ψ|² ⋆ 1/(α n_r))(x). FKP-type weights move from the field into the average of the moments (see E3).
+
+2. **S1m is a weighted average of the local moment.** At leading order, the measured coefficient is
+
+   S1m = Σ_x w(x) M_q[λ_s + λ_N(x), κ(x)] / Σ_x w(x),
+
+   where M_q is the box moment with its Edgeworth factor, evaluated at the local noise. The noise level and the
+   stochastic cumulants depend on n̄(x), and the edge transfer on the distance to the boundary. So the model needs only
+   a small weighted histogram of the survey points in (n̄, z, edge class). That histogram is computed once from the
+   randoms. Evaluating the model in each bin costs no more than the box model does now, since λ_N is a scalar shift of
+   the `shotnoise` column that already exists.
+
+What is not local needs explicit treatment:
+- **Edges:** there the wavelet integrates over the region outside the footprint (M2).
+- **The U mean in the second layer:** it varies with n̄(x) and would print the selection function into S21m (E4).
+- **Redshift evolution** across the bin (M4).
+
+## 3. Estimator features (`wstfast/survey/`)
+
+- **E1. Catalogue → mesh.** Read data and randoms (RA, Dec, z, weights), convert to comoving coordinates with the
+  fiducial cosmology (`ap.QUIJOTE_FIDUCIAL`, or a DESI fiducial), and paint with CIC/TSC into a padded box. Only
+  σ ≥ 17.7 Mpc/h is needed, so cells can be 6–8 Mpc/h: a DESI LRG z-bin then fits in a mesh of ≤ 640³, which the
+  torch backend can handle on one GPU. The rule is σ_min/cell ≥ 2.5. Check whether `acm` / jaxpower already does
+  the painting before writing our own.
+- **E2. Local line of sight.** S1m and S2m resolve |m| about z. In a survey, the X_lm at each cell are rotated to the
+  local line of sight x̂ with the real Wigner-D matrix D^l(x̂), and U_\|m\| is built from the rotated components. This
+  is exact pointwise: the wide-angle error inside one wavelet is O(σ/r) ≲ 3% in angle at r ≳ 1 Gpc/h. A test against
+  the global-z code on a distant box is part of V1.
+- **E3. Masked, FKP-weighted moments.** There are two kinds of weight, and they act at different stages.
+  - **Catalogue weights:** WEIGHT multiplies galaxies and randoms at painting, so it enters n_g and n_r and hence n̄(x).
+  - **FKP weight:** with δ normalised by the randoms, the FKP weight acts on the volume average of the moments, not on
+    the field.
+  
+  The moment average runs over a per-scale support mask M_j (random density above a threshold, optionally eroded by
+  c·σ_j). Each cell gets weight w(x) = [n̄P_0 / (1 + n̄P_0)]², with P_0 = 10⁴ (Mpc/h)³ as in DESI LRG. This is FKP for
+  a quadratic statistic: with δ normalised by the randoms, the effective field per cell is n̄wδ and S1m is quadratic
+  in it. A natural WST refinement is a per-block weight w_b(x) = [λ_s,b / (λ_s,b + λ_N,b(x))]², using the fiducial
+  λ_s. It is optimal per block rather than per P(k) amplitude, and costs nothing extra. Both are switches; V0c picks
+  one. The erosion factor c is set in V0b.
+- **E4. Second-layer mean subtraction.** Divide U by its mean in bins of n̄(x) (and z), estimated from the data:
+  U' = U / Ū(n̄, z) − 1, before the second wavelet. This removes the selection modulation without fixing a cosmology.
+  It induces a small integral constraint, which is modelled in M3 and checked in V0.
+- **E5. Window products from randoms.** For each (j, l, |m|), compute λ_N(x) and the edge transfer maps (M2), and
+  store the weighted histogram that the model consumes.
+- **E6. P_l on the cutsky,** for the P_l comparison only: use a standard window-matrix estimator (jaxpower/pypower)
+  rather than `PowerMultipoles`. This is lower priority, since the baseline is the WST alone.
+
+## 4. Model features
+
+- **M1. Histogram-averaged S1m.** `s1m_rsd` is evaluated per histogram bin, with the bin's shot noise and Poisson /
+  `kappa-shot` cumulants, and the bins are averaged with weights. For a uniform box this reduces exactly to the
+  current model (unit test). Survey modes are dense, so the continuum limit replaces the lattice sum there; the box
+  lattice sum stays for the box tests.
+- **M2. Edge transfer.** Near the boundary, λ(x) = ∫ P(k) |ψ ⋆ (M e^{ik·y})|²(x) differs from λ_box. Three options,
+  in increasing cost:
+  (a) erosion only, at c ≈ 2–3. This is probably enough for S1m at σ ≤ 50, but it would cost most of the volume at
+      the second-layer scale σ2 ≥ 70;
+  (b) normalised convolution, dividing by (|ψ| ⋆ M). This is first-order correct;
+  (c) an exact transfer kernel per (j, l, |m|): λ is linear in P, so a few band-power basis maps, computed once on
+      the randoms (by FFT, or by averaging over Gaussian random fields), give λ(x) for any P.
+  The plan is (a) for S1m first, and (c) for S21m.
+- **M3. S21m in a survey.** P_UU/⟨U⟩² keeps its box form (response + noise + W). The changes are:
+  - the U noise uses the local n̄ (by histogram);
+  - λ_2 is projected through the window, with kernel (c) of M2 applied to P_UU, in the same way a P(k) window matrix
+    is applied;
+  - the E4 mean subtraction removes low-K power, which enters as an integral-constraint term.
+  This is the main modelling risk: the σ2 wavelets are 150–200 Mpc/h across, comparable to the radial depth of a
+  z-bin.
+- **M4. Redshift evolution.** Evaluate the basis at a few z nodes inside the bin, through D(z) and f(z) and the AP
+  ratios at each z. Weight the nodes by the z-histogram, with linear evolution of the biases or constant biases per
+  bin. This needs an emulator with z as an input, or one emulator per z node. It is tested against the
+  single-z_eff approximation in V3.
+- **M5. Observational systematics.** Fibre-assignment incompleteness and imaging weights enter only through w and n̄.
+  The radial integral constraint, from n(z) taken from the data, is handled like E4. The σ ≥ 25 cut probably makes
+  fibre collisions negligible, but this is tested in V4 rather than assumed.
+
+## 5. Covariance
+
+- **C1. Mock covariance** (EZmocks or equivalent, ~1000 realisations, same footprint), with the Hartlap and Percival
+  factors already in `wstfast.data`.
+- **C2. Analytic survey covariance:** replace V by an effective volume per block, Σ w² / (Σ w)² weighted by the local
+  variance. Validate it against C1 as was done for the box (`covariance_vs_nbody_rsd.py`). It is useful for Fisher
+  forecasts and as a cross-check of C1.
+- **C3. Pixel-level sanity check:** compare cutsky errors with box errors rescaled by volume, on V0 mocks.
+
+## 6. Validation ladder
+
+Each rung isolates one effect and has a known truth. Unless stated, the pass criterion is the one used for the box
+baseline: shifts ≤ 0.3σ at V = 60 (Gpc/h)³ on the 1106-box mean, with acceptable χ². Each rung runs the identical fit
+in box and survey modes.
+
+| Rung | Mocks | Effect tested | Pass criterion |
+|---|---|---|---|
+| **V0a** | Gaussian / lognormal fields with known P, cut to a mask | Estimator + M1/M2 algebra, no PT error | Measured λ(x) and S1m match the model to ≪ statistical error |
+| **V0b** | Quijote halo boxes (the existing 1106) with a non-periodic sub-box mask in a padded mesh | Edges only (n̄ uniform) | S1m/S21m cosmology unchanged vs periodic; erosion c chosen here |
+| **V0c** | Same boxes, downsampled with a radial n̄(z) along one axis (factor ~3–5 variation) | Varying noise, E4 mean subtraction, M1 histogram | Same as box fit, with only larger errors |
+| **V1** | Same boxes, placed at r ~ 1–2 Gpc/h from an observer, RSD along the radial direction | Local line of sight E2, wide angle | Matches the plane-parallel fit; local-LOS code reproduces global-z at r → ∞ |
+| **V2** | Quijote halo boxes cut to the DR1 LRG footprint and n(z) of one z-bin. The footprint and n(z) come from the v1.5 randoms; the box is replicated if the bin needs more volume, and z is fixed | All geometry together, no evolution, known truth | Pass criterion. Covariance C2 vs these cutsky boxes within ~10% |
+| **V3** | AbacusSummit DR1 LRG mocks (25 altmtl; the complete version if it can be obtained) | Redshift evolution M4, HOD galaxies, with fibre assignment if altmtl | Recovers c000 within the pass criterion, scaled to the 25-mock mean |
+| **V4** | Abacus altmtl vs complete, paired; EZmock ffa vs complete if available | Fibre assignment, M5, radial integral constraint | Shifts vs the complete mock ≤ 0.2σ |
+| **V5** | DR1 LRG data, blinded | End to end | Unblinding after the mock tests and the covariance are frozen |
+
+V0 and V1 need only the Quijote halo boxes already on disk plus randoms that we generate, so they can start now.
+V2 needs only the public DR1 randoms. V3 onwards needs the mocks at NERSC (`acm` already reads Abacus catalogues).
+The covariance (C1) comes from the 1000 EZmock LRG ffa mocks.
+
+## 7. Order of work
+
+1. `wstfast/survey/`: E1 (painting + randoms), E3 (masked moments), and the V0a Gaussian-field harness. Unit test:
+   with a full-box mask the survey path reproduces `measure_wst` exactly.
+2. M1 + E5 (λ_N maps, histograms), then V0c with S1m only. This is the cheapest end-to-end check of the strategy in §2.
+3. E2 (local line of sight) + V1.
+4. V0b: choose the erosion for S1m.
+5. E4 + M3 (S21m: mean subtraction, window kernel), then V0b/V0c with S21m. This step carries the most risk.
+6. Covariance C2; obtain cutsky mocks; V2.
+7. M4 + V3, then M5 + V4.
+
+Steps 1–5 use only data already on disk.
+
+## 8. Open decisions
+
+- **Mesh per z-bin:** the 0.8–1.1 LRG bin extends to r ≈ 2.4 Gpc/h, so the NGC box is ~4 Gpc/h on a side. At
+  6–7 Mpc/h cells that is a 600–700³ mesh: check the torch backend's memory with L = 4 and per-|m| outputs.
+- **How much volume to give up:** eroding S1m edges is cheap. For S21m, erosion at σ2 ≥ 70 would discard most of a
+  z-bin, so the window kernel (M2c) is probably unavoidable, or σ2 would have to be lowered (which tree-level S21m
+  does not support at σ1 = 17.7).
+- **Galaxies vs halos:** this is deferred by decision (§0). If V3 fails, the first thing to check is a box-level HOD
+  test: Abacus LRG HOD boxes, already measured by `abacus_base.py`. It separates HOD effects (satellites, FoG on the
+  S21m damping and W) from geometry.
