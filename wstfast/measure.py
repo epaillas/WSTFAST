@@ -49,8 +49,11 @@ class Lattice:
             self.multiplicity[..., -1] = 1.0
 
     def harmonics(self, ell: int) -> list[np.ndarray]:
-        """Real spherical harmonics scaled so that sum_m Y_lm^2 = 1."""
-        return [y.astype(np.float32) for y in real_harmonics(ell, self.theta, self.phi)]
+        """Real spherical harmonics scaled so that sum_m Y_lm^2 = 1 (computed once per l and cached)."""
+        cache = self.__dict__.setdefault("_harmonics", {})
+        if ell not in cache:
+            cache[ell] = [y.astype(np.float32) for y in real_harmonics(ell, self.theta, self.phi)]
+        return cache[ell]
 
     def radial(self, sigma: float, ell: int) -> np.ndarray:
         """(sigma k)^l exp(-sigma^2 k^2 / 2), sigma in cells."""

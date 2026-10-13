@@ -330,11 +330,20 @@ class GaussianMocks:
     the unmasked field is the reference of the box model at an effective noise level.
 
     ``pk``: linear power spectrum [(Mpc/h)^3] as a function of k [h/Mpc]. ``offset``: position of mesh node 0 [Mpc/h].
+    ``window="cic"``: as for a CIC-painted catalogue, the signal is multiplied by the CIC window W(k) and the noise
+    gets the aliased CIC shot-noise spectrum, prod_i (1 - 2/3 sin^2(k_i c / 2)) / nbar (not W^2 / nbar).
+    ``discrete``: instead of Gaussian noise, Poisson counts per cell of mean nbar V_cell (1 + delta), with delta the
+    Gaussian signal clipped at -1 (``"poisson"``) or its lognormal transform (``"lognormal"``, a non-Gaussian field whose
+    spectrum is not exactly the input one).
     """
 
     def __init__(self, nmesh: int, cellsize: float, pk, bias: float, f: float, nbar: np.ndarray, support: np.ndarray,
-                 weights: np.ndarray | None = None, observer=None, offset=(0.0, 0.0, 0.0)):
+                 weights: np.ndarray | None = None, observer=None, offset=(0.0, 0.0, 0.0), window: str | None = None,
+                 discrete: str | None = None):
         self.n, self.cell, self.bias, self.f = nmesh, cellsize, bias, f
+        if discrete not in (None, "poisson", "lognormal"):
+            raise ValueError(f"unknown discrete {discrete!r}")
+        self.discrete = discrete
         k = 2 * np.pi * np.fft.fftfreq(nmesh) / cellsize
         kz = 2 * np.pi * np.fft.rfftfreq(nmesh) / cellsize
         self.kvec = np.meshgrid(k, k, kz, indexing="ij", sparse=True)
@@ -346,6 +355,15 @@ class GaussianMocks:
         w = np.where(support, 1.0 if weights is None else weights, 0.0)
         effective = np.sum(w * sigma2) / np.sum(w)
         self.noise = np.sqrt(np.where(support, sigma2, effective)).astype(np.float32)
+        self.mean_counts = (1.0 / (self.noise.astype(np.float64) ** 2)).astype(np.float32)  # nbar V_cell
+        self.window = None
+        if window == "cic":
+            sx, sy, sz = (np.sinc(c * cellsize / (2 * np.pi)) ** 2 for c in self.kvec)
+            self.window = (sx * sy * sz).astype(np.float32)
+            ax, ay, az = (1 - 2 / 3 * np.sin(c * cellsize / 2) ** 2 for c in self.kvec)
+            self.noise_window = np.sqrt(ax * ay * az).astype(np.float32)
+        elif window is not None:
+            raise ValueError(f"unknown window {window!r}")
         self.observer = None if observer is None else np.asarray(observer, dtype=float)
         if self.observer is not None:
             x = [np.arange(nmesh) * cellsize + offset[i] - self.observer[i] for i in range(3)]
@@ -357,6 +375,9 @@ class GaussianMocks:
         rng = np.random.default_rng(seed)
         white = _rfft(rng.standard_normal((self.n,) * 3).astype(np.float32))
         dk = white * self.amplitude
+        gaussian_window = self.window is not None and self.discrete is None
+        if gaussian_window:
+            dk = dk * self.window
         if self.observer is None:
             signal = _irfft(dk * (self.bias + self.f * self.kvec[2] ** 2 / self.k2), self.n)
         else:
@@ -365,7 +386,19 @@ class GaussianMocks:
                 for j in range(i, 3):
                     term = _irfft(dk * (self.kvec[i] * self.kvec[j] / self.k2), self.n)
                     signal += (1 if i == j else 2) * self.f * self.los[i] * self.los[j] * term
-        return (signal + self.noise * rng.standard_normal((self.n,) * 3)).astype(np.float32)
+        if self.discrete is None:
+            noise = self.noise * rng.standard_normal((self.n,) * 3).astype(np.float32)
+            if gaussian_window:
+                noise = _irfft(_rfft(noise) * self.noise_window, self.n)
+            return (signal + noise).astype(np.float32)
+        if self.discrete == "lognormal":
+            density = self.mean_counts * np.exp(signal - 0.5 * np.var(signal, dtype=np.float64))
+        else:
+            density = self.mean_counts * np.maximum(1.0 + signal, 0.0)
+        field = (rng.poisson(density) / self.mean_counts - 1.0).astype(np.float32)
+        if self.window is not None:  # counts in cells smoothed by the assignment window
+            field = _irfft(_rfft(field) * self.window, self.n).astype(np.float32)
+        return field
 
 
 def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, weights=None, qs=None, los=None,

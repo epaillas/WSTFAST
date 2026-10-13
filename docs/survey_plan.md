@@ -223,11 +223,32 @@ mocks would reduce it as 1/√N.
 The density dependence doesn't matter in practice, because R is computed with the real n̄ of the randoms. What is
 left is a b/f dependence of ≤ 0.17σ at erosion 0 (≤ 0.08σ at 1σ_j).
 
-**Baseline:** erosion 1σ_j with R from ≥ 16 mocks at the fiducial spectrum. At erosion 0, recompute R once at the
-best fit.
+**Baseline (decided 2026-10-12):** no erosion. R comes from ≥ 16 (here 32) mocks at the fiducial spectrum and is
+recomputed once at the best fit. Erosion by 1σ_j is the fallback if the halo tests (V0b/V0c) show that R from
+Gaussian mocks misses non-Gaussian edge effects.
 
-**Next:** V0b and V0c on Quijote halos in a masked cone, checking R against non-Gaussian fields with known truth.
-After that, S21m through the same R.
+**V0b/V0c on Quijote halos** (`scripts/survey/v0b_halos.py`, no erosion, 40 boxes, 32 calibration mocks). Each
+redshift-space halo box is tiled 2×2×2 into the V0a cone. V0b uses all halos; V0c thins them to the radial n̄(r)
+and uses FKP weights. The table gives residuals in units of one survey's error, as max / rms over blocks, with
+χ² for 60 blocks (error ≤ 0.10σ):
+
+| R from | V0b (uniform) | V0c (radial) |
+|---|---|---|
+| Uncorrected | 5.5–6.7σ | 4.4–5.6σ |
+| Gaussian mocks | 0.34 / 0.17σ, χ² 625 | 0.12 / 0.04σ, χ² 68 |
+| Gaussian + CIC window (aliased shot noise) | 0.18 / 0.09σ, χ² 179 | 0.23 / 0.10σ, χ² 310 |
+
+The correction removes ~97% of the edge bias for halos. The rest is a coherent ~0.1σ per block that depends on
+the sample:
+- Relative to Gaussian mocks, the halo edge effect is +4% (V0b) or +0.4% (V0c).
+- The CIC window moves the mock R by +3% at σ = 25 and +1% at σ = 71, in both geometries.
+- Sub-Poisson noise and lognormal mocks don't explain it (`scripts/survey/v0b_diagnose.py`).
+
+Open:
+1. **Parameter-level impact**, by projecting the residual through the Fisher matrix.
+2. **N-body-calibrated R:** from halo or HOD boxes cut to the footprint. It costs minutes per footprint and matches
+   the tracer by construction.
+3. Erosion 1σ_j as the fallback.
 
 ## 8. Open decisions
 
