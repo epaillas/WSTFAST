@@ -91,6 +91,24 @@ class LOSRotation:
             out += np.cos(p * angle) * (a @ x) + np.sin(p * angle) * (b @ x)
         return out
 
+    def tables(self, theta, phi):
+        """cos and sin of p (-phi) and p (-theta), p = 1..l, float32 (shape (l, ncells), or (l,) for scalar angles),
+        to rotate many component sets of the same cells with ``rotate``."""
+        p = np.arange(1, self.ell + 1).reshape((-1,) + (1,) * np.ndim(phi))
+        a, b = -p * np.asarray(phi), -p * np.asarray(theta)
+        return tuple(t.astype(np.float32) for t in (np.cos(a), np.sin(a), np.cos(b), np.sin(b)))
+
+    def rotate(self, components: np.ndarray, tables) -> np.ndarray:
+        """Components (2l + 1, ncells) in the local frame, with the trigonometric ``tables`` of their cells."""
+        x = components.astype(np.float32)
+        for axis, cos, sin in ((2, tables[0], tables[1]), (1, tables[2], tables[3])):
+            c0, harmonics = self.terms[axis]
+            out = c0.astype(np.float32) @ x
+            for p, a, b in harmonics:
+                out += cos[p - 1] * (a.astype(np.float32) @ x) + sin[p - 1] * (b.astype(np.float32) @ x)
+            x = out
+        return x
+
     def __call__(self, components: np.ndarray, theta, phi) -> np.ndarray:
         """Rotated components, shape (2l + 1, ncells) as ``components``; theta, phi of shape (ncells,) or scalars."""
         if self.ell == 0:
@@ -226,10 +244,11 @@ class _Moments:
             if w.sum() <= 0:
                 raise ValueError(f"no weight left at scale j = {j}: reduce the erosion")
             self.weights[j] = w / w.sum()
+        self.inner = np.flatnonzero(inside)  # positions in ``index`` of the cells that can carry weight
 
     def __call__(self, values, j):
-        """sum_x w(x) |values|^q, values on the support cells."""
-        w = self.weights[j]
+        """sum_x w(x) |values|^q, values on the support cells (``index``) or on its moment cells (``index[inner]``)."""
+        w = self.weights[j] if len(values) == len(self.index) else self.weights[j][self.inner]
         absolute = np.abs(values).astype(np.float64)
         return np.array([np.dot(w, absolute**q) for q in self.qs])
 
@@ -252,8 +271,9 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
     ``support``: boolean mesh of the cells inside the footprint (default: every cell, a periodic box). ``weights``:
     per-cell weights of the moments (default uniform; see ``SurveyMesh.fkp_weights``). ``erosion``: the moments of
     scale j average only over the support cells farther than ``erosion`` x sigma_j from its edge. ``los``: None
-    (no |m| resolution), "z", a unit vector (3,), or unit vectors per support cell (3, ncells), in the order of
-    ``np.nonzero(support)`` (``SurveyMesh.line_of_sight``). ``moment_support`` (default ``support``, and inside it):
+    (no |m| resolution), "z", a unit vector (3,), unit vectors per support cell (3, ncells) in the order of
+    ``np.nonzero(support)`` (``SurveyMesh.line_of_sight``), or a unit vector per mesh cell (3, n, n, n)
+    (``SurveyGeometry.line_of_sight(full=True)``, needed when the field support is not the footprint). ``moment_support`` (default ``support``, and inside it):
     the cells the moments average over, before erosion; with a full ``support`` it gives the coefficients the
     unmasked field would have on the same cells, the edge-free reference of a masked measurement.
 
@@ -271,8 +291,10 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
             raise ValueError(f"unknown line of sight {los!r}")
         theta = phi = None
     else:
-        los = np.asarray(los, dtype=np.float64)
-        theta, phi = _angles(los.T if los.ndim == 2 else los)
+        los = np.asarray(los)
+        if los.ndim == 4:
+            los = los.reshape(3, -1)[:, index]
+        theta, phi = _angles(los.T.astype(np.float64) if los.ndim == 2 else los.astype(np.float64))
     resolve = los is not None
 
     field = np.where(support, delta, 0.0).astype(np.float32)
@@ -286,22 +308,36 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
     for ell in range(nl):
         harmonics = lattice.harmonics(ell)
         rotation = LOSRotation(ell) if theta is not None else None
+        frames = {}  # trigonometric tables of the rotation of this l, built once for every scale
 
-        def moduli(f, sigma, resolve_m=True):
-            x = _components(f, lattice, harmonics, sigma, ell, index)
+        def rotate(x, everywhere):
+            if ell == 0:
+                return x
+            key = everywhere or np.ndim(theta) == 0
+            if key not in frames:
+                cells = slice(None) if key else moments.inner
+                frames[key] = rotation.tables(theta if np.ndim(theta) == 0 else theta[cells],
+                                              phi if np.ndim(phi) == 0 else phi[cells])
+            return rotation.rotate(x, frames[key])
+
+        def moduli(f, sigma, resolve_m=True, everywhere=False):
+            """Moduli on the support cells (``everywhere``, to feed a second layer) or only on the moment cells."""
+            cells = index if everywhere else index[moments.inner]
+            x = _components(f, lattice, harmonics, sigma, ell, cells)
             total = np.sqrt((x * x).sum(axis=0))
             if not (resolve and resolve_m):
                 return total, []
             if rotation is not None:
-                x = rotation(x, theta, phi)
+                x = rotate(x, everywhere)
             return total, [np.sqrt(p) for p in m_powers(x)]
 
         for j1 in range(nj):
-            u1, per_m = moduli(fk, config.sigma0 * config.step**j1)
+            second_layer = ell <= config.lmax2 and any(pair[0] == j1 for pair in pairs)
+            u1, per_m = moduli(fk, config.sigma0 * config.step**j1, everywhere=second_layer)
             out["S1"][:, j1, ell] = moments(u1, j1)
             for m1, u in enumerate(per_m):
                 out["S1m"][:, j1, ell, m1] = moments(u, j1)
-            if ell > config.lmax2 or not any(pair[0] == j1 for pair in pairs):
+            if not second_layer:
                 continue
             for m1, u in [(None, u1)] + list(enumerate(per_m)):
                 second = np.zeros(nmesh**3, dtype=np.float32)
@@ -401,22 +437,25 @@ class GaussianMocks:
         return field
 
 
-def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, weights=None, qs=None, los=None,
-                 erosion: float = 0.0, realizations: int = 4, seed: int = 0, keys=("S1m",),
-                 lattice: Lattice | None = None) -> dict:
-    """Window correction R = <S_masked> / <S_unmasked> of each coefficient, from paired Gaussian mocks.
+def calibrate_window(fields, config: WSTConfig, support: np.ndarray, weights=None, qs=None, los=None,
+                     erosion: float = 0.0, keys=("S1m",), lattice: Lattice | None = None) -> dict:
+    """Window correction R = <S_masked> / <S_reference> of each coefficient, from paired survey-matched mocks.
 
-    Each mock is measured masked by the ``support`` (as the data) and unmasked on the same cells with the same
-    weights (the box model at the effective noise). The survey model is then R x the box model. Returns, per key,
-    ``ratio`` and ``error`` (scatter of the per-mock ratios over sqrt(realizations)), and the raw ``masked`` and
-    ``reference`` measurements of shape (realizations, ...).
+    ``fields`` yields one density mesh per mock (``box_to_survey`` for catalogue mocks, ``GaussianMocks`` for Gaussian
+    ones). Each is measured masked by the ``support``, as the data, and unmasked on the same cells with the same weights.
+    The unmasked field is the periodic mock at the effective noise, which is what the box model describes. The survey
+    model is then R x the box model. Pairing cancels the cosmic variance of the mocks, so a few tens of them calibrate
+    R well below the error of one survey.
+
+    Returns, per key, ``ratio``, ``error`` (scatter of the per-mock ratios over sqrt(number of mocks)) and the raw
+    ``masked`` and ``reference`` measurements, of shape (nmocks, ...).
     """
-    kwargs = dict(qs=qs, los=los, erosion=erosion, lattice=lattice or Lattice(mocks.n), weights=weights)
+    kwargs = dict(qs=qs, los=los, erosion=erosion, weights=weights)
     masked, reference = {key: [] for key in keys}, {key: [] for key in keys}
-    for r in range(realizations):
-        field = mocks(seed + r)
-        a = measure_wst_survey(field, config, support=support, **kwargs)
-        b = measure_wst_survey(field, config, moment_support=support, **kwargs)
+    for field in fields:
+        lattice = lattice or Lattice(field.shape[0])
+        a = measure_wst_survey(field, config, support=support, lattice=lattice, **kwargs)
+        b = measure_wst_survey(field, config, moment_support=support, lattice=lattice, **kwargs)
         for key in keys:
             masked[key].append(a[key])
             reference[key].append(b[key])
@@ -424,6 +463,133 @@ def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, w
     for key in keys:
         m, ref = np.array(masked[key]), np.array(reference[key])
         out[key] = dict(ratio=m.mean(axis=0) / ref.mean(axis=0),
-                        error=(m / ref).std(axis=0, ddof=1) / np.sqrt(realizations) if realizations > 1 else None,
+                        error=(m / ref).std(axis=0, ddof=1) / np.sqrt(len(m)) if len(m) > 1 else None,
                         masked=m, reference=ref)
     return out
+
+
+def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, realizations: int = 4, seed: int = 0,
+                 **kwargs) -> dict:
+    """``calibrate_window`` on Gaussian mocks ``mocks(seed)``, ..., ``mocks(seed + realizations - 1)``."""
+    return calibrate_window((mocks(seed + r) for r in range(realizations)), config, support, **kwargs)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Survey geometry and catalogue mocks cut to it
+
+
+@dataclass
+class SurveyGeometry:
+    """Footprint of a survey on a padded mesh: the support, the target density nbar(x) [(h/Mpc)^3] and the FKP weights.
+
+    Mesh node (i, j, k) is at ``offset`` + (i, j, k) boxsize / nmesh [Mpc/h], comoving, with the observer at
+    ``observer``.
+    """
+
+    support: np.ndarray
+    nbar: np.ndarray
+    boxsize: float
+    offset: np.ndarray
+    observer: np.ndarray
+    p0: float = 1e4
+
+    @property
+    def nmesh(self) -> int:
+        return self.support.shape[0]
+
+    @property
+    def cellsize(self) -> float:
+        return self.boxsize / self.nmesh
+
+    def distance(self) -> np.ndarray:
+        """Comoving distance [Mpc/h] of every mesh node to the observer."""
+        x = [np.arange(self.nmesh) * self.cellsize + self.offset[i] - self.observer[i] for i in range(3)]
+        gx, gy, gz = np.meshgrid(*x, indexing="ij", sparse=True)
+        return np.sqrt(gx**2 + gy**2 + gz**2)
+
+    @property
+    def weights(self) -> np.ndarray:
+        """FKP weights of a quadratic statistic, (nbar P0 / (1 + nbar P0))^2, zero outside the support."""
+        x = self.nbar * self.p0
+        return np.where(self.support, (x / (1.0 + x)) ** 2, 0.0)
+
+    def line_of_sight(self, full: bool = False) -> np.ndarray:
+        """Unit vectors from the observer to the support cells, (3, ncells) in the order of the support, or to every
+        mesh cell, (3, n, n, n) float32, with ``full``."""
+        if full:
+            x = [np.arange(self.nmesh) * self.cellsize + self.offset[i] - self.observer[i] for i in range(3)]
+            grid = np.stack(np.meshgrid(*x, indexing="ij")).astype(np.float32)
+            return grid / np.linalg.norm(grid, axis=0)
+        index = np.nonzero(self.support)
+        vectors = np.stack(index).astype(np.float64) * self.cellsize + self.offset[:, None] - self.observer[:, None]
+        return vectors / np.linalg.norm(vectors, axis=0)
+
+    def sampling(self, nbar_tracer: float) -> np.ndarray:
+        """Probability of keeping an object of a sample of density ``nbar_tracer``: nbar(x) / nbar_tracer on the support
+        and its FKP-weighted mean elsewhere (the effective density of the reference field)."""
+        inside = self.nbar / nbar_tracer
+        if np.any(inside[self.support] > 1 + 1e-6):
+            raise ValueError("target nbar above the density of the mock")
+        w = self.weights
+        return np.where(self.support, inside, np.sum(w * inside) / np.sum(w))
+
+    @classmethod
+    def cone(cls, nmesh: int, boxsize: float, observer, half_angle: float, rmin: float, rmax: float, nbar_of_r,
+             p0: float = 1e4):
+        """Cone about +z of ``half_angle`` degrees and comoving shell rmin..rmax around the ``observer`` (mesh offset 0),
+        with radial density ``nbar_of_r`` [(h/Mpc)^3] as a function of distance [Mpc/h]."""
+        geometry = cls(np.zeros((nmesh,) * 3, dtype=bool), np.zeros((nmesh,) * 3), float(boxsize), np.zeros(3),
+                       np.asarray(observer, dtype=float), p0)
+        r = geometry.distance()
+        z = np.arange(nmesh)[None, None, :] * geometry.cellsize - geometry.observer[2]
+        geometry.support = (r > rmin) & (r < rmax) & (z / r > np.cos(np.radians(half_angle)))
+        geometry.nbar = np.where(geometry.support, nbar_of_r(r), 0.0)
+        return geometry
+
+    @classmethod
+    def from_randoms(cls, randoms, nmesh: int, nbar_of_r, random_weights=None, padding: float = 300.0,
+                     observer=(0.0, 0.0, 0.0), threshold: float = 0.1, p0: float = 1e4):
+        """Footprint of a random catalogue (positions (N, 3) [Mpc/h]): the cells whose random density exceeds
+        ``threshold`` times its mean over the cells with randoms, with the radial density ``nbar_of_r`` (completeness
+        is taken as uniform inside the footprint, as for weighted DESI clustering catalogues)."""
+        mesh = SurveyMesh.from_catalogues(randoms[:1], randoms, nmesh, random_weights=random_weights, padding=padding,
+                                          observer=observer, threshold=threshold)
+        geometry = cls(mesh.support, np.zeros(mesh.support.shape), mesh.boxsize, mesh.offset, mesh.observer, p0)
+        geometry.nbar = np.where(geometry.support, nbar_of_r(geometry.distance()), 0.0)
+        return geometry
+
+
+def box_to_survey(positions, boxsize: float, geometry: SurveyGeometry, displacements=None, los: str = "local",
+                  seed=0) -> np.ndarray:
+    """Density contrast of a periodic mock box cut to a survey geometry, for ``calibrate_window``.
+
+    The box (``positions`` (N, 3) in [0, boxsize) Mpc/h, real space) is tiled from the mesh offset to cover the mesh.
+    With ``displacements`` (N, 3) [Mpc/h], the redshift-space shift of each object (velocity (1 + z) / H(z)), objects
+    move by its projection on the line of sight: from the observer (``los="local"``) or z (``los="z"``). Objects are
+    then kept with the probability ``geometry.sampling`` of their cell, and the counts are normalised by their expected
+    value: delta = counts / (p(x) nbar V_cell) - 1, everywhere (the support is applied by the measurement).
+    """
+    positions = np.asarray(positions, dtype=np.float64)
+    n, cell = geometry.nmesh, geometry.cellsize
+    ntile = int(np.ceil(geometry.boxsize / boxsize))
+    nbar = len(positions) / boxsize**3
+    prob = geometry.sampling(nbar)
+    rng = np.random.default_rng(seed)
+    kept = []
+    for shift in np.ndindex(ntile, ntile, ntile):
+        x = positions + geometry.offset + np.array(shift) * boxsize
+        if displacements is not None:
+            if los == "z":
+                x[:, 2] += displacements[:, 2]
+            else:
+                direction = x - geometry.observer
+                direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+                x += np.sum(displacements * direction, axis=1, keepdims=True) * direction
+        grid = (x - geometry.offset) / cell
+        inside = np.all((grid >= 0) & (grid < n - 1), axis=1)
+        x, grid = x[inside], grid[inside]
+        cells = np.round(grid).astype(int)
+        keep = rng.random(len(x)) < prob[cells[:, 0], cells[:, 1], cells[:, 2]]
+        kept.append(x[keep])
+    counts = paint_cic_weighted(np.concatenate(kept), None, n, geometry.boxsize, geometry.offset)
+    return (counts / (prob * nbar * cell**3) - 1.0).astype(np.float32)

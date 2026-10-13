@@ -244,11 +244,40 @@ the sample:
 - The CIC window moves the mock R by +3% at σ = 25 and +1% at σ = 71, in both geometries.
 - Sub-Poisson noise and lognormal mocks don't explain it (`scripts/survey/v0b_diagnose.py`).
 
-Open:
-1. **Parameter-level impact**, by projecting the residual through the Fisher matrix.
-2. **N-body-calibrated R:** from halo or HOD boxes cut to the footprint. It costs minutes per footprint and matches
-   the tracer by construction.
-3. Erosion 1σ_j as the fallback.
+**Decision (2026-10-12): R is calibrated on survey-matched mocks of the tracer, as DESI does for the P(k) window.**
+- **Mocks:** HOD boxes are cut to the survey geometry (`SurveyGeometry` from the randoms with the n(z) of the sample,
+  then `box_to_survey`). Each box is tiled, given RSD along the local line of sight, and thinned to n̄(x).
+- **Calibration:** `calibrate_window` measures every mock masked and unmasked on the same cells.
+  R = ⟨S_masked⟩/⟨S_reference⟩ and the survey model is R × the box model.
+- **Why pairing:** the reference is the parent box, so pairing cancels cosmic variance and a few tens of mocks are
+  enough.
+- **Gaussian mocks** (`GaussianMocks`, `window_ratio`) stay as a fast cross-check.
+- **Needed for DR1:** the parent AbacusSummit LRG HOD boxes (c000, as many phases as possible, at the snapshots of
+  the z-bins). The public cutsky mocks alone cannot be paired with their parent boxes.
+
+**Split test** (`scripts/survey/v0b_mock_window.py`, outputs/survey/mock_window). R is calibrated on Quijote halo
+boxes 0–39 cut to the V0a cone and applied to boxes 40–79, with no erosion. Residuals are in units of one survey's
+error:
+
+| Setup | Uncorrected | Corrected, max / rms | χ² / 60 |
+|---|---|---|---|
+| Uniform n̄, line of sight z | 5.1–6.1σ | 0.12 / 0.05σ | 67 |
+| Radial n̄(r), line of sight z | 4.5–5.2σ | 0.14 / 0.06σ | 88 |
+| Radial n̄(r), local line of sight | 4.7–5.2σ | 0.14 / 0.05σ | 76 |
+
+A mock-calibrated R transfers between independent mocks of the tracer at ≲ 0.1σ. The ~0.1σ mismatch left by
+Gaussian mocks is gone.
+
+**V1, wide angle.** For the same boxes, the local-line-of-sight reference differs from the plane-parallel one by
+≤ 0.11σ (rms 0.05σ, χ² 69/60, ≤ 0.26% fractionally) at r = 1.1–2.3 Gpc/h. So the plane-parallel box model × R is
+enough at DESI distances.
+
+**Next:**
+1. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
+   (E4).
+2. The parameter-level test: fit the masked halo S1m (+S21m) with R × the box model, using the cubic halo emulator
+   and analytic covariance.
+3. The DR1 geometry from the randoms, once the Abacus LRG HOD boxes are available.
 
 ## 8. Open decisions
 

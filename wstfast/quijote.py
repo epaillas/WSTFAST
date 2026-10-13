@@ -167,3 +167,15 @@ def load_halo_density(realization: int | str, redshift: float = 0.5, nmesh: int 
     header = dict(boxsize=boxsize, redshift=redshift, omega_m=omega_m, omega_l=omega_l, nparticles=len(pos),
                   hubble_z=100.0 * np.sqrt(omega_m * (1 + redshift) ** 3 + omega_l), mmin=mmin)
     return delta, header
+
+
+def halo_catalogue(realization: int | str, redshift: float = 0.5, mmin: float = 1e13, root: Path = HALO_ROOT,
+                   boxsize: float = 1000.0, omega_m: float | None = None):
+    """Real-space positions [Mpc/h] of the FoF halos of mass >= ``mmin`` and their redshift-space displacements
+    v (1 + z) / H(z) [Mpc/h] (3-vectors, to be projected on any line of sight; ``omega_m`` as ``halo_positions``)."""
+    catalogue = read_fof(Path(root) / str(realization) / f"groups_{SNAPNUM[redshift]}")
+    keep = catalogue["mass"] >= mmin
+    omega_m, omega_l = QUIJOTE_OMEGA if omega_m is None else (omega_m, 1.0 - omega_m)
+    hubble = 100.0 * np.sqrt(omega_m * (1 + redshift) ** 3 + omega_l)
+    displacement = catalogue["vel"][keep] * (1 + redshift) ** 2 / hubble
+    return np.remainder(catalogue["pos"][keep], boxsize), displacement

@@ -132,3 +132,42 @@ def test_window_ratio_of_full_support_is_one():
     out = window_ratio(mocks, CONFIG, support, qs=[0.8], los="z", realizations=2)
     ratio = out["S1m"]["ratio"]
     np.testing.assert_allclose(ratio[np.isfinite(ratio)], 1.0, rtol=1e-6)
+
+
+def test_box_to_survey_reproduces_periodic_painting():
+    """A full-mesh geometry with uniform density, a box equal to the mesh and no displacement: the periodic CIC delta
+    (away from the last plane, which the non-periodic painting does not wrap)."""
+    from wstfast.quijote import paint_cic
+    from wstfast.survey import SurveyGeometry, box_to_survey
+
+    rng = np.random.default_rng(2)
+    n, box = 32, 320.0
+    pos = rng.uniform(0, box - 2 * box / n, (20000, 3))
+    support = np.ones((n,) * 3, dtype=bool)
+    nbar = len(pos) / box**3
+    geometry = SurveyGeometry(support, np.full((n,) * 3, nbar), box, np.zeros(3), np.array([0.0, 0.0, -1e4]))
+    delta = box_to_survey(pos, box, geometry)
+    np.testing.assert_allclose(delta[:-1, :-1, :-1], paint_cic([pos], n, box)[:-1, :-1, :-1], atol=1e-4)
+
+
+def test_cone_geometry_sampling():
+    from wstfast.survey import SurveyGeometry
+
+    geometry = SurveyGeometry.cone(48, 960.0, (480.0, 480.0, -500.0), 20.0, 600.0, 1300.0, lambda r: 1e-4 + 0 * r)
+    assert geometry.support.any() and not geometry.support.all()
+    prob = geometry.sampling(2e-4)
+    np.testing.assert_allclose(prob, 0.5)
+    with pytest.raises(ValueError):
+        geometry.sampling(5e-5)
+
+
+@pytest.mark.parametrize("ell", [1, 3, 4])
+def test_tabulated_rotation_matches_direct_rotation(ell):
+    rng = np.random.default_rng(ell)
+    n = rng.standard_normal((200, 3))
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    theta, phi = np.arccos(n[:, 2]), np.arctan2(n[:, 1], n[:, 0])
+    x = rng.standard_normal((2 * ell + 1, 200)).astype(np.float32)
+    rotation = LOSRotation(ell)
+    np.testing.assert_allclose(rotation.rotate(x, rotation.tables(theta, phi)), rotation(x, theta, phi), atol=1e-5)
+    np.testing.assert_allclose(rotation.rotate(x, rotation.tables(0.4, -1.2)), rotation(x, 0.4, -1.2), atol=1e-5)
