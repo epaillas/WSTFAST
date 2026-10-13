@@ -105,3 +105,30 @@ def test_survey_mesh_of_uniform_sphere():
     assert los.shape == (3, mesh.support.sum()) and np.all(los[2] > 0.9)
     weights = mesh.fkp_weights()
     assert np.all(weights[~mesh.support] == 0) and weights[inner].min() > 0
+
+
+def test_wide_angle_mocks_with_distant_observer_are_plane_parallel():
+    """With the observer far along -z, the wide-angle Kaiser field tends to the plane-parallel one."""
+    from wstfast.survey import GaussianMocks
+
+    n, cell = 32, 10.0
+    support = np.ones((n,) * 3, dtype=bool)
+    nbar = np.full((n,) * 3, 1e-3)
+
+    def pk(k):
+        return 1e4 * k / (1 + (k / 0.02) ** 2)
+
+    plane = GaussianMocks(n, cell, pk, 2.0, 0.8, nbar, support)(5)
+    far = GaussianMocks(n, cell, pk, 2.0, 0.8, nbar, support, observer=(160.0, 160.0, -1e7))(5)
+    np.testing.assert_allclose(far, plane, atol=1e-4 * np.abs(plane).max())
+
+
+def test_window_ratio_of_full_support_is_one():
+    from wstfast.survey import GaussianMocks, window_ratio
+
+    n = 32
+    support = np.ones((n,) * 3, dtype=bool)
+    mocks = GaussianMocks(n, 10.0, lambda k: 1e4 * k / (1 + (k / 0.02) ** 2), 2.0, 0.8, np.full((n,) * 3, 1e-3), support)
+    out = window_ratio(mocks, CONFIG, support, qs=[0.8], los="z", realizations=2)
+    ratio = out["S1m"]["ratio"]
+    np.testing.assert_allclose(ratio[np.isfinite(ratio)], 1.0, rtol=1e-6)

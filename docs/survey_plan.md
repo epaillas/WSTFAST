@@ -203,11 +203,31 @@ used 4 realisations, the varying-noise test (B) 16. The output is in outputs/sur
   n̄ histogram of M1 is not needed for the LRGs, though it could still matter for S21m (the noise of U) and for the
   Poisson cumulants.
 
-**Next:** the M2 edge model, then V0b (Quijote halos with the mask).
-- Planned M2: a locally flat boundary. Tabulate λ_s,m(d, μ_n), where d is the distance to the edge and μ_n is the
-  edge normal against the line of sight, as 1D integrals of P against the half-space-masked wavelet.
-- The model moment is then averaged over the support histogram in (d, μ_n).
-- Validate on the V0a cone at erosion 0–1.
+**M2: window correction from Gaussian mocks on the randoms (replaces the flat-boundary plan).**
+`wstfast.survey.GaussianMocks` and `window_ratio`. Gaussian Kaiser fields are drawn with noise at the local n̄
+(plane-parallel or wide-angle). Each is measured masked and unmasked on the same cells, and R_b = ⟨S_masked⟩ /
+⟨S_unmasked⟩. The survey model is R_b × the box model at the effective noise.
+
+Robustness (`scripts/survey/v0a_window.py`, outputs/survey/v0a_window): R was calibrated at the fiducial spectrum
+(b = 2, f = 0.75, 4 mocks), then applied to 6 paired mocks of each variant: b = 1.6 with f = 0.6; amplitude × 1.21;
+ω_cdm = 0.145; n_s = 0.90; n̄ / 2. All biases below are in units of one survey's error.
+
+| | Uncorrected edge bias | Corrected, every variant | Spread of R across variants (same seeds) |
+|---|---|---|---|
+| Erosion 0 | 8–12σ | max 0.65σ, rms 0.20σ | ≤ 0.12σ for the spectrum, ≤ 0.22σ for n̄/2 (at σ = 25) |
+| Erosion 1σ_j | 3–5σ | max 0.31σ, rms 0.09–0.10σ | ≤ 0.09σ |
+
+The residual common to all variants is the noise of the 4-mock calibration plus that of the test. More calibration
+mocks would reduce it as 1/√N.
+
+The density dependence doesn't matter in practice, because R is computed with the real n̄ of the randoms. What is
+left is a b/f dependence of ≤ 0.17σ at erosion 0 (≤ 0.08σ at 1σ_j).
+
+**Baseline:** erosion 1σ_j with R from ≥ 16 mocks at the fiducial spectrum. At erosion 0, recompute R once at the
+best fit.
+
+**Next:** V0b and V0c on Quijote halos in a masked cone, checking R against non-Gaussian fields with known truth.
+After that, S21m through the same R.
 
 ## 8. Open decisions
 

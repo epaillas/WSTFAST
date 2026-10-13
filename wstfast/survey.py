@@ -315,3 +315,82 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
                         for m2, v in enumerate(per_m2):
                             out["S2m"][:, j1, j2, ell, m1, m2] = moments(v, j2)
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Window correction from Gaussian mocks on the survey geometry
+
+
+class GaussianMocks:
+    """Gaussian fields with a linear Kaiser spectrum, plus white noise of the local density, on a survey mesh.
+
+    The signal is b delta + f (n.grad)^2 / grad^2 delta, with a line of sight n along z (``observer`` None) or from
+    the ``observer`` to each cell (wide angle, through the six second derivatives of the potential). The noise
+    variance per cell is 1 / (nbar V_cell) inside the ``support`` and its ``weights``-averaged value outside, so that
+    the unmasked field is the reference of the box model at an effective noise level.
+
+    ``pk``: linear power spectrum [(Mpc/h)^3] as a function of k [h/Mpc]. ``offset``: position of mesh node 0 [Mpc/h].
+    """
+
+    def __init__(self, nmesh: int, cellsize: float, pk, bias: float, f: float, nbar: np.ndarray, support: np.ndarray,
+                 weights: np.ndarray | None = None, observer=None, offset=(0.0, 0.0, 0.0)):
+        self.n, self.cell, self.bias, self.f = nmesh, cellsize, bias, f
+        k = 2 * np.pi * np.fft.fftfreq(nmesh) / cellsize
+        kz = 2 * np.pi * np.fft.rfftfreq(nmesh) / cellsize
+        self.kvec = np.meshgrid(k, k, kz, indexing="ij", sparse=True)
+        k2 = sum(c**2 for c in self.kvec)
+        kmag = np.sqrt(k2)
+        self.amplitude = np.where(k2 > 0, np.sqrt(pk(np.where(k2 > 0, kmag, 1.0)) / cellsize**3), 0.0)
+        self.k2 = np.where(k2 > 0, k2, 1.0)
+        sigma2 = np.where(nbar > 0, 1.0 / (np.where(nbar > 0, nbar, 1.0) * cellsize**3), 0.0)
+        w = np.where(support, 1.0 if weights is None else weights, 0.0)
+        effective = np.sum(w * sigma2) / np.sum(w)
+        self.noise = np.sqrt(np.where(support, sigma2, effective)).astype(np.float32)
+        self.observer = None if observer is None else np.asarray(observer, dtype=float)
+        if self.observer is not None:
+            x = [np.arange(nmesh) * cellsize + offset[i] - self.observer[i] for i in range(3)]
+            grid = np.meshgrid(*x, indexing="ij", sparse=True)
+            norm = np.sqrt(sum(g**2 for g in grid))
+            self.los = [(g / norm).astype(np.float32) for g in grid]
+
+    def __call__(self, seed: int) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        white = _rfft(rng.standard_normal((self.n,) * 3).astype(np.float32))
+        dk = white * self.amplitude
+        if self.observer is None:
+            signal = _irfft(dk * (self.bias + self.f * self.kvec[2] ** 2 / self.k2), self.n)
+        else:
+            signal = self.bias * _irfft(dk, self.n)
+            for i in range(3):
+                for j in range(i, 3):
+                    term = _irfft(dk * (self.kvec[i] * self.kvec[j] / self.k2), self.n)
+                    signal += (1 if i == j else 2) * self.f * self.los[i] * self.los[j] * term
+        return (signal + self.noise * rng.standard_normal((self.n,) * 3)).astype(np.float32)
+
+
+def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, weights=None, qs=None, los=None,
+                 erosion: float = 0.0, realizations: int = 4, seed: int = 0, keys=("S1m",),
+                 lattice: Lattice | None = None) -> dict:
+    """Window correction R = <S_masked> / <S_unmasked> of each coefficient, from paired Gaussian mocks.
+
+    Each mock is measured masked by the ``support`` (as the data) and unmasked on the same cells with the same
+    weights (the box model at the effective noise). The survey model is then R x the box model. Returns, per key,
+    ``ratio`` and ``error`` (scatter of the per-mock ratios over sqrt(realizations)), and the raw ``masked`` and
+    ``reference`` measurements of shape (realizations, ...).
+    """
+    kwargs = dict(qs=qs, los=los, erosion=erosion, lattice=lattice or Lattice(mocks.n), weights=weights)
+    masked, reference = {key: [] for key in keys}, {key: [] for key in keys}
+    for r in range(realizations):
+        field = mocks(seed + r)
+        a = measure_wst_survey(field, config, support=support, **kwargs)
+        b = measure_wst_survey(field, config, moment_support=support, **kwargs)
+        for key in keys:
+            masked[key].append(a[key])
+            reference[key].append(b[key])
+    out = {}
+    for key in keys:
+        m, ref = np.array(masked[key]), np.array(reference[key])
+        out[key] = dict(ratio=m.mean(axis=0) / ref.mean(axis=0),
+                        error=(m / ref).std(axis=0, ddof=1) / np.sqrt(realizations) if realizations > 1 else None,
+                        masked=m, reference=ref)
+    return out
