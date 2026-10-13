@@ -118,6 +118,11 @@ def parse_args(argv=None):
                              "(1 + d0 + R_l d2), R_l = 1 / (1 + c_l n s_lin^2)")
     parser.add_argument("--s21-layer2-c", choices=("halo", "matter"), default="halo",
                         help="c_l calibrated on the halo pairs outside the data vector, or transferred from matter")
+    parser.add_argument("--s21-layer2-marg", choices=("global", "per_l"), default=None,
+                        help="marginalise analytically over the amplitudes of the template pieces d0 and R d2 (one pair, or "
+                             "one pair per l), Gaussian priors centred on the prediction (A = 1)")
+    parser.add_argument("--s21-layer2-marg-width", type=float, default=1.0,
+                        help="width of the amplitude priors, as a fraction of the predicted amplitude")
     parser.add_argument("--s21-layer2-prior", type=float, default=None, metavar="FRACTION",
                         help="free c_l with a Gaussian prior of this fractional width around the calibration (default: fixed)")
     parser.add_argument("--kappa-shot", action="store_true",
@@ -240,6 +245,25 @@ def load_layer2(args, projection, coefficients, first_layer, q, kwargs):
     print(f"non-Gaussian second layer: {which} c_l = " + ", ".join(f"{ell}: {v:.2f}" for ell, v in sorted(c.items()))
           + ("" if args.s21_layer2_prior is None else f" (free, {args.s21_layer2_prior:g} prior)"), flush=True)
     return dict(rows=rows, var=var, c=c, c_err=c_err, prior=args.s21_layer2_prior, beta_ref=beta.tolist(), lin_ref=lin_ref)
+
+
+def layer2_templates(args, labels, mean):
+    """Data-vector shapes S21m d0 and S21m R_l d2 of the template pieces (fiducial cosmology, calibrated c_l), all l
+    together ('global') or one pair per l ('per_l'); zero outside S21m."""
+    template = json.loads(args.s21_layer2.read_text())
+    c = {int(k): max(v, 0.0) for k, v in template[f"{args.s21_layer2_c}_c"].items()}
+    rows = {tuple(r["key"]): r for r in template["rows"]}
+    groups = {}
+    for i, label in enumerate(labels):
+        if not label.startswith("S21m"):
+            continue
+        key = tuple(int(part[1:]) for part in label.split("_")[1:])
+        r = rows[key]
+        group = 0 if args.s21_layer2_marg == "global" else r["ell"]
+        d0, d2 = groups.setdefault(group, (np.zeros(len(labels)), np.zeros(len(labels))))
+        d0[i] = mean[i] * r["gauss"]
+        d2[i] = mean[i] * r["tree"] / (1.0 + c[r["ell"]] * r["var"])
+    return [v for pair in groups.values() for v in pair]
 
 
 def layer2_variance(args, labels, mean):
@@ -387,6 +411,9 @@ def main():
         covariance = covariance * (meta["boxsize"] / 1000.0) ** 3 / args.volume
     if getattr(args, "s21_layer2", None) is not None:  # Monte Carlo error of the template, a volume-independent theory error
         covariance = covariance + np.diag(layer2_variance(args, labels, vectors.mean(axis=0)))
+        if args.s21_layer2_marg is not None:  # analytic marginalisation over the template amplitudes
+            for vector in layer2_templates(args, labels, vectors.mean(axis=0)):
+                covariance = covariance + args.s21_layer2_marg_width**2 * np.outer(vector, vector)
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
 
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)
@@ -426,7 +453,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), s21_layer2=str(args.s21_layer2), s21_layer2_c=args.s21_layer2_c, s21_layer2_prior=args.s21_layer2_prior, hartlap_factor=hartlap_factor(nsims, ndata), percival_m1=m1, nsims=int(nsims), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), s21_layer2=str(args.s21_layer2), s21_layer2_c=args.s21_layer2_c, s21_layer2_prior=args.s21_layer2_prior, s21_layer2_marg=args.s21_layer2_marg, s21_layer2_marg_width=args.s21_layer2_marg_width, hartlap_factor=hartlap_factor(nsims, ndata), percival_m1=m1, nsims=int(nsims), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
