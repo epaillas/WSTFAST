@@ -85,7 +85,8 @@ class WSTTheory(Calculator):
     """
 
     def __init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
-                 layer2: bool = False, **basis_kwargs):
+                 layer2: bool = False, layer2_template: dict | None = None, layer2_mode: str = "tree",
+                 **basis_kwargs):
         self.basis = WSTBasis(config=config, **basis_kwargs) if basis is None else basis
         self.cs2 = Parameter("cs2", value=0.0, prior=dict(limits=[-20.0, 20.0]),
                              ref=dict(dist="norm", loc=0.0, scale=1.0), latex="c_s^2")
@@ -97,15 +98,31 @@ class WSTTheory(Calculator):
         self.layer2 = {ell: Parameter(f"layer2_l{ell}", value=10.0, prior=dict(limits=[0.0, 100.0]),
                                       ref=dict(dist="norm", loc=10.0, scale=2.0), latex=rf"C_{{2,{ell}}}")
                        for ell in ells}
+        # Measured second-layer template (Assembly): renormalisation parameters of its tree-level term.
+        self.ng2 = {}
+        if layer2_template is not None:
+            probe = Assembly(config, coefficients, edgeworth=edgeworth, layer2_template=layer2_template,
+                             layer2_mode=layer2_mode)
+            for key in probe.ng2_keys:
+                tag = "all" if key == 0 else (f"l{key}" if isinstance(key, int) else f"j{key[0]}_l{key[1]}")
+                if layer2_mode == "pade_l":
+                    self.ng2[key] = Parameter(f"ng2c_{tag}", value=0.0, prior=dict(limits=[0.0, 500.0]),
+                                              ref=dict(dist="norm", loc=1.0, scale=0.5), latex=rf"c_{{Y,{tag}}}")
+                else:
+                    self.ng2[key] = Parameter(f"ng2R_{tag}", value=1.0, prior=dict(limits=[-3.0, 5.0]),
+                                              ref=dict(dist="norm", loc=0.5, scale=0.2), latex=rf"R_{{Y,{tag}}}")
 
     def __post_init__(self, coefficients, config: WSTConfig = WSTConfig(), basis=None, edgeworth: bool = True,
-                      layer2: bool = False, **basis_kwargs):
-        self.assembly = Assembly(config, coefficients, edgeworth=edgeworth)
+                      layer2: bool = False, layer2_template: dict | None = None, layer2_mode: str = "tree",
+                      **basis_kwargs):
+        self.assembly = Assembly(config, coefficients, edgeworth=edgeworth, layer2_template=layer2_template,
+                                 layer2_mode=layer2_mode)
 
     def __call__(self):
         noise = jnp.stack([self.noise[key].value for key in self.assembly.noise_keys]) if self.noise else jnp.zeros(0)
         layer2 = (jnp.stack([self.layer2[ell].value for ell in self.assembly.layer2_keys]) if self.layer2 else None)
-        self.flattheory = self.assembly(self.basis.s1_terms, self.basis.s21_terms, self.cs2.value, noise, layer2)
+        ng2 = jnp.stack([self.ng2[key].value for key in self.assembly.ng2_keys]) if self.ng2 else None
+        self.flattheory = self.assembly(self.basis.s1_terms, self.basis.s21_terms, self.cs2.value, noise, layer2, ng2)
         return self.flattheory
 
     def tree_flatten(self):
@@ -674,10 +691,21 @@ class S21mTheory(Calculator):
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                 cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False):
+                 cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        # Non-Gaussian second layer (``layer2``, see __call__): constants c_l of the beyond-tree suppression, fixed or
+        # free with a Gaussian prior of width layer2['prior'] x c_l (at least its calibration error) around the calibration.
+        self.ng2_params = {}
+        if layer2 is not None and layer2.get("prior") is not None:
+            for ell in sorted({c.ell for c in coefficients}):
+                c, err = float(layer2["c"][ell]), float(layer2["c_err"][ell])
+                width = max(layer2["prior"] * abs(c), err, 0.05)
+                self.ng2_params[ell] = Parameter(f"ng2c_l{ell}", value=max(c, 0.0),
+                                                 prior=dict(dist="norm", loc=c, scale=width, limits=[0.0, 500.0]),
+                                                 ref=dict(dist="norm", loc=max(c, 0.0), scale=0.1 * width),
+                                                 latex=rf"c_{{Y,{ell}}}")
         # Free amplitude A_c_j of the tree-level connected noise (``noise_correction``) per first-layer scale: the
         # predicted shape of the connected noise in (K, mu_K) and across fields, with a fitted amplitude (1 = predicted).
         self.connected_params = ({f"A_c_j{j}": Parameter(f"A_c_j{j}", value=1.0, prior=dict(limits=[-20.0, 20.0]),
@@ -733,8 +761,23 @@ class S21mTheory(Calculator):
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                      cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False):
+                      cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
+
+        self.layer2 = layer2 is not None
+        if layer2 is not None:
+            entries = s21m_entries(coefficients)
+            keys = [(coefficients[i].j, coefficients[i].j2, coefficients[i].ell, m1, m2) for i, m1, m2 in entries]
+            missing = [k for k in keys if k not in layer2["rows"]]
+            if missing:
+                raise ValueError(f"no second-layer template for {missing}")
+            self.ng2_d0 = jnp.asarray([layer2["rows"][k][0] for k in keys])
+            self.ng2_d2 = jnp.asarray([layer2["rows"][k][1] for k in keys])
+            self.ng2_var = jnp.asarray([layer2["var"][k[0], k[2]] for k in keys])
+            self.ng2_ell = [k[2] for k in keys]
+            self.ng2_c = jnp.asarray([max(float(layer2["c"][k[2]]), 0.0) for k in keys])
+            self.ng2_beta = jnp.asarray(layer2["beta_ref"], dtype="f8")
+            self.ng2_lin_ref = jnp.asarray([layer2["lin_ref"][k[0], k[2], k[3]] for k in keys])
 
         self.q, self.shotnoise = float(q), float(shotnoise)
         #: Fixed relative correction (1 + c_e) of the Gaussian noise of every basis entry, for the tree-level connected
@@ -841,6 +884,21 @@ class S21mTheory(Calculator):
             scale = jnp.stack([(1 + self.response_params[f"a_R_j{j}"].value) ** 2 for j in self.entry_j])
             terms = jnp.stack([terms[:, 0] * scale, terms[:, 1]], axis=1)
         self.flattheory = s21m_from_terms(terms, amplitudes, self.n1, self.n2, self.q, e_q, e_1)
+        if self.layer2:
+            # Non-Gaussian second layer: S21m x (1 + d0 + R_l d2 s), with the Gaussian-field and tree-level terms of the
+            # perturbation-theory template (scripts/layer2/template_rsd.py), s the ratio of the linear first-layer block
+            # variance (fixed reference biases) to its fiducial value, and R_l = 1 / (1 + c_l n s_lin^2 s).
+            if self.bias_params:
+                from .theory.bias import monomials
+
+                reference = jnp.tensordot(monomials(self.ng2_beta, 2)[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
+                block = (self.matrix @ reference.ravel())[self.block_index]
+            else:
+                block = linear[self.block_index]
+            scale = block / self.ng2_lin_ref
+            c = (jnp.stack([self.ng2_params[ell].value for ell in self.ng2_ell]) if self.ng2_params else self.ng2_c)
+            renorm = 1.0 / (1.0 + c * self.ng2_var * scale)
+            self.flattheory = self.flattheory * (1 + self.ng2_d0 + renorm * self.ng2_d2 * scale)
         return self.flattheory
 
     def tree_flatten(self):

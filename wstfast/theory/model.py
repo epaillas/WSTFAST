@@ -148,9 +148,22 @@ class Assembly:
     variance (G' including the noise amplitude) and the volume dilution (sigma_j1 / sigma_j2)^3, and one free
     constant C_l per l (``layer2_amplitudes``). This scaling describes the measured second-layer kurtosis of
     every pair with sigma_j2 / sigma_j1 >= 2.8 and sigma_j1 >= 12.5 Mpc/h to ~20% with C_l ~ 6-21.
+
+    With ``layer2_template`` the second layer gets instead the measured perturbative factor 1 + E_Y,
+        E_Y = d0 + R d2 (n s_lin^2 / n s_lin,fid^2),
+    from the perturbation-theory fields of scripts/layer2/template.py: the Gaussian-field value d0 (the
+    non-Gaussianity of the modulus itself, independent of the amplitude of P_L) and the tree-level gravitational
+    term d2, which scales exactly as the amplitude of P_L and is rescaled with the linear variance n s_lin^2 of the
+    first-layer field (S1 basis row). ``layer2_mode`` sets the renormalisation R of the tree-level term:
+    'tree' (R = 1, no free parameter), 'global', 'per_l' or 'per_field' (free R), or 'pade_l'
+    (R = 1 / (1 + c_l n s_lin^2), one c_l per l: the beyond-tree suppression grows with the variance at sigma_j1).
+    ``layer2_template`` maps S21 coefficient labels to dicts with 'gauss', 'tree' and 'var_ref'.
     """
 
-    def __init__(self, config: WSTConfig, coefficients, edgeworth: bool = True):
+    LAYER2_MODES = ("tree", "global", "per_l", "per_field", "pade_l")
+
+    def __init__(self, config: WSTConfig, coefficients, edgeworth: bool = True, layer2_template: dict | None = None,
+                 layer2_mode: str = "tree"):
         self.edgeworth = edgeworth
         basis_coefficients = all_coefficients(config)
         s1_index = {c: i for i, c in enumerate(c for c in basis_coefficients if c.kind == "S1")}
@@ -178,11 +191,30 @@ class Assembly:
         self.noise_keys = sorted({(c.j, c.ell) for c in self.coefficients if c.kind == "S21"})
         self.s21_noise_index = np.array([self.noise_keys.index((c.j, c.ell)) for c in self.coefficients if c.kind == "S21"],
                                         dtype=int)
+        #: Measured second-layer template (see the class docstring).
+        self.layer2_template = layer2_template is not None
+        self.layer2_mode = layer2_mode
+        self.ng2_keys = []
+        if self.layer2_template:
+            if layer2_mode not in self.LAYER2_MODES:
+                raise ValueError(f"layer2_mode {layer2_mode!r} not in {self.LAYER2_MODES}")
+            missing = [c.label for c in s21 if c.label not in layer2_template]
+            if missing:
+                raise ValueError(f"no second-layer template for {missing}")
+            rows = [layer2_template[c.label] for c in s21]
+            self.ng2_d0 = np.array([r["gauss"] for r in rows])
+            self.ng2_d2 = np.array([r["tree"] for r in rows])
+            self.ng2_var = np.array([r["var_ref"] for r in rows])
+            group = {"tree": None, "global": lambda c: 0, "per_l": lambda c: c.ell, "pade_l": lambda c: c.ell,
+                     "per_field": lambda c: (c.j, c.ell)}[layer2_mode]
+            if group is not None:
+                self.ng2_keys = sorted({group(c) for c in s21})
+                self.s21_ng2_index = np.array([self.ng2_keys.index(group(c)) for c in s21], dtype=int)
         # Position of each output in the selected order.
         self.order = np.argsort([i for i, c in enumerate(self.coefficients) if c.kind == "S1"]
                                 + [i for i, c in enumerate(self.coefficients) if c.kind == "S21"])
 
-    def __call__(self, s1_terms, s21_terms, cs2, noise_amplitudes, layer2_amplitudes=None):
+    def __call__(self, s1_terms, s21_terms, cs2, noise_amplitudes, layer2_amplitudes=None, ng2_parameters=None):
         q = self.q
         t1 = s1_terms[self.s1_rows]
         variance = (t1[:, 0] + t1[:, 1] - 2 * cs2 * t1[:, 2] + t1[:, 3]) / self.s1_n
@@ -197,6 +229,15 @@ class Assembly:
             fraction = noise / (t21[:, 0] + noise)
             constant = jnp.asarray(layer2_amplitudes)[self.s21_layer2_index]
             s21 = s21 * (1 + constant * q * (q - 2) / (8 * n * (n + 2)) * k4**2 * fraction**2 * self.s21_dilution)
+        if self.layer2_template:
+            variance = s1_terms[self.s21_s1_rows][:, 0]
+            if self.layer2_mode == "tree":
+                renorm = 1.0
+            elif self.layer2_mode == "pade_l":
+                renorm = 1.0 / (1.0 + jnp.asarray(ng2_parameters)[self.s21_ng2_index] * variance)
+            else:
+                renorm = jnp.asarray(ng2_parameters)[self.s21_ng2_index]
+            s21 = s21 * (1 + self.ng2_d0 + renorm * self.ng2_d2 * variance / self.ng2_var)
         if self.edgeworth:
             s1 = s1 * (1 + edgeworth(q, self.s1_n, t1))
             first = s1_terms[self.s21_s1_rows]

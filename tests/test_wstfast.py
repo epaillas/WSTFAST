@@ -63,6 +63,34 @@ def test_assembly_keeps_selection_order():
             assert value == pytest.approx(gamma * (2 * variance) ** (config.q / 2))
 
 
+def test_assembly_second_layer_template():
+    """The measured second-layer factor 1 + d0 + R d2 (s_lin^2 / s_ref^2): exact at the reference variance, d2 scaling
+    with the variance, and the Pade suppression reducing to the tree level at c = 0."""
+    config = WSTConfig()
+    selected = select_coefficients(config)
+    s21 = [c for c in selected if c.kind == "S21"]
+    basis = all_coefficients(config)
+    n1 = sum(c.kind == "S1" for c in basis)
+    s1_terms = np.tile(np.array([0.05, 0.0, 0.0, 0.0, 0.0, 0.0]), (n1, 1))
+    s21_terms = np.ones((len(basis) - n1, 3))
+    template = {c.label: dict(gauss=-0.002, tree=-0.01, var_ref=0.05) for c in s21}
+    noise = np.zeros(len({(c.j, c.ell) for c in s21}))
+    plain = np.asarray(Assembly(config, selected, edgeworth=False)(s1_terms, s21_terms, 0.0, noise))
+    tree = Assembly(config, selected, edgeworth=False, layer2_template=template)
+    is_s21 = np.array([c.kind == "S21" for c in selected])
+    ratio = np.asarray(tree(s1_terms, s21_terms, 0.0, noise)) / plain
+    assert np.allclose(ratio[is_s21], 1 - 0.002 - 0.01) and np.allclose(ratio[~is_s21], 1.0)
+    ratio = np.asarray(tree(2 * s1_terms, s21_terms, 0.0, noise)) / np.asarray(
+        Assembly(config, selected, edgeworth=False)(2 * s1_terms, s21_terms, 0.0, noise))
+    assert np.allclose(ratio[is_s21], 1 - 0.002 - 0.02)
+    pade = Assembly(config, selected, edgeworth=False, layer2_template=template, layer2_mode="pade_l")
+    zero = np.zeros(len(pade.ng2_keys))
+    assert np.allclose(pade(s1_terms, s21_terms, 0.0, noise, None, zero), tree(s1_terms, s21_terms, 0.0, noise))
+    c = np.full(len(pade.ng2_keys), 20.0)  # R = 1 / (1 + 20 x 0.05) = 1 / 2
+    ratio = np.asarray(pade(s1_terms, s21_terms, 0.0, noise, None, c)) / plain
+    assert np.allclose(ratio[is_s21], 1 - 0.002 - 0.005)
+
+
 @pytest.mark.slow
 def test_likelihood_graph_evaluates():
     from desilike import build
