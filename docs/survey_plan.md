@@ -28,13 +28,13 @@ remove each assumption, and the validation ladder that has to pass before data.
 | Randoms | `LSS/iron/LSScats/v1.5/LRG_{NGC,SGC}_{0..17}_clustering.ran.fits` | ~1 GB each; a few files are enough for the WST |
 | Covariance mocks | `mocks/EZmock/dark/v1/mock{1..1000}/LRG_ffa_{NGC,SGC}_clustering.{dat,ran}.fits`, `LRG_ffa_nz.txt` | Fast fibre assignment (ffa), not altmtl |
 | Validation mocks | `mocks/AbacusSummit/dark/v4.2/altmtl{0..24}/mock*/LSScats/LRG_{NGC,SGC}_clustering.dat.fits` | Full fibre assignment (altmtl), AbacusSummit c000 cosmology |
+| Complete mocks | `mocks/AbacusSummit/dark/v4.2/mock{0..24}/LRG_complete_{NGC,SGC}_clustering.dat.fits`, `..._{0..17}_clustering.ran.fits`, `LRG_complete_nz.txt` | No fibre assignment, same 25 realisations. 0.66 GB of data and 14 GB of randoms per mock (each random file ≈ 4.6× the data; angular positions shared across mocks, Z drawn per mock). `scripts/survey/download_abacus_lrg.sh`; mocks 0–2 with randoms 0–1 are local in `data/desi/` |
 
 These catalogues are ~100 GB in total, so V2 onwards runs at NERSC (the public tree is mirrored there under
 `/global/cfs/cdirs/desi/public/dr1/`). V0 and V1 run locally on the Quijote halo boxes.
 
-**Not public, but needed for a clean V3/V4 split:** AbacusSummit LRG cutsky mocks without fibre assignment (the
-"complete" version of the same 25 realisations), and the matching LRG HOD cubic boxes. Without them, the light-cone
-test (V3) and the fibre-assignment test (V4) can only be run together, on altmtl.
+**Not public:** the matching LRG HOD cubic boxes (parents of the cutsky mocks). The complete mocks are public
+(2025-10), so V3 (light cone) and V4 (fibre assignment) can be run separately.
 
 ## 1. What assumes a periodic, uniform box today
 
