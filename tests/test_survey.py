@@ -252,3 +252,36 @@ def test_lambda_window_of_full_support_is_one_and_gaussian_s1m_matches():
     white = signal_variances(np.full(lattice.kmag.shape, 0.5), config, lattice)
     for (j, ell), v in noise.items():
         np.testing.assert_allclose(v, white[j, ell].mean(), rtol=1e-4)
+
+
+def test_torch_survey_backend_matches_numpy():
+    torch = pytest.importorskip("torch")
+    from wstfast.measure_torch import TorchLattice, measure_wst_survey_torch
+    from wstfast.survey import LambdaWindow, noise_variance_maps, signal_variances
+
+    geometry = _two_region_cone(32)
+    config = WSTConfig(J=2, L=3, L2=2, sigma0=1.2, min_dj=1, cellsize=1.0)
+    delta = anisotropic_field(32, seed=7)
+    los = geometry.line_of_sight(full=True)
+    weights = geometry.weights
+    lattice, tlattice = Lattice(32), TorchLattice(32, device=torch.device("cpu"))
+    kwargs = dict(support=geometry.support, weights=weights, qs=[0.8, 2.0], los=los)
+    reference = measure_wst_survey(delta, config, lattice=lattice, **kwargs)
+    result = measure_wst_survey_torch(delta, config, lattice=tlattice, **kwargs)
+    for key in ("S0", "S1", "S2", "S1m", "S2m"):
+        np.testing.assert_allclose(result[key], reference[key], rtol=2e-4, atol=1e-9, equal_nan=True, err_msg=key)
+
+    windows = [LambdaWindow(config, geometry.support, los, lat, nbins=8) for lat in (lattice, tlattice)]
+    for w in windows:
+        w.add(np.where(geometry.support, delta, 0.0), delta)
+    for b in windows[0].blocks:
+        np.testing.assert_allclose(windows[1].coverage[b], windows[0].coverage[b], atol=1e-5)
+        np.testing.assert_allclose(windows[1].correction()[b], windows[0].correction()[b], rtol=1e-3)
+    sigma2 = np.full(geometry.support.shape, 0.3)
+    a = noise_variance_maps(sigma2, config, geometry.support, lattice)
+    b = noise_variance_maps(sigma2, config, geometry.support, tlattice)
+    pcell = np.abs(np.fft.rfftn(delta)) ** 2 / 32**3
+    c, d = signal_variances(pcell, config, lattice), signal_variances(pcell, config, tlattice)
+    for key in a:
+        np.testing.assert_allclose(b[key], a[key], rtol=1e-4, atol=1e-8)
+        np.testing.assert_allclose(d[key], c[key], rtol=1e-4)

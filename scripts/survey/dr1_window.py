@@ -19,6 +19,19 @@ noisy, constrained mocks of several spectra; "coverage" sets c = 1 and "none" T 
     python scripts/survey/dr1_window.py --test ric --realizations 10 --width 2.5 5 10 --output outputs/survey/dr1_ric
     python scripts/survey/dr1_window.py --test lambda --calibrate 12 --realizations 6 \\
         --output outputs/survey/dr1_lambda_window
+
+With ``--device cuda`` the WST, the window and the variances run on a GPU (``wstfast.measure_torch``); the mocks and
+the RIC stay on the CPU. At NERSC, with the public tree as the catalogue root, one test per GPU:
+
+    ROOT=/global/cfs/cdirs/desi/public/dr1/survey/catalogs/dr1/mocks/AbacusSummit/dark/v4.2
+    sbatch -A <account> -C gpu -q regular -N 1 --gpus-per-node=4 -t 02:00:00 --wrap "
+        CUDA_VISIBLE_DEVICES=0 python scripts/survey/dr1_window.py --device cuda --catalogue-root $ROOT \\
+            --test ric --realizations 20 --width 2.5 5 10 --output outputs/survey/dr1_ric &
+        CUDA_VISIBLE_DEVICES=1 python scripts/survey/dr1_window.py --device cuda --catalogue-root $ROOT \\
+            --test lambda --calibrate 32 --realizations 16 --output outputs/survey/dr1_lambda_window &
+        wait"
+
+(build the geometry cache once first, without the GPUs, so that the two runs do not both write it).
 """
 
 from __future__ import annotations
@@ -56,6 +69,9 @@ def get_args():
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--calibrate", type=int, default=12, help="signal-only mocks for the lambda window")
     parser.add_argument("--realizations", type=int, default=10, help="test mocks (per variant for lambda)")
+    parser.add_argument("--catalogue-root", type=Path, default=survey.DESI_ROOT,
+                        help="directory with mock<i>/LRG_complete_* catalogues")
+    parser.add_argument("--device", default="cpu", help="cpu (numpy) or a torch device, e.g. cuda")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -72,13 +88,14 @@ def build_geometries(args) -> dict[str, SurveyGeometry]:
                 for cap in survey.DESI_CAPS}
     masks, data = {}, []
     for cap in survey.DESI_CAPS:
-        ran = [survey.read_desi_catalogue(survey.desi_catalogue_path(args.mocks[0], cap, i), columns=("RA", "DEC"))
-               for i in args.randoms]
+        ran = [survey.read_desi_catalogue(survey.desi_catalogue_path(args.mocks[0], cap, i, root=args.catalogue_root),
+                                          columns=("RA", "DEC")) for i in args.randoms]
         masks[cap] = survey.AngularMask.from_randoms(np.concatenate([r["RA"] for r in ran]),
                                                      np.concatenate([r["DEC"] for r in ran]),
                                                      density=survey.DESI_RANDOM_DENSITY * len(ran))
         for mock in args.mocks:
-            data.append(survey.read_desi_catalogue(survey.desi_catalogue_path(mock, cap), args.zrange)
+            data.append(survey.read_desi_catalogue(survey.desi_catalogue_path(mock, cap, root=args.catalogue_root),
+                                                   args.zrange)
                         | dict(cap=cap, mock=mock))
         print(f"{cap}: mask {np.degrees(np.degrees(masks[cap].area())):.0f} deg^2", flush=True)
     nbar = survey.desi_radial_density(data, masks, args.zrange)
@@ -128,7 +145,7 @@ def run_ric(args, geometries, setups, pk):
         for name, meshes in variants.items():
             for cap, field in meshes.items():
                 s = setups[cap]
-                out = measure_wst_survey(field, s["config"], support=s["g"].support, weights=s["g"].weights,
+                out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
                                          qs=[args.q], los=s["los"], lattice=s["lattice"])
                 for key in keys:
                     results[cap][name][key].append(out[key][0])
@@ -192,14 +209,15 @@ def run_lambda(args, geometries, setups, pk):
             fields = [mocks[cap](seed=[200 + r, k]) for k, cap in enumerate(caps)]
             for cap, field in zip(caps, ric(*fields)):
                 s = setups[cap]
-                out = measure_wst_survey(field, s["config"], support=s["g"].support, weights=s["g"].weights,
+                out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
                                          qs=[args.q], los=s["los"], lattice=s["lattice"])
                 measured[cap].append(out["S1m"][0])
             print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
         for cap in caps:
             s, g = setups[cap], geometries[cap]
-            kaiser = (b + f * s["lattice"].mu ** 2) ** 2
-            kphys = s["lattice"].kmag / g.cellsize
+            grid = getattr(s["lattice"], "numpy", s["lattice"])  # the numpy Lattice of a TorchLattice
+            kaiser = (b + f * grid.mu**2) ** 2
+            kphys = grid.kmag / g.cellsize
             pcell = np.where(kphys > 0, kaiser * spectrum(pk, a, t)(np.clip(kphys, 1e-4, None)) / g.cellsize**3, 0.0)
             lam = signal_variances(pcell, s["config"], s["lattice"])
             weights = g.weights.ravel()[np.flatnonzero(g.support)]
@@ -234,7 +252,13 @@ def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
     geometries = build_geometries(args)
-    lattice = Lattice(next(iter(geometries.values())).nmesh)
+    nmesh = next(iter(geometries.values())).nmesh
+    if args.device == "cpu":
+        lattice, args.measure = Lattice(nmesh), measure_wst_survey
+    else:
+        from wstfast.measure_torch import TorchLattice, measure_wst_survey_torch
+
+        lattice, args.measure = TorchLattice(nmesh, device=args.device, lmax=args.L), measure_wst_survey_torch
     setups = {}
     for cap, g in geometries.items():
         print(f"{cap}: mesh {g.nmesh}^3 x {g.cellsize:g} Mpc/h, {g.support.sum() * g.cellsize**3 / 1e9:.2f}"

@@ -497,6 +497,21 @@ def calibrate_window(fields, config: WSTConfig, support: np.ndarray, weights=Non
     return out
 
 
+def _on_device(lattice) -> bool:
+    """Whether ``lattice`` is a ``measure_torch.TorchLattice`` (the computation then runs on its device)."""
+    return hasattr(lattice, "device")
+
+
+def _squared_kernel(lattice, sigma: float, ell: int) -> np.ndarray:
+    """sum_m psi_{sigma,l}^m(x)^2 in real space (n, n, n), on the lattice's device if it has one."""
+    if _on_device(lattice):
+        from .measure_torch import squared_kernel
+
+        return squared_kernel(lattice, sigma, ell)
+    radial = (-1j) ** ell * lattice.radial(sigma, ell)
+    return sum(_irfft(radial * y, lattice.n) ** 2 for y in lattice.harmonics(ell))
+
+
 class LambdaWindow:
     """Window of the first layer at the level of the component variances, which are linear in the spectrum.
 
@@ -511,6 +526,8 @@ class LambdaWindow:
     then follow from the box moment evaluated cell by cell (``s1m_gaussian``).
 
     ``los``: unit vectors per support cell (3, ncells) or per mesh cell (3, n, n, n), as ``measure_wst_survey``.
+    ``lattice``: a ``Lattice``, or a ``measure_torch.TorchLattice`` to run on its device (as ``noise_variance_maps``
+    and ``signal_variances``).
     """
 
     def __init__(self, config: WSTConfig, support: np.ndarray, los, lattice: Lattice | None = None, nbins: int = 40):
@@ -521,7 +538,13 @@ class LambdaWindow:
         if los.ndim == 4:
             los = los.reshape(3, -1)[:, self.index]
         theta, phi = _angles(los.T.astype(np.float64))
-        self.rotations = {ell: LOSRotation(ell) for ell in range(1, config.L + 1)}
+        if _on_device(self.lattice):
+            from .measure_torch import TorchLOSRotation
+
+            self.rotations = {ell: TorchLOSRotation(ell, self.lattice.device) for ell in range(1, config.L + 1)}
+            self._index = __import__("torch").as_tensor(self.index, device=self.lattice.device)
+        else:
+            self.rotations = {ell: LOSRotation(ell) for ell in range(1, config.L + 1)}
         self.tables = {ell: r.tables(theta, phi) for ell, r in self.rotations.items()}
         self.blocks = [(j, ell) for j in range(config.J + 1) for ell in range(config.L + 1)]
         self.edges = np.linspace(0.0, 1.0 + 1e-6, nbins + 1)
@@ -529,10 +552,8 @@ class LambdaWindow:
         n = support.shape[0]
         fm = _rfft(self.support.astype(np.float32))
         for ell in range(config.L + 1):
-            harmonics = self.lattice.harmonics(ell)
             for j in range(config.J + 1):
-                radial = (-1j) ** ell * self.lattice.radial(config.sigma0 * config.step**j, ell)
-                kernel2 = sum(_irfft(radial * y, n) ** 2 for y in harmonics)
+                kernel2 = _squared_kernel(self.lattice, config.sigma0 * config.step**j, ell)
                 kernel2 /= kernel2.sum(dtype=np.float64)
                 f = np.clip(_irfft(_rfft(kernel2) * fm, n).ravel()[self.index], 0.0, 1.0)
                 self.coverage[j, ell] = f.astype(np.float32)
@@ -544,6 +565,19 @@ class LambdaWindow:
 
     def squares(self, field: np.ndarray):
         """Squared rotated components X'_m(x)^2 (2l + 1, ncells) of every block (j, l) of ``field``."""
+        if _on_device(self.lattice):
+            import torch
+
+            from .measure_torch import survey_components
+
+            fk = torch.fft.rfftn(torch.as_tensor(np.asarray(field, dtype=np.float32), device=self.lattice.device))
+            for ell in range(self.config.L + 1):
+                for j in range(self.config.J + 1):
+                    x = survey_components(fk, self.lattice, self.config.sigma0 * self.config.step**j, ell, self._index)
+                    if ell > 0:
+                        x = self.rotations[ell].rotate(x, self.tables[ell])
+                    yield (j, ell), (x * x).cpu().numpy()
+            return
         fk = _rfft(np.asarray(field, dtype=np.float32))
         for ell in range(self.config.L + 1):
             harmonics = self.lattice.harmonics(ell)
@@ -591,10 +625,8 @@ def noise_variance_maps(sigma2: np.ndarray, config: WSTConfig, support: np.ndarr
     fs = _rfft(np.where(support, sigma2, 0.0).astype(np.float32))
     out = {}
     for ell in range(config.L + 1):
-        harmonics = lattice.harmonics(ell)
         for j in range(config.J + 1):
-            radial = (-1j) ** ell * lattice.radial(config.sigma0 * config.step**j, ell)
-            kernel2 = sum(_irfft(radial * y, n) ** 2 for y in harmonics) / (2 * ell + 1)
+            kernel2 = _squared_kernel(lattice, config.sigma0 * config.step**j, ell) / (2 * ell + 1)
             out[j, ell] = _irfft(_rfft(kernel2) * fs, n).ravel()[index]
     return out
 
@@ -604,6 +636,16 @@ def signal_variances(pcell: np.ndarray, config: WSTConfig, lattice: Lattice) -> 
     cell (rfft lattice, P / V_cell): {(j, l): (2l + 1,)}."""
     n3 = lattice.n**3
     out = {}
+    if _on_device(lattice):
+        import torch
+
+        weight = torch.as_tensor(lattice.numpy.multiplicity * pcell / n3, dtype=torch.float32, device=lattice.device)
+        for ell in range(config.L + 1):
+            y2 = lattice.harmonics(ell) ** 2
+            for j in range(config.J + 1):
+                radial2 = lattice.radial(config.sigma0 * config.step**j, ell) ** 2
+                out[j, ell] = (weight * radial2 * y2).to(torch.float64).sum(dim=(1, 2, 3)).cpu().numpy()
+        return out
     for ell in range(config.L + 1):
         harmonics = lattice.harmonics(ell)
         for j in range(config.J + 1):
