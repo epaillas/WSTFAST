@@ -192,7 +192,8 @@ class Assembly:
         self.s21_noise_index = np.array([self.noise_keys.index((c.j, c.ell)) for c in self.coefficients if c.kind == "S21"],
                                         dtype=int)
         #: Measured second-layer template (see the class docstring).
-        self.layer2_template = layer2_template is not None
+        # An empty template (no S21 coefficients selected) means no second-layer factor.
+        self.layer2_template = bool(layer2_template) and bool(s21)
         self.layer2_mode = layer2_mode
         self.ng2_keys = []
         if self.layer2_template:

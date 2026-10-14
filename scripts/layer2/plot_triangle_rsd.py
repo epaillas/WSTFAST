@@ -21,7 +21,8 @@ import halos  # noqa: E402
 FITS = ROOT / "outputs/layer2/rsd_fits"
 MODELS = {"gauss": "Gaussian 2nd layer (paper)", "halo_c": r"non-Gaussian, halo $c_\ell$ fixed",
           "matter_c": r"non-Gaussian, matter $c_\ell$ fixed", "halo_prior": r"non-Gaussian, halo $c_\ell$ + prior",
-          "marg_global": r"non-Gaussian, amplitudes marginalised", "marg_per_l": r"non-Gaussian, amplitudes per $\ell$ marg."}
+          "marg_global": r"non-Gaussian, amplitudes marginalised", "marg_per_l": r"non-Gaussian, amplitudes per $\ell$ marg.",
+          "marg_per_l_ang": r"non-Gaussian, per-$\ell$ marg. + free $a_{\rm NG}$"}
 TRUTH = {"omega_cdm": 0.120925743885, "logA": 3.061143632659324, "h": 0.6711}
 
 

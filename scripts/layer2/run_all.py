@@ -18,7 +18,9 @@ FITS = ROOT / "outputs/layer2/fits"
 MODELS = {"gauss": [], "tree": [], "pade_l": [], "pade_l_cal": ["--fix-calibrated"],
           "pade_l_prior0.5": ["--calibrated-prior", "0.5"],
           "pade_l_cal_fromadjacent": ["--fix-calibrated", "--calibration", "adjacent"],
-          "pade_l_cal_fromnonadjacent": ["--fix-calibrated", "--calibration", "nonadjacent"]}
+          "pade_l_cal_fromnonadjacent": ["--fix-calibrated", "--calibration", "nonadjacent"],
+          "pade_l_cal_fromadjacent_margper_l": ["--fix-calibrated", "--calibration", "adjacent", "--marg", "per_l"],
+          "pade_l_cal_fromnonadjacent_margper_l": ["--fix-calibrated", "--calibration", "nonadjacent", "--marg", "per_l"]}
 
 
 def main():

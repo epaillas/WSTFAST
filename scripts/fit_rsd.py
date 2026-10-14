@@ -79,7 +79,7 @@ def parse_args(argv=None):
     parser.add_argument("--cumulant-points", type=int, default=2**20,
                         help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
     parser.add_argument("--ng-amplitude", nargs="?", const="constant", default=None,
-                        choices=("constant", "slope", "per-scale"),
+                        choices=("constant", "slope", "per-scale", "fog"),
                         help="free amplitude of the S1m Edgeworth correction: one a_ng (default when given without a "
                              "value), a_ng + b_ng [(25 / sigma)^2 - 1], or one a_ng_j per scale")
     parser.add_argument("--gaussian-prior", nargs="+", default=[], metavar="NAME=LOC,SCALE",

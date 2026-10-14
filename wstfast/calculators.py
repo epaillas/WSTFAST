@@ -582,9 +582,13 @@ class S1mTheory(Calculator):
 
     - ``"constant"`` (or True): one factor ``a_ng`` for every block;
     - ``"slope"``: a(sigma) = a_ng + b_ng [(NG_PIVOT / sigma)^2 - 1], so ``a_ng`` is the amplitude at the pivot;
-    - ``"per-scale"``: one factor ``a_ng_j{j}`` per filter scale.
+    - ``"per-scale"``: one factor ``a_ng_j{j}`` per filter scale;
+    - ``"fog"``: the leading Fingers-of-God counterterm of the tree cumulants (Tucci & Philcox 2026), applied to
+      each |m| block, E -> E [1 - c_T 4 <k^2 mu^2>_block / k_NL^2] with k_NL = FOG_KNL and <k^2 mu^2> the mean of
+      k^2 mu^2 over the block's projection of the linear spectrum (the counterterm sum_i k_i^2 mu_i^2 over the four
+      legs, each leg filtered like the block), on top of the linear velocity damping of the cumulants.
 
-    The last two need ``sigmas``, the filter scale of each coefficient.
+    "slope" and "per-scale" need ``sigmas``, the filter scale of each coefficient.
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
@@ -645,6 +649,10 @@ class S1mTheory(Calculator):
                                             self.bias_params["alpha2"].value, ck4, self.k2,
                                             _value(self.k2_params, "alpha_k2"))
             noise = linear_noise = 1 + self.bias_params["alpha0"].value
+        block_scale = None
+        if self.ng_mode == "fog":  # 1 - c_T 4 <k^2 mu^2>_block / k_NL^2, from the block projection of the linear grid
+            weight = self.matrix @ (linear_grid * self.k2mu2).ravel() / (self.matrix @ linear_grid.ravel())
+            block_scale = 1.0 - self.ng_params["c_T"].value * 4 * weight / FOG_KNL**2
         if self.ap is None:
             variances = self.matrix @ grid.ravel() + noise * self.noise
             linear = self.matrix @ linear_grid.ravel() + linear_noise * self.noise
@@ -653,12 +661,12 @@ class S1mTheory(Calculator):
             variances, linear = self.projection(jnp.stack([grid, linear_grid]), qpar, qperp,
                                                 jnp.stack([noise, linear_noise]) * self.shotnoise)
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
-                                             edgeworth_amplitude=amplitude)
+                                             edgeworth_amplitude=amplitude, block_scale=block_scale)
         return self.flattheory
 
     def ng_amplitude(self):
         """Edgeworth amplitude of each coefficient (a scalar for "constant")."""
-        if not self.ng_mode:
+        if not self.ng_mode or self.ng_mode == "fog":
             return 1.0
         if self.ng_mode == "constant":
             return self.ng_params["a_ng"].value
@@ -915,6 +923,10 @@ class S21mTheory(Calculator):
 NG_PIVOT = 25.0
 
 
+#: k_NL^r of the Fingers-of-God counterterm of the S1m cumulants [h/Mpc] (Tucci & Philcox 2026).
+FOG_KNL = 0.3
+
+
 def _ng_amplitudes(mode, coefficients) -> dict:
     """Free Edgeworth amplitudes of S1mTheory (see its docstring)."""
     def amplitude(name, latex):
@@ -932,6 +944,9 @@ def _ng_amplitudes(mode, coefficients) -> dict:
     if mode == "per-scale":
         return {f"a_ng_j{j}": amplitude(f"a_ng_j{j}", rf"a_{{\rm NG}}^{{({j})}}")
                 for j in sorted({c.j for c in coefficients})}
+    if mode == "fog":
+        return {"c_T": Parameter("c_T", value=0.0, prior=dict(limits=[-30.0, 30.0]), ref=dict(dist="norm", loc=0.0, scale=0.5),
+                                 latex=r"c_T")}
     raise ValueError(f"unknown ng_amplitude {mode!r}")
 
 

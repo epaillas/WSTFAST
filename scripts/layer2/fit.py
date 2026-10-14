@@ -67,7 +67,7 @@ EMULATOR_H = ROOT / "outputs/emulators/wst_basis_taylor_superset_5p_full.h5"
 
 
 def build(vector, model, volume, template, covariance_path, vary=common.COSMOLOGY, cov="analytic",
-          template_error=True):
+          template_error=True, marg=None, marg_width=1.0, calibration="all"):
     coeffs = coefficients(vector)
     ds = common.dataset(coeffs)
     emulator = common.EMULATOR if set(vary) <= set(common.COSMOLOGY) else EMULATOR_H
@@ -83,7 +83,28 @@ def build(vector, model, volume, template, covariance_path, vary=common.COSMOLOG
         covariance = ds.covariance("sample") / volume
     if model != "gauss" and template_error:
         covariance = covariance + np.diag(template_variance(template, ds, model))
+    if model != "gauss" and marg is not None:  # analytic marginalisation over the template amplitudes
+        for vector in template_shapes(template, ds, marg, calibration):
+            covariance = covariance + marg_width**2 * np.outer(vector, vector)
     return ds, WSTLikelihood(theory, ds.mean, covariance), covariance
+
+
+def template_shapes(path, ds, marg, calibration="all"):
+    """Data-vector shapes S21 d0 and S21 R_l d2 of the template pieces at the calibrated c_l (fiducial cosmology), all
+    l together ('global') or one pair per l ('per_l'), as in fit_rsd.py --s21-layer2-marg."""
+    template = json.loads(Path(path).read_text())
+    suffix = "" if calibration == "all" else f"_{calibration}"
+    c_l = {int(k): max(v, 0.0) for k, v in template[f"pade_c{suffix}"].items()}
+    rows, groups = template["coefficients"], {}
+    for i, c in enumerate(ds.coefficients):
+        if c.kind != "S21":
+            continue
+        r = rows[c.label]
+        d0, d2 = groups.setdefault(0 if marg == "global" else c.ell, (np.zeros(len(ds.coefficients)),
+                                                                     np.zeros(len(ds.coefficients))))
+        d0[i] = ds.mean[i] * r["gauss"]
+        d2[i] = ds.mean[i] * r["tree"] / (1.0 + c_l[c.ell] * r["var_ref"])
+    return [v for pair in groups.values() for v in pair]
 
 
 def template_variance(path, ds, model):
@@ -119,6 +140,9 @@ def main():
                         help="analytic covariance, or the sample covariance of the Quijote boxes (Hartlap-corrected)")
     parser.add_argument("--vary", nargs="+", default=list(common.COSMOLOGY),
                         help="cosmological parameters (h needs the 5-parameter emulator; n_s, omega_b stay fixed)")
+    parser.add_argument("--marg", choices=("global", "per_l"), default=None,
+                        help="marginalise analytically over the amplitudes of the template pieces d0 and R d2")
+    parser.add_argument("--marg-width", type=float, default=1.0, help="prior width of the amplitudes (fraction)")
     parser.add_argument("--no-template-error", action="store_true",
                         help="leave the Monte Carlo error of the template out of the covariance")
     parser.add_argument("--profile-only", action="store_true")
@@ -127,6 +151,7 @@ def main():
 
     extra = "".join(f"_{n}" for n in args.vary if n not in common.COSMOLOGY)
     extra += "" if args.calibration == "all" else f"_from{args.calibration}"
+    extra += "" if args.marg is None else f"_marg{args.marg}"
     extra += "_mock" if args.cov == "mock" else ""
     extra += "_nomcerr" if args.no_template_error else ""
     mode = "_cal" if args.fix_calibrated else (f"_prior{args.calibrated_prior:g}" if args.calibrated_prior else "")
@@ -134,7 +159,7 @@ def main():
     output = OUT / "fits" / tag
     output.mkdir(parents=True, exist_ok=True)
     ds, lik, covariance = build(args.vector, args.model, args.volume, args.template, args.covariance, args.vary,
-                                args.cov, not args.no_template_error)
+                                args.cov, not args.no_template_error, args.marg, args.marg_width, args.calibration)
     truth = {n: QUIJOTE_COSMOLOGY[n] for n in args.vary}
     if args.fix_calibrated or args.calibrated_prior:
         suffix = "" if args.calibration == "all" else f"_{args.calibration}"
