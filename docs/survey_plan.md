@@ -274,6 +274,37 @@ Gaussian mocks is gone.
 ≤ 0.11σ (rms 0.05σ, χ² 69/60, ≤ 0.26% fractionally) at r = 1.1–2.3 Gpc/h. So the plane-parallel box model × R is
 enough at DESI distances.
 
+**DR1 geometry and the radial integral constraint (2026-10-14).** `SurveyGeometry.from_angular_mask` (with
+`AngularMask` and `desi_radial_density` in `wstfast.survey`) builds the geometry of a DR1 LRG z-bin from the public
+complete Abacus mocks:
+- the angular completeness on HEALPix (nside 128) from the randoms, at 2500 randoms per deg² per file (the median
+  pixel is partly masked by the LRG veto masks, so it can't set the normalisation);
+- n(r) of the data per photometric region;
+- nbar(x) = completeness × n_R(r);
+- regions N (NGC, Dec > 32.375) and S (the rest of NGC and all of SGC).
+
+At 10 Mpc/h cells, the 0.4–0.6 bin is 1.46 (NGC) + 0.87 (SGC) (Gpc/h)³ on 344³ meshes. The areas are 4528 and
+2552 deg², as in the n(z) file.
+
+**RIC.** In these mocks each random takes the Z of a data object of its own photometric region; matching
+TARGETID_DATA shows S drawn jointly from NGC-S and SGC (55/45). This is the DESI fiducial for LRGs (desi-clustering:
+`ric_regions = ["N", "S"]`, 1000 radial bins). So the FKP field has zero mean in every thin shell of every region,
+and neither `GaussianMocks` nor `box_to_survey` had this. `RadialIntegralConstraint` imposes
+δ' = δ − Σ_s n̄δ / Σ_s n̄ jointly over the meshes of both caps.
+
+On Gaussian Kaiser mocks with the local line of sight in the DR1 0.4–0.6 geometry (`scripts/survey/dr1_window.py
+--test ric`, 10 paired realisations, outputs/survey/dr1_ric), the RIC shifts the masked coefficients by (max, rms over
+blocks, in units of one survey's error, ±0.1):
+
+| | NGC S1m | NGC S21m | SGC S1m | SGC S21m |
+|---|---|---|---|---|
+| Max | 0.49 (0.85%) | 0.34 (0.7%) | 0.25 (1.0%) | 0.14 (0.7%) |
+| Rms | 0.18 | 0.12 | 0.08 | 0.05 |
+
+The shift is the same for shell widths of 2.5, 5 and 10 Mpc/h. Against the 25-mock mean it is up to ~2.5σ, so the
+RIC is part of the window: the calibration mocks get it on the survey side (`calibrate_window` and `LambdaWindow`
+take paired survey / reference inputs).
+
 **Next:**
 1. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
    (E4).

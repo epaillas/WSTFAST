@@ -171,3 +171,84 @@ def test_tabulated_rotation_matches_direct_rotation(ell):
     rotation = LOSRotation(ell)
     np.testing.assert_allclose(rotation.rotate(x, rotation.tables(theta, phi)), rotation(x, theta, phi), atol=1e-5)
     np.testing.assert_allclose(rotation.rotate(x, rotation.tables(0.4, -1.2)), rotation(x, 0.4, -1.2), atol=1e-5)
+
+
+def _two_region_cone(nmesh=48):
+    from wstfast.survey import SurveyGeometry
+
+    geometry = SurveyGeometry.cone(nmesh, 960.0, (480.0, 480.0, -500.0), 25.0, 600.0, 1300.0,
+                                   lambda r: 1e-4 * (1 + r / 1000.0))
+    x = np.arange(nmesh)[:, None, None] * geometry.cellsize + 0 * geometry.support
+    geometry.region = np.where(geometry.support, (x > 480.0).astype(int), -1)
+    return geometry
+
+
+def test_radial_integral_constraint_nulls_every_shell_jointly():
+    from wstfast.survey import RadialIntegralConstraint
+
+    a, b = _two_region_cone(), _two_region_cone()
+    b.region = np.where(b.support, 1, -1)  # region 1 continues on a second mesh, as S across the two caps
+    ric = RadialIntegralConstraint(a, b, width=40.0)
+    rng = np.random.default_rng(0)
+    da, db = (0.3 * rng.standard_normal(a.support.shape) for _ in range(2))
+    ca, cb = ric(da, db)
+    np.testing.assert_array_equal(ca[~a.support], da[~a.support])
+    for region in (0, 1):
+        for shell in range(int(1300 / 40) + 1):
+            sums = []
+            for g, c in ((a, ca), (b, cb)):
+                cells = g.support & (g.region == region) & (np.floor(g.distance() / 40.0) == shell)
+                sums.append((g.nbar[cells] * c[cells]).sum())
+            assert abs(sum(sums)) < 1e-9 * max(1.0, a.nbar[a.support].sum())
+
+
+def test_radial_integral_constraint_removes_radial_modes_only():
+    from wstfast.survey import RadialIntegralConstraint
+
+    g = _two_region_cone()
+    ric = RadialIntegralConstraint(g, width=40.0)
+    radial = 0.2 * np.sin(np.floor(g.distance() / 40.0))  # constant on every shell
+    np.testing.assert_allclose(ric(radial)[g.support], 0.0, atol=1e-12)
+    angular = 0.05 * np.cos(np.arange(48))[:, None, None] + 0 * radial  # transverse to the line of sight
+    assert np.abs(ric(angular)[g.support]).max() > 0.01
+
+
+def test_calibrate_window_accepts_survey_reference_pairs():
+    from wstfast.survey import calibrate_window
+
+    n = 24
+    support = np.ones((n,) * 3, dtype=bool)
+    fields = [anisotropic_field(n, seed=s) for s in range(2)]
+    config = WSTConfig(J=1, L=2, sigma0=1.5, min_dj=10, cellsize=1.0)
+    out = calibrate_window(((f, f) for f in fields), config, support, qs=[0.8], los="z")["S1m"]
+    np.testing.assert_allclose(out["ratio"][np.isfinite(out["ratio"])], 1.0, rtol=1e-6)
+    out = calibrate_window(((2 * f, f) for f in fields), config, support, qs=[1.0], los="z")["S1m"]
+    np.testing.assert_allclose(out["ratio"][np.isfinite(out["ratio"])], 2.0, rtol=1e-5)
+
+
+def test_lambda_window_of_full_support_is_one_and_gaussian_s1m_matches():
+    from wstfast.survey import LambdaWindow, noise_variance_maps, s1m_gaussian, signal_variances
+
+    n = 24
+    config = WSTConfig(J=1, L=2, sigma0=1.5, min_dj=10, cellsize=1.0)
+    lattice = Lattice(n)
+    support = np.ones((n,) * 3, dtype=bool)
+    los = np.zeros((3, n, n, n), dtype=np.float32)
+    los[2] = 1.0
+    window = LambdaWindow(config, support, los, lattice)
+    fields = [anisotropic_field(n, seed=s) for s in range(4)]
+    for f in fields:
+        window.add(f, f)
+    for t in window.transfer().values():
+        np.testing.assert_allclose(t, 1.0, rtol=1e-6)
+    # the summed squares of the components are the lattice variance on average over cells
+    pcell = np.abs(np.fft.rfftn(fields[0])) ** 2 / n**3
+    lam = signal_variances(pcell, config, lattice)
+    for (j, ell), x2 in LambdaWindow(config, support, los, lattice).squares(fields[0]):
+        np.testing.assert_allclose(x2.mean(axis=1), lam[j, ell], rtol=1e-4)
+    noise = noise_variance_maps(np.full(support.shape, 0.5), config, support, lattice)
+    pred = s1m_gaussian(lam, config, 0.8, np.ones(n**3), lam_noise=noise)
+    assert np.isfinite(pred[:, :, 0]).all()
+    white = signal_variances(np.full(lattice.kmag.shape, 0.5), config, lattice)
+    for (j, ell), v in noise.items():
+        np.testing.assert_allclose(v, white[j, ell].mean(), rtol=1e-4)

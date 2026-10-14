@@ -22,6 +22,7 @@ With a full support, uniform weights and line of sight z, the coefficients are t
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -122,6 +123,32 @@ def m_powers(components: np.ndarray) -> list[np.ndarray]:
     ell = (len(components) - 1) // 2
     squares = components * components
     return [squares[ell]] + [squares[ell - m] + squares[ell + m] for m in range(1, ell + 1)]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Catalogue coordinates
+
+
+def comoving_distance(z, fiducial=None) -> np.ndarray:
+    """Comoving distance [Mpc/h] of redshifts ``z`` in a flat fiducial (``theory.ap.APFiducial``, default Quijote, the
+    frame of the AP ratios)."""
+    from scipy.integrate import cumulative_trapezoid
+
+    from .theory.ap import QUIJOTE_FIDUCIAL
+
+    fiducial = fiducial or QUIJOTE_FIDUCIAL
+    z = np.asarray(z, dtype=np.float64)
+    grid = np.linspace(0.0, max(float(z.max()), 0.0) * 1.01 + 1e-3, 4096)
+    om, orad, h2 = fiducial.omega_m, fiducial.omega_r, fiducial.h**2
+    e = np.sqrt((orad * (1 + grid) ** 4 + om * (1 + grid) ** 3) / h2 + 1.0 - (om + orad) / h2)
+    return np.interp(z, grid, 2997.92458 * cumulative_trapezoid(1.0 / e, grid, initial=0.0))
+
+
+def sky_to_cartesian(ra, dec, z, fiducial=None) -> np.ndarray:
+    """Comoving Cartesian positions (N, 3) [Mpc/h] of RA, Dec [deg] and redshift, with the observer at the origin."""
+    r = comoving_distance(z, fiducial)
+    ra, dec = np.radians(ra), np.radians(dec)
+    return np.stack([r * np.cos(dec) * np.cos(ra), r * np.cos(dec) * np.sin(ra), r * np.sin(dec)], axis=1)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -443,9 +470,10 @@ def calibrate_window(fields, config: WSTConfig, support: np.ndarray, weights=Non
 
     ``fields`` yields one density mesh per mock (``box_to_survey`` for catalogue mocks, ``GaussianMocks`` for Gaussian
     ones). Each is measured masked by the ``support``, as the data, and unmasked on the same cells with the same weights.
-    The unmasked field is the periodic mock at the effective noise, which is what the box model describes. The survey
-    model is then R x the box model. Pairing cancels the cosmic variance of the mocks, so a few tens of them calibrate
-    R well below the error of one survey.
+    A mock can also be a pair (masked input, reference input), for effects that act on the survey field only, such as
+    the radial integral constraint (``RadialIntegralConstraint``). The unmasked field is the periodic mock at the
+    effective noise, which is what the box model describes. The survey model is then R x the box model. Pairing
+    cancels the cosmic variance of the mocks, so a few tens of them calibrate R well below the error of one survey.
 
     Returns, per key, ``ratio``, ``error`` (scatter of the per-mock ratios over sqrt(number of mocks)) and the raw
     ``masked`` and ``reference`` measurements, of shape (nmocks, ...).
@@ -453,8 +481,9 @@ def calibrate_window(fields, config: WSTConfig, support: np.ndarray, weights=Non
     kwargs = dict(qs=qs, los=los, erosion=erosion, weights=weights)
     masked, reference = {key: [] for key in keys}, {key: [] for key in keys}
     for field in fields:
+        survey, field = field if isinstance(field, tuple) else (field, field)
         lattice = lattice or Lattice(field.shape[0])
-        a = measure_wst_survey(field, config, support=support, lattice=lattice, **kwargs)
+        a = measure_wst_survey(survey, config, support=support, lattice=lattice, **kwargs)
         b = measure_wst_survey(field, config, moment_support=support, lattice=lattice, **kwargs)
         for key in keys:
             masked[key].append(a[key])
@@ -465,6 +494,153 @@ def calibrate_window(fields, config: WSTConfig, support: np.ndarray, weights=Non
         out[key] = dict(ratio=m.mean(axis=0) / ref.mean(axis=0),
                         error=(m / ref).std(axis=0, ddof=1) / np.sqrt(len(m)) if len(m) > 1 else None,
                         masked=m, reference=ref)
+    return out
+
+
+class LambdaWindow:
+    """Window of the first layer at the level of the component variances, which are linear in the spectrum.
+
+    The survey field is the masked (and optionally constrained) field, so the variance of a rotated wavelet component
+    at a support cell x is lambda_m(x) = T_m(x) lambda_m^box + lambda_N(x): the box signal variance times an edge
+    transfer, plus the noise of the cell. For a white spectrum T is exactly the coverage
+    f(x) = (|psi_l|^2 * M)(x) / sum |psi_l|^2, the fraction of the wavelet power inside the support M (computed by FFT,
+    with |psi_l|^2 = sum_m |psi_l^m|^2). For a coloured spectrum T_m(x) = f(x) c_m(f), where the correction c_m is
+    calibrated on paired mocks of the signal in bins of f: c_m = sum X'_m,masked^2 / sum f X'_m,reference^2 over the
+    cells of a bin and the mocks. Pooling the cells of a bin keeps the noise of T far below that of a per-cell ratio
+    (which the concave moments would turn into a bias), and c depends only weakly on the spectrum. The survey moments
+    then follow from the box moment evaluated cell by cell (``s1m_gaussian``).
+
+    ``los``: unit vectors per support cell (3, ncells) or per mesh cell (3, n, n, n), as ``measure_wst_survey``.
+    """
+
+    def __init__(self, config: WSTConfig, support: np.ndarray, los, lattice: Lattice | None = None, nbins: int = 40):
+        self.config, self.support = config, np.asarray(support, dtype=bool)
+        self.index = np.flatnonzero(self.support)
+        self.lattice = lattice or Lattice(support.shape[0])
+        los = np.asarray(los)
+        if los.ndim == 4:
+            los = los.reshape(3, -1)[:, self.index]
+        theta, phi = _angles(los.T.astype(np.float64))
+        self.rotations = {ell: LOSRotation(ell) for ell in range(1, config.L + 1)}
+        self.tables = {ell: r.tables(theta, phi) for ell, r in self.rotations.items()}
+        self.blocks = [(j, ell) for j in range(config.J + 1) for ell in range(config.L + 1)]
+        self.edges = np.linspace(0.0, 1.0 + 1e-6, nbins + 1)
+        self.coverage, self.bins = {}, {}
+        n = support.shape[0]
+        fm = _rfft(self.support.astype(np.float32))
+        for ell in range(config.L + 1):
+            harmonics = self.lattice.harmonics(ell)
+            for j in range(config.J + 1):
+                radial = (-1j) ** ell * self.lattice.radial(config.sigma0 * config.step**j, ell)
+                kernel2 = sum(_irfft(radial * y, n) ** 2 for y in harmonics)
+                kernel2 /= kernel2.sum(dtype=np.float64)
+                f = np.clip(_irfft(_rfft(kernel2) * fm, n).ravel()[self.index], 0.0, 1.0)
+                self.coverage[j, ell] = f.astype(np.float32)
+                self.bins[j, ell] = np.clip(np.digitize(f, self.edges) - 1, 0, nbins - 1)
+        self.nbins = nbins
+        self.masked = {b: np.zeros((2 * b[1] + 1, nbins)) for b in self.blocks}
+        self.reference = {b: np.zeros((2 * b[1] + 1, nbins)) for b in self.blocks}
+        self.count = 0
+
+    def squares(self, field: np.ndarray):
+        """Squared rotated components X'_m(x)^2 (2l + 1, ncells) of every block (j, l) of ``field``."""
+        fk = _rfft(np.asarray(field, dtype=np.float32))
+        for ell in range(self.config.L + 1):
+            harmonics = self.lattice.harmonics(ell)
+            for j in range(self.config.J + 1):
+                x = _components(fk, self.lattice, harmonics, self.config.sigma0 * self.config.step**j, ell, self.index)
+                if ell > 0:
+                    x = self.rotations[ell].rotate(x, self.tables[ell])
+                yield (j, ell), x * x
+
+    def _binned(self, block, values):
+        return np.array([np.bincount(self.bins[block], weights=v, minlength=self.nbins) for v in values])
+
+    def add(self, masked: np.ndarray, reference: np.ndarray):
+        """Accumulate one paired mock: the survey field (zeroed outside the support here) and its periodic parent."""
+        for block, x2 in self.squares(np.where(self.support, masked, 0.0)):
+            self.masked[block] += self._binned(block, x2)
+        for block, x2 in self.squares(reference):
+            self.reference[block] += self._binned(block, x2 * self.coverage[block])
+        self.count += 1
+
+    def correction(self) -> dict:
+        """{(j, l): c (2l + 1, nbins)}, 1 in bins without cells."""
+        return {b: np.where(self.reference[b] > 0, self.masked[b] / np.where(self.reference[b] > 0,
+                                                                             self.reference[b], 1.0), 1.0)
+                for b in self.blocks}
+
+    def transfer(self, correction: dict | None = None) -> dict:
+        """{(j, l): T (2l + 1, ncells)} on the support cells, in the order of ``np.flatnonzero(support)``;
+        ``correction`` = None: from the mocks accumulated here, False: the coverage alone."""
+        if correction is None:
+            correction = self.correction()
+        out = {}
+        for b in self.blocks:
+            c = np.ones((2 * b[1] + 1, self.nbins)) if correction is False else correction[b]
+            out[b] = (self.coverage[b][None, :] * c[:, self.bins[b]]).astype(np.float32)
+        return out
+
+
+def noise_variance_maps(sigma2: np.ndarray, config: WSTConfig, support: np.ndarray, lattice: Lattice | None = None):
+    """Noise variance of a component at each support cell, (|psi_l|^2 * sigma_N^2 M)(x) averaged over m (white noise of
+    variance ``sigma2`` per cell, zero outside the support): {(j, l): (ncells,)}."""
+    lattice = lattice or Lattice(support.shape[0])
+    index = np.flatnonzero(support)
+    n = support.shape[0]
+    fs = _rfft(np.where(support, sigma2, 0.0).astype(np.float32))
+    out = {}
+    for ell in range(config.L + 1):
+        harmonics = lattice.harmonics(ell)
+        for j in range(config.J + 1):
+            radial = (-1j) ** ell * lattice.radial(config.sigma0 * config.step**j, ell)
+            kernel2 = sum(_irfft(radial * y, n) ** 2 for y in harmonics) / (2 * ell + 1)
+            out[j, ell] = _irfft(_rfft(kernel2) * fs, n).ravel()[index]
+    return out
+
+
+def signal_variances(pcell: np.ndarray, config: WSTConfig, lattice: Lattice) -> dict:
+    """Exact lattice variance of each component (m = -l..l, about z) of a periodic field with spectrum ``pcell`` per
+    cell (rfft lattice, P / V_cell): {(j, l): (2l + 1,)}."""
+    n3 = lattice.n**3
+    out = {}
+    for ell in range(config.L + 1):
+        harmonics = lattice.harmonics(ell)
+        for j in range(config.J + 1):
+            radial2 = lattice.radial(config.sigma0 * config.step**j, ell) ** 2
+            out[j, ell] = np.array([np.sum(lattice.multiplicity * pcell * radial2 * y**2) / n3 for y in harmonics])
+    return out
+
+
+def _chi_moment(lam_a, lam_b, q):
+    """E (X_a^2 + X_b^2)^{q/2} for independent Gaussians of variances lam_a, lam_b (lam_b None: one component)."""
+    from scipy.special import gammaln
+
+    p = q / 2
+    if lam_b is None:
+        return (2 * lam_a) ** p * np.exp(gammaln((1 + q) / 2)) / np.sqrt(np.pi)
+    phi = (np.arange(64) + 0.5) * np.pi / 128
+    c2 = np.cos(phi)[:, None] ** 2
+    return 2**p * np.exp(gammaln(1 + p)) * np.mean((np.asarray(lam_a) * c2 + np.asarray(lam_b) * (1 - c2)) ** p, axis=0)
+
+
+def s1m_gaussian(lam_signal: dict, config: WSTConfig, q: float, weights: np.ndarray, transfer: dict | None = None,
+                 lam_noise: dict | None = None) -> np.ndarray:
+    """Gaussian S1m (J + 1, L + 1, L + 1) of a survey: the weighted mean over the support cells of the moment at
+    lambda_m(x) = T_m(x) lambda_m^box + lambda_N(x). ``weights``: per support cell; ``transfer`` (``LambdaWindow``)
+    and ``lam_noise`` (``noise_variance_maps``) default to 1 and 0."""
+    w = np.asarray(weights, dtype=np.float64) / np.sum(weights)
+    out = np.full((config.J + 1, config.L + 1, config.L + 1), np.nan)
+    for (j, ell), lam in lam_signal.items():
+        lam = np.asarray(lam, dtype=np.float64)[:, None]
+        if transfer is not None:
+            lam = transfer[j, ell] * lam
+        if lam_noise is not None:
+            lam = lam + lam_noise[j, ell][None, :]
+        lam = np.broadcast_to(lam, (2 * ell + 1, len(w)))
+        out[j, ell, 0] = _chi_moment(lam[ell], None, q) @ w
+        for m in range(1, ell + 1):
+            out[j, ell, m] = _chi_moment(lam[ell - m], lam[ell + m], q) @ w
     return out
 
 
@@ -483,7 +659,8 @@ class SurveyGeometry:
     """Footprint of a survey on a padded mesh: the support, the target density nbar(x) [(h/Mpc)^3] and the FKP weights.
 
     Mesh node (i, j, k) is at ``offset`` + (i, j, k) boxsize / nmesh [Mpc/h], comoving, with the observer at
-    ``observer``.
+    ``observer``. ``region`` (optional, int per cell): the region within which the randoms take their redshifts from the
+    data, for ``RadialIntegralConstraint`` (for DESI LRGs, the photometric regions N and S, with S across both caps).
     """
 
     support: np.ndarray
@@ -492,6 +669,7 @@ class SurveyGeometry:
     offset: np.ndarray
     observer: np.ndarray
     p0: float = 1e4
+    region: np.ndarray | None = None
 
     @property
     def nmesh(self) -> int:
@@ -548,15 +726,58 @@ class SurveyGeometry:
 
     @classmethod
     def from_randoms(cls, randoms, nmesh: int, nbar_of_r, random_weights=None, padding: float = 300.0,
-                     observer=(0.0, 0.0, 0.0), threshold: float = 0.1, p0: float = 1e4):
+                     observer=(0.0, 0.0, 0.0), threshold: float = 0.1, p0: float = 1e4, regions=None):
         """Footprint of a random catalogue (positions (N, 3) [Mpc/h]): the cells whose random density exceeds
         ``threshold`` times its mean over the cells with randoms, with the radial density ``nbar_of_r`` (completeness
-        is taken as uniform inside the footprint, as for weighted DESI clustering catalogues)."""
+        is taken as uniform inside the footprint, as for weighted DESI clustering catalogues). ``regions`` (int per
+        random): each support cell gets the region holding most of its randoms."""
         mesh = SurveyMesh.from_catalogues(randoms[:1], randoms, nmesh, random_weights=random_weights, padding=padding,
                                           observer=observer, threshold=threshold)
         geometry = cls(mesh.support, np.zeros(mesh.support.shape), mesh.boxsize, mesh.offset, mesh.observer, p0)
         geometry.nbar = np.where(geometry.support, nbar_of_r(geometry.distance()), 0.0)
+        if regions is not None:
+            regions = np.asarray(regions)
+            labels = np.unique(regions)
+            counts = [paint_cic_weighted(randoms[regions == label], None, nmesh, mesh.boxsize, mesh.offset)
+                      for label in labels]
+            geometry.region = np.where(mesh.support, labels[np.argmax(counts, axis=0)], -1)
         return geometry
+
+    @classmethod
+    def from_angular_mask(cls, cap: str, zrange, mask: AngularMask, nbar, cellsize: float = 10.0,
+                          padding: float = 300.0, nmesh: int | None = None, p0: float = 1e4, threshold: float = 0.1):
+        """Geometry of a DESI ``cap`` in the bin ``zrange``: a cube enclosing the footprint with ``padding`` [Mpc/h],
+        the cells inside the bin whose direction has a completeness above ``threshold``, nbar(x) = completeness x
+        nbar(r, region), and the photometric regions (``desi_region``)."""
+        import healpy as hp
+
+        rmin, rmax = comoving_distance(np.array(zrange))
+        ra, dec = hp.pix2ang(mask.nside, mask.pixels, lonlat=True, nest=True)
+        # the extremes of the shell are at its inner and outer radii
+        edges = np.concatenate([sky_to_cartesian(ra, dec, np.full(len(ra), z)) for z in zrange])
+        low, high = edges.min(axis=0) - padding, edges.max(axis=0) + padding
+        if nmesh is None:
+            nmesh = int(np.ceil(np.max(high - low) / cellsize / 8)) * 8
+        boxsize = nmesh * cellsize
+        if boxsize < np.max(high - low):
+            raise ValueError(f"nmesh {nmesh} x cellsize {cellsize} smaller than the footprint,"
+                             f" {np.max(high - low):.0f}")
+        offset = 0.5 * (low + high) - 0.5 * boxsize
+        g = cls(np.zeros((nmesh,) * 3, dtype=bool), np.zeros((nmesh,) * 3), boxsize, offset, np.zeros(3), p0)
+        r = g.distance()
+        shell = np.flatnonzero((r > rmin) & (r < rmax))
+        xyz = np.stack(np.unravel_index(shell, r.shape)).T * cellsize + offset
+        cell_ra = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0])) % 360
+        cell_dec = np.degrees(np.arcsin(xyz[:, 2] / r.ravel()[shell]))
+        completeness = mask(cell_ra, cell_dec)
+        inside = completeness > threshold
+        cells = shell[inside]
+        region = desi_region(cell_dec[inside], cap)
+        g.support.ravel()[cells] = True
+        g.nbar.ravel()[cells] = completeness[inside] * nbar(r.ravel()[cells], region)
+        g.region = np.full((nmesh,) * 3, -1, dtype=np.int8)
+        g.region.ravel()[cells] = region
+        return g
 
 
 def box_to_survey(positions, boxsize: float, geometry: SurveyGeometry, displacements=None, los: str = "local",
@@ -593,3 +814,159 @@ def box_to_survey(positions, boxsize: float, geometry: SurveyGeometry, displacem
         kept.append(x[keep])
     counts = paint_cic_weighted(np.concatenate(kept), None, n, geometry.boxsize, geometry.offset)
     return (counts / (prob * nbar * cell**3) - 1.0).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Radial integral constraint
+
+
+class RadialIntegralConstraint:
+    """Radial integral constraint of randoms whose redshifts are drawn from the data, applied to survey meshes.
+
+    In DESI clustering catalogues each random takes the redshift of a data object of its region (for LRGs the
+    photometric regions N and S, S spanning both caps), so the radial profile of the randoms is that of the data and
+    the mean of delta vanishes in every thin shell of every region. For the FKP field (n_g - alpha n_r) / nbar, with
+    nbar the expected density, this is
+
+        delta'(x) = delta(x) - delta_s,   delta_s = sum_s nbar delta / sum_s nbar,
+
+    with s the (region, distance shell) of x and the sums over the support cells of every geometry, so that a region
+    split across meshes (the two caps) is constrained jointly. It also imposes the global integral constraint.
+    ``width``: shell width [Mpc/h], by default the largest cell size (DESI uses ~1.3 Mpc/h for LRGs, on catalogues).
+    """
+
+    def __init__(self, *geometries: SurveyGeometry, width: float | None = None):
+        width = max(g.cellsize for g in geometries) if width is None else float(width)
+        self.index, self.nbar, labels = [], [], []
+        for g in geometries:
+            index = np.flatnonzero(g.support)
+            region = np.zeros(len(index), dtype=np.int64) if g.region is None else g.region.ravel()[index]
+            if np.any(region < 0):
+                raise ValueError("support cells without a region")
+            shell = np.floor(g.distance().ravel()[index] / width).astype(np.int64)
+            self.index.append(index)
+            self.nbar.append(g.nbar.ravel()[index])
+            labels.append(np.stack([region, shell], axis=1))
+        _, inverse = np.unique(np.concatenate(labels), axis=0, return_inverse=True)
+        inverse = inverse.ravel()
+        self.nkeys = int(inverse.max()) + 1
+        self.keys = np.split(inverse, np.cumsum([len(i) for i in self.index])[:-1])
+        self.norm = sum(np.bincount(k, weights=n, minlength=self.nkeys) for k, n in zip(self.keys, self.nbar))
+
+    def __call__(self, *deltas: np.ndarray):
+        """The constrained meshes, one per geometry, in the same order (a single mesh for a single geometry)."""
+        if len(deltas) != len(self.index):
+            raise ValueError(f"{len(deltas)} meshes for {len(self.index)} geometries")
+        values = [d.ravel()[i].astype(np.float64) for d, i in zip(deltas, self.index)]
+        total = sum(np.bincount(k, weights=n * v, minlength=self.nkeys)
+                    for k, n, v in zip(self.keys, self.nbar, values))
+        mean = total / np.where(self.norm > 0, self.norm, 1.0)
+        out = []
+        for d, i, k, v in zip(deltas, self.index, self.keys, values):
+            d = d.copy()
+            d.ravel()[i] = v - mean[k]
+            out.append(d)
+        return out[0] if len(out) == 1 else tuple(out)
+
+# ---------------------------------------------------------------------------------------------------------------------
+# DESI DR1 clustering catalogues
+#
+# Coordinates are comoving in the Quijote fiducial (``sky_to_cartesian``), the frame of the AP ratios. The geometry of a
+# cap (``SurveyGeometry.from_angular_mask``) is the cells inside the redshift bin whose direction has a non-negligible
+# angular completeness of the randoms, with nbar(x) = completeness x n_R(r), n_R the radial density of the data in the
+# photometric region R of the cell. The completeness is purely angular, which holds for the complete (no fibre
+# assignment) mocks.
+
+DESI_ROOT = Path("data/desi/abacus_v4.2_complete")
+DESI_CAPS = ("NGC", "SGC")
+DESI_REGIONS = ("N", "S")
+DESI_RANDOM_DENSITY = 2500.0  # DR1 randoms per deg^2 per random file
+DESI_NORTH_DEC = 32.375  # N = NGC above this declination (BASS/MzLS); S = the rest of NGC and all of SGC (DECaLS)
+
+
+def desi_catalogue_path(mock: int, cap: str, randoms: int | None = None, tracer: str = "LRG_complete",
+                   root: Path = DESI_ROOT) -> Path:
+    """Path of a clustering catalogue: the data, or random file number ``randoms``."""
+    name = f"{tracer}_{cap}_clustering.dat.fits" if randoms is None else f"{tracer}_{cap}_{randoms}_clustering.ran.fits"
+    return Path(root) / f"mock{mock}" / name
+
+
+def read_desi_catalogue(path, zrange=None, columns=("RA", "DEC", "Z")) -> dict:
+    """Columns of a clustering catalogue, optionally restricted to zrange[0] <= Z < zrange[1]."""
+    import fitsio
+
+    table = fitsio.read(str(path), columns=list(columns))
+    keep = slice(None) if zrange is None else (table["Z"] >= zrange[0]) & (table["Z"] < zrange[1])
+    return {c: np.asarray(table[c][keep], dtype=np.float64) for c in columns}
+
+
+def desi_region(dec, cap: str) -> np.ndarray:
+    """Region index (0 = N, 1 = S) of objects at declination ``dec`` [deg] in ``cap``."""
+    dec = np.asarray(dec)
+    return np.where((cap == "NGC") & (dec > DESI_NORTH_DEC), 0, 1)
+
+
+@dataclass
+class AngularMask:
+    """HEALPix completeness of a random catalogue: randoms per pixel over their density in fully covered pixels, so that
+    partly covered edge pixels and the small veto masks count in proportion."""
+
+    nside: int
+    completeness: np.ndarray  # nested ordering
+
+    @classmethod
+    def from_randoms(cls, ra, dec, density: float, nside: int = 128):
+        """``density``: randoms per deg^2 before masking (DESI DR1: 2500 per random file)."""
+        import healpy as hp
+
+        counts = np.bincount(hp.ang2pix(nside, ra, dec, lonlat=True, nest=True), minlength=hp.nside2npix(nside))
+        expected = density * hp.nside2pixarea(nside, degrees=True)
+        return cls(nside, np.minimum(counts / expected, 1.0))
+
+    def __call__(self, ra, dec) -> np.ndarray:
+        """Completeness at the directions RA, Dec [deg]."""
+        import healpy as hp
+
+        return self.completeness[hp.ang2pix(self.nside, ra, dec, lonlat=True, nest=True)]
+
+    @property
+    def pixels(self) -> np.ndarray:
+        return np.flatnonzero(self.completeness > 0)
+
+    def area(self, region: int | None = None, cap: str | None = None) -> float:
+        """Effective solid angle [sr] (sum of completeness), or that of ``region`` of ``cap``."""
+        import healpy as hp
+
+        weight = self.completeness[self.pixels]
+        if region is not None:
+            ra, dec = hp.pix2ang(self.nside, self.pixels, lonlat=True, nest=True)
+            weight = weight * (desi_region(dec, cap) == region)
+        return weight.sum() * hp.nside2pixarea(self.nside)
+
+
+def desi_radial_density(data: list[dict], masks: dict, zrange, width: float = 10.0):
+    """n_R(r) [(h/Mpc)^3] of each photometric region, from data catalogues ``data`` (dicts with RA, DEC, Z and
+    ``cap``, possibly several mocks) and the angular ``masks`` of each cap: counts per shell / (mocks Omega_R r^2 dr).
+
+    Returns a function (r, region) -> nbar."""
+    rmin, rmax = comoving_distance(np.array(zrange))
+    edges = np.arange(rmin, rmax + width, width)
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    shell = (edges[1:] ** 3 - edges[:-1] ** 3) / 3
+    nmocks = len({d["mock"] for d in data})
+    profiles = []
+    for region in range(len(DESI_REGIONS)):
+        counts = sum(np.histogram(comoving_distance(d["Z"])[desi_region(d["DEC"], d["cap"]) == region],
+                                  edges)[0] for d in data)
+        solid = sum(masks[cap].area(region, cap) for cap in masks)
+        profiles.append(counts / (nmocks * solid * shell) if solid > 0 else np.zeros_like(centres))
+
+    def nbar(r, region):
+        out = np.zeros(np.shape(r))
+        for index, profile in enumerate(profiles):
+            sel = region == index
+            out[sel] = np.interp(r[sel], centres, profile)  # constant beyond the outer shell centres
+        return out
+
+    nbar.edges, nbar.profiles = edges, profiles
+    return nbar
