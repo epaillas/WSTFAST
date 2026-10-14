@@ -209,7 +209,8 @@ def _bispectrum_terms(legs, f):
 
 def _fog_weights(weight, legs):
     """[w | w S | w S^2 / 2] along the output axis, S = sum over legs of k_z^2 / k_NL^2 at each sample: orders 0, 1, 2
-    of the Fingers-of-God counterterm prod_legs (1 - c_v k_z^2 / k_NL^2) ~ 1 - c_v S + c_v^2 S^2 / 2."""
+    of the Fingers-of-God factor exp(-c_v S) = 1 - c_v S + c_v^2 S^2 / 2 + ..., whose first order is the counterterm
+    of Tucci & Philcox (2026) and whose expansion at c_v = (f sigma_v k_NL)^2 / 2 is the Gaussian velocity damping."""
     s = sum(x[:, 2] ** 2 for x in legs) / FOG_KNL**2
     return np.concatenate([weight, weight * s[:, None], weight * (0.5 * s**2)[:, None]], axis=1)
 
