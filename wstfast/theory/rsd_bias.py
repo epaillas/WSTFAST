@@ -48,6 +48,18 @@ SKEW_SIZES = (len(monomial_exponents(3)), len(monomial_exponents(2)), 1)
 #: Columns of the S21m terms: R0, R1, R2 (deg 4), G0 (deg 4), G1 (deg 2), G2, n0 (deg 2), n1.
 S21_SIZES = (70, 70, 70, 70, 15, 1, 15, 1)
 
+#: k_NL of the Fingers-of-God counterterm [h/Mpc] (Tucci & Philcox 2026).
+FOG_KNL = 0.3
+#: Blocks of S21_SIZES that the Fingers-of-God counterterm acts on (R2, G2 and n1 have no short-mode spectra).
+FOG_S21_BLOCKS = (0, 1, 3, 4, 6)
+
+
+def fog_sizes(cubic: bool = False):
+    """Columns appended by ``fog`` (orders 1 and 2 of the counterterm) to the kappa, skewness and S21m outputs."""
+    kappa = KAPPA_SIZES[0] + (sum(CUBIC_KAPPA_SIZES) if cubic else 0)
+    s21 = sum(S21_SIZES[i] for i in FOG_S21_BLOCKS)
+    return dict(kappa=2 * kappa, skewness=2 * SKEW_SIZES[0], s21m=2 * s21)
+
 
 def linear_components(vectors, f):
     """Z1 = b1 + f mu^2 along beta, for wavevectors (..., 3): (..., 5)."""
@@ -195,13 +207,26 @@ def _bispectrum_terms(legs, f):
     return terms
 
 
+def _fog_weights(weight, legs):
+    """[w | w S | w S^2 / 2] along the output axis, S = sum over legs of k_z^2 / k_NL^2 at each sample: orders 0, 1, 2
+    of the Fingers-of-God counterterm prod_legs (1 - c_v k_z^2 / k_NL^2) ~ 1 - c_v S + c_v^2 S^2 / 2."""
+    s = sum(x[:, 2] ** 2 for x in legs) / FOG_KNL**2
+    return np.concatenate([weight, weight * s[:, None], weight * (0.5 * s**2)[:, None]], axis=1)
+
+
 class BiasedRSDS1Basis(RSDS1Basis):
     """Monomial-resolved S1m cumulants of a biased tracer (``cumulants`` only; see the module docstring). With
-    ``cubic``, the kappa columns also hold the cubic-operator trispectrum (CUBIC_KAPPA_SIZES)."""
+    ``cubic``, the kappa columns also hold the cubic-operator trispectrum (CUBIC_KAPPA_SIZES).
 
-    def __init__(self, *args, cubic: bool = False, **kwargs):
+    With ``fog``, the clustering pieces (tree and cubic trispectrum, tree bispectrum) are not velocity-damped but carry
+    the Fingers-of-God counterterm of every external leg instead, stored as the undamped columns (order 0) followed by
+    the orders 1 and 2 of ``_fog_weights`` (``fog_sizes``); ``collapse_fog`` combines them at a given c_v."""
+
+    def __init__(self, *args, cubic: bool = False, fog: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cubic = bool(cubic)
+        self.cubic, self.fog = bool(cubic), bool(fog)
+        if self.fog:
+            self.damping = None
 
     def cumulants(self, klin, pklin, f):
         """``kappa`` (ncoef, L + 1, sum KAPPA_SIZES [+ sum CUBIC_KAPPA_SIZES]): per block sum_{a,b in M} kappa_aabb in
@@ -214,8 +239,9 @@ class BiasedRSDS1Basis(RSDS1Basis):
         self.f = f
         nb = self.lmax + 1
         ncol = sum(KAPPA_SIZES) + (sum(CUBIC_KAPPA_SIZES) if self.cubic else 0)
-        kappa = np.zeros((len(self.coefficients), nb, ncol))
-        skewness = np.zeros((len(self.coefficients), sum(SKEW_SIZES)))
+        extra = fog_sizes(self.cubic) if self.fog else dict(kappa=0, skewness=0)
+        kappa = np.zeros((len(self.coefficients), nb, ncol + extra["kappa"]))
+        skewness = np.zeros((len(self.coefficients), sum(SKEW_SIZES) + extra["skewness"]))
         for ell in sorted({c.ell for c in self.coefficients}):  # kernels once per l, spectra per sigma
             members = [i for i, c in enumerate(self.coefficients) if c.ell == ell]
             legs = [np.asarray(x) for x in self.samplers[ell].legs(0.0)]
@@ -228,11 +254,18 @@ class BiasedRSDS1Basis(RSDS1Basis):
                 filters = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) for x in legs], axis=0)
                 damping = np.prod([self._damp(x / sigma) for x in legs], axis=0)
                 weight = (self.samplers[ell].weights * filters / sigma**9)[:, None] * angles
-                # velocity-damped legs for the clustering piece only: the Poisson pieces are not
-                columns = ([terms(4, sigma, pk, weight * damping[:, None])]
-                           + [terms(d, sigma, pk, weight) for d in (3, 2, 0)])
-                if cubic is not None:  # clustering pieces: damped like the tree trispectrum
-                    columns += [cubic(name, sigma, pk, weight * damping[:, None]) for name in CUBIC_NAMES]
+                # velocity-damped legs (or the FoG counterterm) for the clustering piece only: the Poisson pieces are not
+                if self.fog:
+                    fog = _fog_weights(weight, [x / sigma for x in legs])
+                    tree = np.split(terms(4, sigma, pk, fog), 3)
+                    cubics = [np.split(cubic(name, sigma, pk, fog), 3) for name in CUBIC_NAMES] if cubic else []
+                    columns = ([tree[0]] + [terms(d, sigma, pk, weight) for d in (3, 2, 0)] + [c[0] for c in cubics]
+                               + [x for order in (1, 2) for x in [tree[order]] + [c[order] for c in cubics]])
+                else:
+                    columns = ([terms(4, sigma, pk, weight * damping[:, None])]
+                               + [terms(d, sigma, pk, weight) for d in (3, 2, 0)])
+                    if cubic is not None:  # clustering pieces: damped like the tree trispectrum
+                        columns += [cubic(name, sigma, pk, weight * damping[:, None]) for name in CUBIC_NAMES]
                 kappa[index, :ell + 1] = np.concatenate(columns, axis=-1)
             del terms, cubic
             if ell % 2:
@@ -248,19 +281,33 @@ class BiasedRSDS1Basis(RSDS1Basis):
                                   axis=0)
                 damping = np.prod([self._damp(x / sigma) for x in legs], axis=0)
                 weight = (self.bis_samplers[ell].weights * factors / sigma**6)[:, None]
-                skewness[index] = np.concatenate([terms(3, sigma, pk, weight * damping[:, None])[0]]
-                                                 + [terms(d, sigma, pk, weight)[0] for d in (2, 0)])
+                if self.fog:
+                    tree = terms(3, sigma, pk, _fog_weights(weight, [x / sigma for x in legs]))
+                    skewness[index] = np.concatenate([tree[0]] + [terms(d, sigma, pk, weight)[0] for d in (2, 0)]
+                                                     + [tree[1], tree[2]])
+                else:
+                    skewness[index] = np.concatenate([terms(3, sigma, pk, weight * damping[:, None])[0]]
+                                                     + [terms(d, sigma, pk, weight)[0] for d in (2, 0)])
         return kappa, skewness
 
 
 class BiasedModulusSpectraRSD(ModulusSpectraRSD):
     """Monomial-resolved ``ModulusSpectraRSD``: ``__call__`` returns ``grids`` (nfield, nk, nmu, 296) with the
-    columns [R0 | R1 | R2 | G0 | G1 | G2] and ``norms`` (nfield, 16) with [n0 | n1] (see the module docstring)."""
+    columns [R0 | R1 | R2 | G0 | G1 | G2] and ``norms`` (nfield, 16) with [n0 | n1] (see the module docstring).
 
-    def __call__(self, pk, f: float, sigma_v: float):
+    With ``fog``, the short modes are not velocity-damped but carry the Fingers-of-God counterterm, one factor
+    (1 - c_v k_z^2 / k_NL^2) per leg (two per P_L of a short mode, one per leg of the response), and the orders 1 and 2
+    in c_v of the blocks R0, R1, G0, G1 (grids) and n0 (norms) are appended: grids
+    [... | R0' | R1' | G0' | G1' | R0'' | R1'' | G0'' | G1''], norms [n0 | n1 | n0' | n0'']. R0 = r^2 is expanded to
+    second order in c_v consistently: R0' = 2 r rho1, R0'' = rho1^2 + 2 r rho2 with r = r0 - c_v rho1 + c_v^2 rho2."""
+
+    def __call__(self, pk, f: float, sigma_v: float, fog: bool = False):
+        if fog:
+            sigma_v = 0.0
         damp = lambda k, mu: np.exp(-0.5 * (f * k * mu * sigma_v) ** 2)  # noqa: E731
         p, w = self.p, self.weights
         dp, pkp = damp(p, self.mup), pk(p)
+        sp = (p * self.mup) ** 2 / FOG_KNL**2  # k_z^2 / k_NL^2 of the leg p
         z1p = linear_components(self.pvec, f)
         psp = (pkp * dp**2)[:, None] * product_coefficients(z1p, z1p)  # (np, 15)
         radial = {s: np.exp(-0.5 * (s * p) ** 2) for s, _, _ in self.fields}
@@ -269,10 +316,12 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
             c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
             rp = (s * p) ** ell * radial[s]
             a = w * rp**2 * c2w * np.abs(self.harmonics[ell, m]) ** 2
-            norms.append(np.concatenate([a @ psp, [np.sum(a)]]))
+            extra = [a @ (psp * (2 * sp)[:, None]), a @ (psp * (2 * sp**2)[:, None])] if fog else []
+            norms.append(np.concatenate([a @ psp, [np.sum(a)], *extra]))
             kernels.append((-1) ** ell * c2w * rp)
         nk, nmu = self.k.size, self.mu.size
-        grids = np.zeros((len(self.fields), nk, nmu, sum(S21_SIZES[:6])))
+        ncol = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
+        grids = np.zeros((len(self.fields), nk, nmu, ncol))
         for i, kk in enumerate(self.k):
             pkk = pk(np.array([kk]))[0]
             for a, mk in enumerate(self.mu):
@@ -281,6 +330,7 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                 qn = np.sqrt(np.sum(qvec**2, axis=-1))
                 muq = qvec[:, 2] / np.maximum(qn, 1e-30)
                 dq, pkq = damp(qn, muq), pk(qn)
+                sq = qvec[:, 2] ** 2 / FOG_KNL**2
                 z1q = linear_components(qvec, f)
                 minus = np.broadcast_to(-kvec, qvec.shape)
                 long = 2 * ((pkq * dp * dq)[:, None] * product_coefficients(galaxy_kernel(np.stack([qvec, minus], axis=-2), f), z1q)
@@ -290,6 +340,12 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                 pair = w[:, None] * monomial_product(psp, 2, psq, 2)
                 z1k = monomial_product(linear_components(kvec, f), 1, np.eye(5)[0], 1)  # beta_0 Z1(K), degree 2
                 shot = w[:, None] * (psp + psq)
+                if fog:
+                    sl, s2 = sp + sq, 2 * (sp + sq)  # legs of the response; of the pair of spectra
+                    long1, long2 = long * sl[:, None], long * (0.5 * sl**2)[:, None]
+                    pair1, pair2 = pair * s2[:, None], pair * (0.5 * s2**2)[:, None]
+                    shot1 = w[:, None] * (psp * (2 * sp)[:, None] + psq * (2 * sq)[:, None])
+                    shot2 = w[:, None] * (psp * (2 * sp**2)[:, None] + psq * (2 * sq**2)[:, None])
                 cache = {}
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
@@ -298,21 +354,29 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                     r = kernel @ long / 2
                     r1 = np.sum(w * kernel) / 2 * z1k
                     k2 = kernel**2 / 2
-                    grids[index, i, a] = np.concatenate([monomial_product(r, 2, r, 2) * pkk,
-                                                         2 * monomial_product(r, 2, r1, 2) * pkk,
-                                                         monomial_product(r1, 2, r1, 2) * pkk,
-                                                         k2 @ pair, k2 @ shot, [np.sum(w * k2)]])
+                    columns = [monomial_product(r, 2, r, 2) * pkk, 2 * monomial_product(r, 2, r1, 2) * pkk,
+                               monomial_product(r1, 2, r1, 2) * pkk, k2 @ pair, k2 @ shot, [np.sum(w * k2)]]
+                    if fog:
+                        rho1, rho2 = kernel @ long1 / 2, kernel @ long2 / 2
+                        columns += [2 * monomial_product(r, 2, rho1, 2) * pkk, 2 * monomial_product(rho1, 2, r1, 2) * pkk,
+                                    k2 @ pair1, k2 @ shot1,
+                                    (monomial_product(rho1, 2, rho1, 2) + 2 * monomial_product(r, 2, rho2, 2)) * pkk,
+                                    2 * monomial_product(rho2, 2, r1, 2) * pkk, k2 @ pair2, k2 @ shot2]
+                    grids[index, i, a] = np.concatenate(columns)
         return grids, np.array(norms)
 
 
 class BiasedRSDS21mBasis:
-    """S21m terms of a biased tracer: (nentry, sum S21_SIZES), columns [R0 | R1 | R2 | G0 | G1 | G2 | n0 | n1]."""
+    """S21m terms of a biased tracer: (nentry, sum S21_SIZES), columns [R0 | R1 | R2 | G0 | G1 | G2 | n0 | n1]. With
+    ``fog`` (Fingers-of-God counterterm instead of the velocity damping, see ``BiasedModulusSpectraRSD``), followed by
+    the orders 1 and 2 in c_v of the blocks FOG_S21_BLOCKS, [R0' | R1' | G0' | G1' | n0' | R0'' | ... | n0'']."""
 
     def __init__(self, config, coefficients, boxsize: float = 1000.0, nmesh: int = 256,
-                 kmax: float = 0.12, nk: int = 24, nmu: int = 6, sigma_v_factor: float = SIGMA_V_FACTOR, **quadrature):
+                 kmax: float = 0.12, nk: int = 24, nmu: int = 6, sigma_v_factor: float = SIGMA_V_FACTOR,
+                 fog: bool = False, **quadrature):
         from numpy.polynomial.legendre import leggauss
 
-        self.config, self.coefficients = config, list(coefficients)
+        self.config, self.coefficients, self.fog = config, list(coefficients), bool(fog)
         #: Velocity damping of the modulus spectra in units of the linear sigma_v. The matter value (2) is too strong
         #: for halos: 1 brings the measured response and noise of the halo moduli into agreement (and removes the
         #: S21m amplitude systematic; scripts/feasibility/modulus_response_noise.py --sigma-v-factor).
@@ -328,12 +392,20 @@ class BiasedRSDS21mBasis:
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp))  # noqa: E731
         sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
-        grids, norms = self.spectra(pk, f, sigma_v)
+        grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog)
         nfield, nk, nmu, ncol = grids.shape
         flat = np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu)
         proj = self.projection
         lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
-        return np.concatenate([lam, norms[proj.field_index]], axis=1)
+        norms = norms[proj.field_index]
+        if not self.fog:
+            return np.concatenate([lam, norms], axis=1)
+        nbase, norder = sum(S21_SIZES[:6]), sum(S21_SIZES[i] for i in (0, 1, 3, 4))
+        n0 = S21_SIZES[6]
+        base = [lam[:, :nbase], norms[:, :n0 + 1]]
+        orders = [[lam[:, nbase + o * norder:nbase + (o + 1) * norder], norms[:, n0 + 1 + o * n0:n0 + 1 + (o + 1) * n0]]
+                  for o in range(2)]
+        return np.concatenate(base + orders[0] + orders[1], axis=1)
 
 
 def split(values, sizes):
@@ -343,28 +415,80 @@ def split(values, sizes):
 
 
 
-def biased_scalings(ratio, cubic: bool = False):
+def biased_scalings(ratio, cubic: bool = False, fog: bool = False):
     """Powers of A_s / A_s,fid of every biased basis output (grid rows, kappa / skewness / S21m columns), so that a
     Taylor emulator is nearly exact in logA. ``cubic``: the kappa columns include CUBIC_KAPPA_SIZES (P^3, like the
-    tree trispectrum)."""
+    tree trispectrum). ``fog``: with the counterterm orders of ``fog_sizes`` (the powers of the blocks they expand)."""
     import jax.numpy as jnp
 
     xp = np if isinstance(ratio, (float, np.floating)) else jnp
     powers = lambda counts: xp.concatenate([xp.full((n,), 1.0) * ratio**p for p, n in counts])  # noqa: E731
+    clustering = [(3, KAPPA_SIZES[0])] + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else [])
+    s21 = list(zip((3, 2, 1, 2, 1, 0, 1, 0), S21_SIZES))
+    s21_fog = [s21[i] for i in FOG_S21_BLOCKS]
     return dict(grid=powers([(1, len(TREE)), (2, len(LOOP)), (1, 3)]),
                 kappa=powers(list(zip((3, 2, 1, 0), KAPPA_SIZES))
-                             + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else [])),
-                skewness=powers(zip((2, 1, 0), SKEW_SIZES)),
-                s21m=powers(zip((3, 2, 1, 2, 1, 0, 1, 0), S21_SIZES)))
+                             + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else []) + (2 * clustering if fog else [])),
+                skewness=powers(list(zip((2, 1, 0), SKEW_SIZES)) + (2 * [(2, SKEW_SIZES[0])] if fog else [])),
+                s21m=powers(s21 + (2 * s21_fog if fog else [])))
+
+
+def is_fog(kappa=None, s21m=None) -> bool:
+    """Whether basis outputs hold the Fingers-of-God counterterm orders (from their number of columns)."""
+    if s21m is not None and s21m.shape[-1] > 0:
+        return s21m.shape[-1] == sum(S21_SIZES) + fog_sizes()["s21m"]
+    n = kappa.shape[-1]
+    return n in (sum(KAPPA_SIZES) + fog_sizes()["kappa"], sum(KAPPA_SIZES) + sum(CUBIC_KAPPA_SIZES) + fog_sizes(True)["kappa"])
+
+
+def _collapse(values, base, blocks, c, order):
+    """values[..., :base] with the orders 1 and 2 (the trailing columns, ``blocks`` the (start, size) of each block
+    they expand, in order) combined as X0 - c X1 + c^2 X2 (order 2) or X0 - c X1 (order 1)."""
+    import jax.numpy as jnp
+
+    xp = np if isinstance(values, np.ndarray) and isinstance(c, (int, float, np.floating)) else jnp
+    out = values[..., :base]
+    n = sum(size for _, size in blocks)
+    for o, factor in ((1, -c), (2, c**2)):
+        if o > order:
+            break
+        column, pieces, last = base + (o - 1) * n, [], 0
+        for start, size in blocks:
+            pieces += [out[..., last:start], out[..., start:start + size] + factor * values[..., column:column + size]]
+            last, column = start + size, column + size
+        out = xp.concatenate(pieces + [out[..., last:]], axis=-1)
+    return out
+
+
+def collapse_fog(kappa=None, skewness=None, s21m=None, c_s1=0.0, c_s21=0.0, order: int = 2):
+    """Standard-layout kappa, skewness and S21m columns from outputs with the Fingers-of-God counterterm orders (see
+    ``fog_sizes``), at the counterterm c_s1 of the first-layer cumulants and c_s21 of the modulus spectra. Arguments
+    left None are returned None."""
+    out = []
+    if kappa is not None:
+        cubic = kappa.shape[-1] != sum(KAPPA_SIZES) + fog_sizes()["kappa"]
+        base = sum(KAPPA_SIZES) + (sum(CUBIC_KAPPA_SIZES) if cubic else 0)
+        blocks = [(0, KAPPA_SIZES[0])] + ([(sum(KAPPA_SIZES), sum(CUBIC_KAPPA_SIZES))] if cubic else [])
+        out.append(_collapse(kappa, base, blocks, c_s1, order))
+    else:
+        out.append(None)
+    out.append(None if skewness is None else _collapse(skewness, sum(SKEW_SIZES), [(0, SKEW_SIZES[0])], c_s1, order))
+    if s21m is not None:
+        edges = np.cumsum((0,) + S21_SIZES)
+        out.append(_collapse(s21m, sum(S21_SIZES), [(edges[i], S21_SIZES[i]) for i in FOG_S21_BLOCKS], c_s21, order))
+    else:
+        out.append(None)
+    return tuple(out)
 
 
 def biased_cumulant_correction(config, coefficients, klin, pklin, f, npoints: int = 2**16,
-                               npoints_reference: int = 2**20, damping="linear", cubic: bool = False):
+                               npoints_reference: int = 2**20, damping="linear", cubic: bool = False,
+                               fog: bool = False):
     """``rsd.cumulant_correction`` of the biased cumulants: column-wise reference / base ratios (1 where the base
     column is negligible)."""
-    base = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints, lattice=False, cubic=cubic)
+    base = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints, lattice=False, cubic=cubic, fog=fog)
     reference = BiasedRSDS1Basis(config, coefficients, damping=damping, npoints=npoints_reference, lattice=False,
-                                 cubic=cubic)
+                                 cubic=cubic, fog=fog)
     out = []
     for b, r in zip(base.cumulants(klin, pklin, f), reference.cumulants(klin, pklin, f)):
         tiny = 1e-8 * np.max(np.abs(b), axis=tuple(range(b.ndim - 1)), keepdims=True)

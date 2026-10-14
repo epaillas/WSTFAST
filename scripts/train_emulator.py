@@ -117,10 +117,11 @@ def train_rsd(args):
     bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
-                    bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases)
+                    bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
+                    fog=args.fog)
     basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
                      kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer, s21_damping=args.s21_damping,
-                     cubic_biases=args.cubic_biases)
+                     cubic_biases=args.cubic_biases, fog=args.fog)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -134,14 +135,16 @@ def train_rsd(args):
     grid = RSDGrid(kmax=args.kmax)  # the same grid as the basis
     projections = dict(s1m=S1mProjection(config, coefficients, grid), pk=MultipoleProjection(power.edges, grid))
     # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles.
+    fog = dict(fog="shared") if args.fog else {}  # validated at c_v = 0 (the undamped orders 0)
+
     def theories(b):
         out = [S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b, shotnoise=s1m.shotnoise,
-                         tracer=args.tracer),
+                         tracer=args.tracer, **fog),
                RSDPowerTheory(projections["pk"], basis=b, shotnoise=power.shotnoise, tracer=args.tracer)]
         if s21:
             out.append(S21mTheory(S1mProjection(config, first_layer, grid), s21, first_layer, q=config.q, basis=b,
                                   cumulant_index=[coefficients.index(c) for c in first_layer],
-                                  shotnoise=s1m.shotnoise, tracer=args.tracer))
+                                  shotnoise=s1m.shotnoise, tracer=args.tracer, **fog))
         return out
 
     graphs = {name: build(JointTheory(theories(b))) for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
@@ -178,6 +181,9 @@ def main():
                         help="rsd: biased-tracer basis (bias-monomial coefficients; wstfast.theory.rsd_bias)")
     parser.add_argument("--cubic-biases", action="store_true",
                         help="rsd, biased tracer: also emulate the S1m trispectrum of the cubic operators b3, bG3, bdG2")
+    parser.add_argument("--fog", action="store_true",
+                        help="rsd, biased tracer: Fingers-of-God counterterm columns (orders 0-2 in c_v) in the S1m "
+                             "cumulants and the S21m terms, in place of the velocity damping")
     parser.add_argument("--s21-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j1 of the S21m terms")
     parser.add_argument("--s21-min-scale2", type=float, default=70.0, help="rsd: smallest sigma_j2 of the S21m terms")
     parser.add_argument("--s21-min-ratio", type=float, default=2.8, help="rsd: smallest sigma_j2 / sigma_j1 of S21m")

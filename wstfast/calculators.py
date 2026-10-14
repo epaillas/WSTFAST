@@ -245,13 +245,13 @@ class RSDBasis(Calculator):
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                  s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
-                 cubic_biases: bool = False):
+                 cubic_biases: bool = False, fog: bool = False):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
-                      cubic_biases: bool = False):
+                      cubic_biases: bool = False, fog: bool = False):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -264,15 +264,26 @@ class RSDBasis(Calculator):
             raise ValueError("cubic_biases needs tracer='biased'")
         #: The kappa columns also hold the trispectrum of the cubic operators (``rsd_bias.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
+        #: Fingers-of-God counterterm columns instead of the velocity damping, in the S1m cumulants and the S21m terms
+        #: (``rsd_bias.fog_sizes``; combined at the counterterm c_v by S1mTheory / S21mTheory).
+        self.fog = bool(fog)
+        if self.fog and not biased:
+            raise ValueError("fog needs tracer='biased'")
+        if self.fog and s21_damping is not None:
+            raise ValueError("fog replaces the velocity damping: drop s21_damping")
         self.grid = (BiasedRSDGrid if biased else RSDGrid)(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         cubic = dict(cubic=True) if self.cubic_biases else {}
+        if self.fog:
+            cubic["fog"] = True
         self.cumulant_model = ((BiasedRSDS1Basis if biased else RSDS1Basis)(config, self.coefficients, damping=damping,
                                                                              npoints=npoints, lattice=False, **cubic)
                                if self.coefficients else None)
         if s21_damping is not None and not biased:
             raise ValueError("s21_damping is only implemented for tracer='biased'")
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
+        if self.fog:
+            s21_kwargs["fog"] = True
         self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients), **s21_kwargs)
                           if len(s21_coefficients) else None)
         self.klin = np.geomspace(1e-4, 10.0, 1024)
@@ -289,7 +300,7 @@ class RSDBasis(Calculator):
         if self.tracer == "biased":
             from .theory.rsd_bias import biased_scalings
 
-            scale = biased_scalings(ratio, cubic=self.cubic_biases)
+            scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog)
             self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
             if self.cumulant_model is not None:
                 kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
@@ -337,10 +348,13 @@ def s21m_rows(basis):
 
 
 def biased_rows(basis):
-    """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude."""
-    from .theory.rsd_bias import KAPPA_SIZES, biased_scalings
+    """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude (with the
+    Fingers-of-God counterterm orders of a ``fog`` basis; see ``rsd_bias.collapse_fog``)."""
+    from .theory.rsd_bias import CUBIC_KAPPA_SIZES, KAPPA_SIZES, biased_scalings, fog_sizes, is_fog
 
-    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=basis.kappa.shape[-1] > sum(KAPPA_SIZES))
+    fog = is_fog(basis.kappa, basis.s21m_terms)
+    cubic = basis.kappa.shape[-1] >= sum(KAPPA_SIZES) + sum(CUBIC_KAPPA_SIZES) + (fog_sizes(True)["kappa"] if fog else 0)
+    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog)
     return (basis.grid_terms * scale["grid"][:, None, None], basis.kappa * scale["kappa"],
             basis.skewness2 * scale["skewness"], basis.s21m_terms * scale["s21m"])
 
@@ -588,14 +602,19 @@ class S1mTheory(Calculator):
       k^2 mu^2 over the block's projection of the linear spectrum (the counterterm sum_i k_i^2 mu_i^2 over the four
       legs, each leg filtered like the block), on top of the linear velocity damping of the cumulants.
 
+    ``fog`` (a basis trained with ``fog=True``): the Fingers-of-God counterterm c_v of every external leg of the tree
+    cumulants in place of the velocity damping (``rsd_bias.collapse_fog``); "shared" (c_v, also the S21m one) or
+    "separate" (c_v_s1). c_v = (f sigma_v k_NL)^2 / 2 reproduces the linear damping to second order.
+
     "slope" and "per-scale" need ``sigmas``, the filter scale of each coefficient.
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
                  sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None,
-                 kappa_shot: bool = False):
+                 kappa_shot: bool = False, fog: str | None = None):
         self.basis = basis
+        self.fog_params = {k: v for k, v in _fog_counterterms(fog).items() if k == "s1"}
         self.k2_params = _k2_stochastic(k2_stochastic)
         self.bias_params = BiasParameters(cubic_biases, kappa_shot).params if tracer == "biased" else {}
         self.counterterms = _rsd_counterterms("", "")
@@ -607,7 +626,7 @@ class S1mTheory(Calculator):
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
                       sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
-                      cubic_biases: str | None = None, kappa_shot: bool = False):
+                      cubic_biases: str | None = None, kappa_shot: bool = False, fog: str | None = None):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
@@ -640,8 +659,12 @@ class S1mTheory(Calculator):
         else:  # the Gaussian part of the Edgeworth normalisation includes the shot noise
             rows, kappa, skewness, _ = biased_rows(self.basis)
             beta = bias_beta(self.bias_params)
-            kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index] * self.kappa_ratio,
-                                                skewness[self.cumulant_index] * self.skewness_ratio, beta,
+            kappa, skewness = kappa[self.cumulant_index] * self.kappa_ratio, skewness[self.cumulant_index] * self.skewness_ratio
+            if _fog_check(self.basis, self.fog_params):
+                from .theory.rsd_bias import collapse_fog
+
+                kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
+            kappa, skewness2 = biased_cumulants(kappa, skewness, beta,
                                                 self.shotnoise, cubic_values(self.bias_params),
                                                 kappa_shot_values(self.bias_params))
             ck4 = self.k4_params["ck4"].value if self.k4_params else None
@@ -699,10 +722,13 @@ class S21mTheory(Calculator):
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                 cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None):
+                 cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
+                 fog: str | None = None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        # Fingers-of-God counterterm of a fog basis: c_s1 on the first-layer cumulants, c_s21 on the modulus spectra.
+        self.fog_params = _fog_counterterms(fog)
         # Non-Gaussian second layer (``layer2``, see __call__): constants c_l of the beyond-tree suppression, fixed or
         # free with a Gaussian prior of width layer2['prior'] x c_l (at least its calibration error) around the calibration.
         self.ng2_params = {}
@@ -769,7 +795,8 @@ class S21mTheory(Calculator):
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
-                      cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None):
+                      cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
+                      fog: str | None = None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         self.layer2 = layer2 is not None
@@ -841,6 +868,11 @@ class S21mTheory(Calculator):
             from .theory.rsd_bias import S21_SIZES, split
 
             rows, kappa, skewness, s21 = biased_rows(self.basis)
+            if _fog_check(self.basis, self.fog_params):
+                from .theory.rsd_bias import collapse_fog
+
+                kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
+                s21 = collapse_fog(s21m=s21, c_s21=_fog_value(self.fog_params, "s21"))[2]
             beta = bias_beta(self.bias_params)
             noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
             m2, m4 = monomials(beta, 2), monomials(beta, 4)
@@ -925,6 +957,38 @@ NG_PIVOT = 25.0
 
 #: k_NL^r of the Fingers-of-God counterterm of the S1m cumulants [h/Mpc] (Tucci & Philcox 2026).
 FOG_KNL = 0.3
+
+
+def _fog_counterterms(mode) -> dict:
+    """Fingers-of-God counterterm of a ``fog`` basis (``rsd_bias.collapse_fog``): ``"shared"``, one c_v for the
+    first-layer cumulants (S1m and the one-point factor of S21m) and the modulus spectra of S21m; ``"separate"``,
+    c_v_s1 and c_v_s21. Keyed by role ("s1", "s21"); shared: "s1" only (see ``_fog_value``)."""
+    if not mode:
+        return {}
+    def counterterm(name, latex):
+        return Parameter(name, value=0.0, prior=dict(limits=[-5.0, 15.0]), ref=dict(dist="norm", loc=0.5, scale=0.2),
+                         latex=latex)
+
+    if mode == "shared":
+        return {"s1": counterterm("c_v", r"c_v")}
+    if mode == "separate":
+        return {"s1": counterterm("c_v_s1", r"c_v^{(1)}"), "s21": counterterm("c_v_s21", r"c_v^{(2)}")}
+    raise ValueError(f"unknown fog mode {mode!r}")
+
+
+def _fog_value(params, role):
+    return params.get(role, params["s1"]).value
+
+
+def _fog_check(basis, params):
+    from .theory.rsd_bias import is_fog
+
+    fog = is_fog(basis.kappa, basis.s21m_terms)
+    if fog and not params:
+        raise ValueError("the basis holds the Fingers-of-God counterterm columns: set fog='shared' or 'separate'")
+    if params and not fog:
+        raise ValueError("fog needs a basis trained with fog=True")
+    return fog
 
 
 def _ng_amplitudes(mode, coefficients) -> dict:

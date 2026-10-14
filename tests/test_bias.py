@@ -177,3 +177,33 @@ def test_biased_theories_matter_limit():
     matter = np.asarray(build(theory("matter"))({}))
     biased = np.asarray(build(theory("biased"))({"b1": 1.0}))
     np.testing.assert_allclose(biased, matter, rtol=1e-8)
+
+
+def test_fog_counterterm_reproduces_damping():
+    """At c_v = (f sigma_v k_NL)^2 / 2, the second-order Fingers-of-God counterterm columns reproduce the velocity-
+    damped S1m cumulants and S21m terms (damping 1 x linear here) to second order; order 0 is the undamped basis."""
+    from wstfast.theory.rsd_bias import (FOG_KNL, KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis,
+                                         BiasedRSDS21mBasis, collapse_fog)
+
+    klin, pklin = linear_power()
+    f = 0.76
+    sigma_v = float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+    c = 0.5 * (f * sigma_v * FOG_KNL) ** 2
+    s1 = [c_ for c_ in select_coefficients(SUPERSET, s1_min_scale=25.0) if c_.kind == "S1" and c_.ell in (0, 2)][:2]
+    kwargs = dict(npoints=2**10, lattice=False, cubic=True)
+    damped = BiasedRSDS1Basis(SUPERSET, s1, damping=sigma_v, **kwargs).cumulants(klin, pklin, f)
+    undamped = BiasedRSDS1Basis(SUPERSET, s1, damping=None, **kwargs).cumulants(klin, pklin, f)
+    fog = BiasedRSDS1Basis(SUPERSET, s1, fog=True, **kwargs).cumulants(klin, pklin, f)
+    np.testing.assert_allclose(collapse_fog(*fog, c_s1=0.0)[0], undamped[0], rtol=1e-12)
+    for got, want, n in zip(collapse_fog(*fog, c_s1=c)[:2], damped, (KAPPA_SIZES[0], SKEW_SIZES[0])):
+        scale = np.max(np.abs(want[..., :n]))
+        assert np.max(np.abs(got - want)) < 1e-4 * scale
+    s21 = [c_ for c_ in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
+           if c_.kind == "S21"][:1]
+    quad = dict(nk=6, nmu=3, npts=16, nx=8, nphi=6)
+    damped = BiasedRSDS21mBasis(SUPERSET, s21, sigma_v_factor=1.0, **quad)(klin, pklin, f)
+    fog = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
+    np.testing.assert_allclose(fog[:, :sum(S21_SIZES)], BiasedRSDS21mBasis(SUPERSET, s21, sigma_v_factor=0.0, **quad)(
+        klin, pklin, f), rtol=1e-12)
+    got = collapse_fog(s21m=fog, c_s21=c)[2]
+    assert np.max(np.abs(got - damped)) < 1e-3 * np.max(np.abs(damped))

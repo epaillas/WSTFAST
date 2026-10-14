@@ -78,6 +78,9 @@ def parse_args(argv=None):
     parser.add_argument("--fix", nargs="+", default=None, metavar="NAME=VALUE")
     parser.add_argument("--cumulant-points", type=int, default=2**20,
                         help="Sobol points of the control-variate correction of the S1m cumulants (0: none)")
+    parser.add_argument("--fog", choices=("shared", "separate"), default=None,
+                        help="Fingers-of-God counterterm of an emulator trained with --fog: one c_v for every tree-level "
+                             "short-mode leg of S1m and S21m (shared), or c_v_s1 and c_v_s21 (separate)")
     parser.add_argument("--ng-amplitude", nargs="?", const="constant", default=None,
                         choices=("constant", "slope", "per-scale", "fog"),
                         help="free amplitude of the S1m Edgeworth correction: one a_ng (default when given without a "
@@ -192,6 +195,8 @@ def load_correction(args, config, coefficients, settings):
     pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
     f = float(fourier.sigma8_z(settings["z"], of="theta_cb") / fourier.sigma8_z(settings["z"], of="delta_cb"))
     cubic = dict(cubic=True) if settings.get("cubic_biases") else {}
+    if settings.get("fog"):
+        cubic["fog"] = True
     kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=args.cumulant_points, **cubic)
     np.savez(cache, kappa=kappa, skewness2=skewness2, labels=np.array([c.label for c in every]))
     print(f"wrote {cache}")
@@ -294,6 +299,9 @@ def build_problem(args, basis=None, settings=None):
     cubic_biases = getattr(args, "cubic_biases", None)
     if cubic_biases is not None and not settings.get("cubic_biases"):
         raise SystemExit(f"--cubic-biases needs an emulator trained with --cubic-biases ({args.emulator} is not)")
+    fog = getattr(args, "fog", None)
+    if bool(fog) != bool(settings.get("fog")):
+        raise SystemExit("--fog needs an emulator trained with --fog, and such an emulator needs --fog")
     grid = RSDGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
     ap = APGeometry(basis, settings["z"]) if args.ap else None
@@ -324,7 +332,7 @@ def build_problem(args, basis=None, settings=None):
                                       correction=correction, ng_amplitude=args.ng_amplitude, ap=ap, tracer=tracer,
                                       sigmas=[config.sigma(c.j) for c in coefficients],
                                       k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic,
-                                      cubic_biases=cubic_biases, kappa_shot=args.kappa_shot))
+                                      cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog))
             vectors.append(s1m.vectors)
             prefix = f"q{q:g}:" if len(args.q) > 1 else ""
             labels += [f"{prefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
@@ -360,7 +368,7 @@ def build_problem(args, basis=None, settings=None):
                            noise_correction=connected_correction(args), connected_amplitude=args.s21_connected_amplitude,
                            noise_calibration=(dict(np.load(args.s21_noise_calibration))
                                               if args.s21_noise_calibration is not None else None),
-                           cubic_biases=cubic_biases, kappa_shot=args.kappa_shot)
+                           cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog)
         layer2 = (load_layer2(args, S1mProjection(config, first_layer, grid), coefficients, first_layer, q0, s21m_kwargs)
                   if getattr(args, "s21_layer2", None) is not None else None)
         theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=q0,
@@ -453,7 +461,7 @@ def main():
                    stats=args.stats, vary=args.vary, volume=args.volume, covariance_of_mean=args.covariance_of_mean,
                    kmax=args.kmax, ap=args.ap, s21_min_scale=args.s21_min_scale,
                    s21_min_scale2=args.s21_min_scale2, s1_min_scale=args.s1_min_scale, labels=labels, emulator=str(args.emulator),
-                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), s21_layer2=str(args.s21_layer2), s21_layer2_c=args.s21_layer2_c, s21_layer2_prior=args.s21_layer2_prior, s21_layer2_marg=args.s21_layer2_marg, s21_layer2_marg_width=args.s21_layer2_marg_width, hartlap_factor=hartlap_factor(nsims, ndata), percival_m1=m1, nsims=int(nsims), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
+                   tracer=tracer, shared_counterterms=args.shared_counterterms, k4_counterterm=args.k4_counterterm, b_shot=args.b_shot, noise_shot=args.noise_shot, full_norm=args.full_norm, response_amplitude=args.response_amplitude, k2_stochastic=args.k2_stochastic, s21_white=args.s21_white, s21_k2=args.s21_k2, s21_connected=str(args.s21_connected), s21_connected_fog=args.s21_connected_fog, s21_connected_amplitude=args.s21_connected_amplitude, cubic_biases=args.cubic_biases, kappa_shot=args.kappa_shot, fog=args.fog, sampler=args.sampler, gaussian_prior=args.gaussian_prior, covariance_data_dir=str(args.covariance_data_dir), realizations_like=str(args.realizations_like), exclude_like=str(args.exclude_like), s21_noise_calibration=str(args.s21_noise_calibration), s21_layer2=str(args.s21_layer2), s21_layer2_c=args.s21_layer2_c, s21_layer2_prior=args.s21_layer2_prior, s21_layer2_marg=args.s21_layer2_marg, s21_layer2_marg_width=args.s21_layer2_marg_width, hartlap_factor=hartlap_factor(nsims, ndata), percival_m1=m1, nsims=int(nsims), shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())
     if samples is not None:
         summary["posterior"] = {name: dict(mean=float(np.asarray(samples.mean(name))),
