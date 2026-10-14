@@ -27,8 +27,9 @@ from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, linear_components, 
 from wstfast.theory.rsd_moduli import SIGMA_V_FACTOR, _harmonic, first_layer_fields
 
 
-def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FACTOR):
-    """b_U(K) and g(K) (monopoles over mu) per field."""
+def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FACTOR, c_v=None):
+    """b_U(K) and g(K) (monopoles over mu) per field. With ``c_v``, the Fingers-of-God counterterm (second order in
+    c_v, ``rsd_bias.BiasedModulusSpectraRSD(fog=True)``) replaces the velocity damping."""
     nmu = 6
     x, wx = np.polynomial.legendre.leggauss(2 * nmu)
     mu, wmu = x[nmu:], wx[nmu:]
@@ -36,7 +37,17 @@ def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FAC
     pk = lambda q: np.exp(np.interp(np.log(np.maximum(q, 1e-30)), logk, logp))  # noqa: E731
     sigma_v = sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
     spectra = BiasedModulusSpectraRSD(fields, kvals, mu)
-    grids, norms = spectra(pk, f, sigma_v)  # grids (nfield, nk, nmu, 296), norms (nfield, 16)
+    grids, norms = spectra(pk, f, sigma_v, fog=c_v is not None)  # grids (nfield, nk, nmu, 296), norms (nfield, 16)
+    if c_v is not None:  # [base 296 | 4 blocks x order 1 | x order 2]: X0 - c X1 + c^2 X2 on R0, R1, G0, G1 and n0
+        base, blocks = grids[..., :296], (0, 70, 210, 280)
+        sizes, n = (70, 70, 70, 15), 225
+        for order, factor in ((1, -c_v), (2, c_v**2)):
+            column = 296 + (order - 1) * n
+            for start, size in zip(blocks, sizes):
+                base[..., start:start + size] = base[..., start:start + size] + factor * grids[..., column:column + size]
+                column += size
+        grids = base
+        norms = np.concatenate([norms[:, :15] - c_v * norms[:, 16:31] + c_v**2 * norms[:, 31:46], norms[:, 15:16]], axis=1)
     m2, m4 = np.asarray(monomials(beta, 2)), np.asarray(monomials(beta, 4))
     r0r0, r0r1, r1r1, g0, g1, g2 = split(grids, (70, 70, 70, 70, 15, 1))
     n0, n1 = norms[:, :15], norms[:, 15]
