@@ -607,6 +607,75 @@ def cumulant_correction(config: WSTConfig, coefficients, klin, pklin, f, npoints
         return (np.where(kappa != 0, kappa_ref / kappa, 1.0), np.where(skewness2 != 0, skewness2_ref / skewness2, 1.0))
 
 
+def ap_matrix(weights, kmodes, mumodes, logk, nodes2, denominators, qpar, qperp):
+    """(ntarget, nk * nmu) matrix of a linear observable of a (k, mu) grid with AP distortions: the observed modes
+    (``kmodes``, ``mumodes``, with per-target ``weights`` (ntarget, nmodes)) are interpolated at their true-frame
+    coordinates (linear in ln k on ``logk``, Lagrange in mu^2 on the ``nodes2``), and the result is divided by
+    q_par q_perp^2. JAX; shared by ``APProjection`` and ``rsd_moduli.S21mAPProjection``."""
+    from .ap import observed_to_true
+
+    k, mu, volume = observed_to_true(kmodes, mumodes, qpar, qperp)
+    nk, nmu = logk.size, nodes2.size
+    logkt = jnp.clip(jnp.log(k), logk[0], logk[-1])
+    i = jnp.clip(jnp.searchsorted(logk, logkt) - 1, 0, nk - 2)
+    t = (logkt - logk[i]) / (logk[i + 1] - logk[i])
+    diff = mu[:, None] ** 2 - nodes2[None, :]
+    ones = jnp.ones_like(diff[:, :1])
+    left = jnp.cumprod(jnp.concatenate([ones, diff[:, :-1]], axis=1), axis=1)
+    right = jnp.cumprod(jnp.concatenate([ones, diff[:, :0:-1]], axis=1), axis=1)[:, ::-1]
+    lagrange = left * right / denominators  # (nmodes, nmu)
+    out = jnp.zeros((nk, weights.shape[0], nmu))
+    for index, factor in ((i, 1 - t), (i + 1, t)):
+        contribution = weights.T[:, :, None] * (factor[:, None] * lagrange)[:, None, :]  # (nmodes, ntarget, nmu)
+        out = out + jax.ops.segment_sum(contribution, index, num_segments=nk)
+    return volume * jnp.transpose(out, (1, 0, 2)).reshape(weights.shape[0], nk * nmu)
+
+
+class APPolynomial:
+    """An AP projection as a polynomial in x = (ln q_par, ln q_perp) with the volume factor exact:
+    matrix(q) = (q_par q_perp^2)^-1 sum_alpha x^alpha D_alpha, total degree <= ``order``.
+
+    D_0 is the exact projection at q = 1 and the other D_alpha are least-squares fits of
+    ``projection.at(q) * q_par q_perp^2 - D_0`` on ``nodes`` x ``nodes`` Chebyshev points of |x| <= ``xmax`` (by default
+    the emulator boxes: |ln q_par| <= 0.085, |ln q_perp| <= 0.045 around the fiducial). Without AP (q = 1) it is exact.
+    On the halo baseline (S1m + S21m, V = 60) the model differs from the exact per-call projection by a whitened
+    |delta| <= 0.03 sigma within the posterior (0.07 sigma at |ln q| ~ 0.05) at order 3, and 0.07 (0.12) at order 2;
+    the remainder is at the level of the projection's own interpolation in ln k. The per-call cost is that of a few
+    fixed matrix products instead of an interpolation at every mode. ``__call__`` is that of ``APProjection`` (grid
+    rows, with the shot-noise column); ``terms`` gives the D_alpha, to contract into an emulator
+    (``calculators.contract_s21m``).
+    """
+
+    def __init__(self, projection, order: int = 3, xmax=(0.085, 0.045), nodes: int = 9):
+        self.powers = [(a, b) for a in range(order + 1) for b in range(order + 1 - a)]
+        cheb = np.cos(np.pi * (np.arange(nodes) + 0.5) / nodes)
+        points = [(a * xmax[0], b * xmax[1]) for a in cheb for b in cheb]
+        # D_0 is the exact projection at q = 1 (no AP: no error); the other D_alpha fit the AP-dependent remainder
+        center = np.asarray(projection.at(1.0, 1.0))
+        mats = np.array([np.asarray(projection.at(np.exp(a), np.exp(b))) * np.exp(a + 2 * b) - center
+                         for a, b in points])
+        design = np.array([[a**p * b**r for p, r in self.powers[1:]] for a, b in points])
+        coef, *_ = np.linalg.lstsq(design, mats.reshape(len(points), -1), rcond=None)
+        self.terms = np.concatenate([center[None], coef.reshape(len(self.powers) - 1, *center.shape)])
+        self._terms = jnp.asarray(self.terms)
+        for name in ("noise", "field_index", "k2mu2", "k2", "entries"):  # passed through for the theories
+            setattr(self, name, getattr(projection, name, None))
+
+    def weights(self, qpar, qperp):
+        """(nalpha,) x^alpha times the volume factor."""
+        x, y = jnp.log(qpar), jnp.log(qperp)
+        return jnp.stack([x**p * y**r for p, r in self.powers]) / (qpar * qperp**2)
+
+    def at(self, qpar=1.0, qperp=1.0):
+        return jnp.tensordot(self.weights(qpar, qperp), self._terms, axes=1)
+
+    def __call__(self, rows, qpar=1.0, qperp=1.0, shotnoise=0.0):
+        """(R, ntarget) for grid rows (R, nk, nmu), as ``APProjection.__call__``."""
+        rows = jnp.asarray(rows)
+        values = rows.reshape(rows.shape[0], -1) @ self.at(qpar, qperp).T
+        return values + (jnp.asarray(shotnoise, dtype="f8")[..., None] * self.noise) / (qpar * qperp**2)
+
+
 class APProjection:
     """Linear observables of the P_s grid with Alcock-Paczynski distortions applied at assembly (ap.py).
 
@@ -658,6 +727,10 @@ class APProjection:
         lower = jnp.sum(rows[:, i, :] * lagrange[None], axis=-1)
         upper = jnp.sum(rows[:, i + 1, :] * lagrange[None], axis=-1)
         return (1 - t) * lower + t * upper, volume
+
+    def at(self, qpar=1.0, qperp=1.0):
+        """(ntarget, nk * nmu) matrix at the AP ratios (the grid rows enter linearly; no shot noise)."""
+        return ap_matrix(self.weights, self.k, self.mu, self.logk, self.nodes2, self.denominators, qpar, qperp)
 
     def _project(self, rows, qpar, qperp, shotnoise):
         values, volume = self.interpolate(rows, qpar, qperp)

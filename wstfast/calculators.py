@@ -388,6 +388,51 @@ def biased_s21m_fields(basis):
     return basis.s21m_grids * (a ** jnp.asarray(plam))[None, :, None], basis.s21m_norms * a ** jnp.asarray(pnorm)
 
 
+class ContractedS21m:
+    """What ``contract_s21m`` folded into an unprojected emulator, for S21mTheory(s21_projection=...): the AP powers
+    alpha of its terms (a single (0, 0) without AP), the basis norm row of every entry, and ``matrix`` (the projection
+    at q = 1, for the W / K^2 columns)."""
+
+    contracted = True
+
+    def __init__(self, powers, norm_rows, matrix, entries):
+        self.powers, self.norm_rows, self.matrix, self.entries = list(powers), np.asarray(norm_rows), matrix, entries
+
+    def weights(self, qpar, qperp):
+        x, y = jnp.log(qpar), jnp.log(qperp)
+        return jnp.stack([x**p * y**r for p, r in self.powers]) / (qpar * qperp**2)
+
+
+def contract_s21m(emulator, coefficients, basis_coefficients, projection) -> ContractedS21m:
+    """Fold the S21m projection into an emulator of the unprojected basis (RSDBasis(s21_projected=False)), in place:
+    its field-grid output becomes the projected terms, (nalpha, nentry, ncol), by contracting the emulator's Taylor
+    derivatives with the projection matrices. Exact (the emulator is linear in its derivatives), so the per-call cost
+    is that of a projected emulator: ~43k outputs per AP term instead of 1.5M. ``projection``: an S21mProjection over
+    ``coefficients`` (no AP) or ``rsd.APPolynomial`` of an S21mAPProjection (AP, nalpha terms). ``basis_coefficients``:
+    the S21 coefficients of the emulator, in its order. Call before ``emulator.to_calculator()``."""
+    from .theory.rsd_moduli import first_layer_fields
+
+    fields, basis_fields = first_layer_fields(coefficients), first_layer_fields(basis_coefficients)
+    rows = np.array([basis_fields.index(field) for field in fields])
+    entry_rows = rows[np.asarray(projection.field_index)]
+    if hasattr(projection, "terms"):
+        terms, powers = np.asarray(projection.terms), projection.powers
+    else:
+        terms, powers = np.asarray(projection.matrix)[None], [(0, 0)]
+    key = list(emulator._engines)[5]  # RSDBasis.tree_flatten: ..., dlogA, s21m_grids, s21m_norms
+    engine, shape, fit_params = emulator._engines[key]
+    if len(shape) != 3 or shape[0] != len(basis_fields) or shape[2] != terms.shape[-1]:
+        raise ValueError(f"output {key} has shape {shape}: not the field grids of an unprojected S21m basis")
+    derivatives = np.asarray(engine.derivatives).reshape(-1, *shape)  # (nterm, nfield, ncol, ngrid)
+    out = np.empty((derivatives.shape[0], len(powers), len(entry_rows), shape[1]))
+    for e, row in enumerate(entry_rows):
+        out[:, :, e, :] = np.einsum("tcg,ag->tac", derivatives[:, row], terms[:, e])
+    engine.derivatives = out.reshape(out.shape[0], -1)
+    emulator._engines[key] = (engine, (len(powers), len(entry_rows), shape[1]), fit_params)
+    matrix = terms[powers.index((0, 0))] if (0, 0) in powers else None
+    return ContractedS21m(powers, entry_rows, matrix, getattr(projection, "entries", None))
+
+
 def biased_rows(basis):
     """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude (with the
     Fingers-of-God counterterm orders of a ``fog`` basis; see ``rsd_bias.collapse_fog``)."""
@@ -846,16 +891,20 @@ class S21mTheory(Calculator):
         # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
         # of each of its fields is ``s21_field_rows`` (default: the same fields, in the same order).
         self.s21_projection = s21_projection
+        self.s21_contracted = False
         if s21_projection is not None:
             if tracer != "biased":
                 raise ValueError("s21_projection needs tracer='biased'")
             if noise_correction is not None or entry_index is not None:
                 raise ValueError("s21_projection selects its own entries: no entry_index / noise_correction")
-            if ap is not None and not hasattr(s21_projection, "at"):
-                raise ValueError("ap needs an S21mAPProjection")
+            self.s21_contracted = getattr(s21_projection, "contracted", False)
+            if ap is not None and not hasattr(s21_projection, "at") and not (
+                    self.s21_contracted and len(s21_projection.powers) > 1):
+                raise ValueError("ap needs an S21mAPProjection, or an emulator contracted with its APPolynomial")
             nfield = len(first_layer_fields(coefficients))
             self.s21_field_rows = np.arange(nfield) if s21_field_rows is None else np.asarray(s21_field_rows)
-            self.s21_matrix = None if hasattr(s21_projection, "at") else jnp.asarray(s21_projection.matrix)
+            self.s21_matrix = (None if hasattr(s21_projection, "at") or self.s21_contracted
+                               else jnp.asarray(s21_projection.matrix))
 
         self.layer2 = layer2 is not None
         if layer2 is not None:
@@ -1007,9 +1056,22 @@ class S21mTheory(Calculator):
 
     def _project_s21(self):
         """S21m terms (nentry, ncol) of the coefficients from the unprojected basis: lambda_2 = matrix @ field grid, with
-        the AP ratios of the trial cosmology when ``ap`` is set, then ``rsd_bias.s21m_assemble``."""
-        from .theory.rsd_bias import is_fog, s21m_assemble
+        the AP ratios of the trial cosmology when ``ap`` is set, then ``rsd_bias.s21m_assemble``. With an emulator
+        contracted by ``contract_s21m``, lambda_2 = sum_alpha w_alpha(q) P_alpha of its projected terms."""
+        from .theory.rsd_bias import is_fog, s21m_assemble, s21m_field_powers
 
+        if self.s21_contracted:
+            fog = is_fog(s21m=self.basis.s21m_terms)
+            plam, pnorm = s21m_field_powers(fog)
+            a = jnp.exp(self.basis.dlogA)
+            terms = self.basis.s21m_grids * (a ** jnp.asarray(plam))[None, None, :]
+            if self.ap is not None:
+                weights = self.s21_projection.weights(*self.ap.ratios(self.ap_params))
+            else:
+                weights = jnp.asarray([1.0 if power == (0, 0) else 0.0 for power in self.s21_projection.powers])
+            lam = jnp.tensordot(weights, terms, axes=1)
+            norms = (self.basis.s21m_norms * a ** jnp.asarray(pnorm))[self.s21_projection.norm_rows]
+            return s21m_assemble(lam, norms, fog)
         grids, norms = biased_s21m_fields(self.basis)
         grids, norms = grids[self.s21_field_rows], norms[self.s21_field_rows]
         if self.s21_matrix is not None:

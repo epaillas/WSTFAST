@@ -40,7 +40,7 @@ from wstfast.data import (chi_squared, hartlap_factor, load_measurement, load_po
                           load_s21m_dataset, percival_m1, sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh, sample_nuts)
-from wstfast.theory.rsd import (MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
+from wstfast.theory.rsd import (APPolynomial, MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
                                 s1m_ap_projection)
 
 
@@ -152,15 +152,55 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def load_basis(path: Path, vary):
+def load_basis(path: Path, vary, prepare=None):
+    """RSDBasis emulator as a calculator and its settings; ``prepare(emulator, settings)`` acts on the emulator first
+    (e.g. ``contract_s21m``), and its result is kept as settings["prepared"]."""
     from desilike.emulators import Emulator
 
     settings = json.loads(path.with_suffix(".json").read_text())
     if settings.get("stat") != "rsd":
         raise ValueError(f"{path} is not a redshift-space (RSDBasis) emulator")
-    basis = Emulator.read(str(path)).to_calculator()
+    emulator = Emulator.read(str(path))
+    if prepare is not None:
+        settings["prepared"] = prepare(emulator, settings)
+    basis = emulator.to_calculator()
     _bound_to_emulator(basis, _fix_unvaried(basis, settings, vary, path))
     return basis, settings
+
+
+def s21m_selection(args, config, settings):
+    """S21 coefficients of the fit and those of the emulator (in its order)."""
+    coefficients = [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
+                                                   s21_min_ratio=args.s21_min_ratio,
+                                                   s21_min_scale2=args.s21_min_scale2) if c.kind == "S21"]
+    emulated21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
+                  if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
+    emulated21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
+    return coefficients, emulated21
+
+
+def contract_unprojected_s21m(args, config, emulator, settings):
+    """For an emulator of the unprojected S21m basis and an S21m fit: fold the S21m projection (its AP polynomial with
+    --ap) into the emulator (``contract_s21m``), so that a likelihood call costs what a projected emulator does."""
+    from numpy.polynomial.legendre import leggauss
+
+    from wstfast.calculators import contract_s21m
+    from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+
+    if settings.get("s21_projected", True) or "s21m" not in args.stats or args.s21_connected:
+        return None
+    coefficients, emulated21 = s21m_selection(args, config, settings)
+    if any(c not in emulated21 for c in coefficients):
+        return None  # build_problem reports the missing terms
+    x, _ = leggauss(12)  # the (K, mu_K) grid of BiasedRSDS21mBasis
+    boxsize, nmesh = settings.get("lattice", [1000.0, 256])
+    grid = dict(k=np.geomspace(4e-3, 0.12, 24), mu=x[6:], boxsize=float(boxsize), nmesh=int(nmesh))
+    fields = first_layer_fields(coefficients)
+    projection = (APPolynomial(S21mAPProjection(config, coefficients, fields, grid["k"], grid["mu"],
+                                                boxsize=grid["boxsize"], nmesh=grid["nmesh"]))
+                  if args.ap else S21mProjection(config, coefficients, fields, grid["k"], grid["mu"],
+                                                 boxsize=grid["boxsize"], nmesh=grid["nmesh"]))
+    return contract_s21m(emulator, coefficients, emulated21, projection)
 
 
 def apply_gaussian_priors(basis, settings, items):
@@ -293,7 +333,8 @@ def build_problem(args, basis=None, settings=None):
     q0 = args.q[0]
     config = load_measurement(first, q=q0)["config"]
     if basis is None:
-        basis, settings = load_basis(args.emulator, args.vary)
+        basis, settings = load_basis(args.emulator, args.vary, prepare=lambda e, st: contract_unprojected_s21m(
+            args, config, e, st))
         apply_gaussian_priors(basis, settings, args.gaussian_prior)
     tracer = settings.get("tracer", "matter")
     cubic_biases = getattr(args, "cubic_biases", None)
@@ -323,7 +364,8 @@ def build_problem(args, basis=None, settings=None):
         if missing:
             raise ValueError(f"the emulator has no cumulants for {missing}")
         correction = load_correction(args, config, coefficients, settings) if args.cumulant_points else None
-        projection = s1m_ap_projection(config, coefficients, grid) if args.ap else S1mProjection(config, coefficients, grid)
+        projection = (APPolynomial(s1m_ap_projection(config, coefficients, grid)) if args.ap
+                      else S1mProjection(config, coefficients, grid))
         for q in args.q:
             s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=q, files=files)
             files = s1m.files
@@ -370,7 +412,9 @@ def build_problem(args, basis=None, settings=None):
                            noise_calibration=(dict(np.load(args.s21_noise_calibration))
                                               if args.s21_noise_calibration is not None else None),
                            cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog)
-        if unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap
+        if unprojected and settings.get("prepared") is not None:  # emulator contracted at load (contract_s21m)
+            s21m_kwargs.update(entry_index=None, noise_correction=None, ap=ap, s21_projection=settings["prepared"])
+        elif unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap
             from numpy.polynomial.legendre import leggauss
 
             from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
@@ -397,7 +441,8 @@ def build_problem(args, basis=None, settings=None):
         power = load_power_dataset(args.data_dir, "rsd", kmin=args.kmin, kmax=args.kmax, rebin=args.rebin, files=files,
                                    ells=(0, 2, 4))
         files = power.files
-        projection = multipole_ap_projection(power.edges, grid) if args.ap else MultipoleProjection(power.edges, grid)
+        projection = (APPolynomial(multipole_ap_projection(power.edges, grid)) if args.ap
+                      else MultipoleProjection(power.edges, grid))
         theories.append(RSDPowerTheory(projection, basis=basis, shotnoise=power.shotnoise, ap=ap, tracer=tracer,
                                        shared_counterterms=args.shared_counterterms,
                                        k4_counterterm=args.k4_counterterm, k2_stochastic=args.k2_stochastic))

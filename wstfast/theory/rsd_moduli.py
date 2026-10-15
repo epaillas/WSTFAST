@@ -223,25 +223,10 @@ class S21mAPProjection:
         self._matrix = jax.jit(self._build)
 
     def _build(self, qpar, qperp):
-        import jax
-        import jax.numpy as jnp
+        from .rsd import ap_matrix
 
-        from .ap import observed_to_true
-
-        k, mu, volume = observed_to_true(self.kmodes, self.mumodes, qpar, qperp)
-        logk = jnp.clip(jnp.log(k), self.logk[0], self.logk[-1])
-        i = jnp.clip(jnp.searchsorted(self.logk, logk) - 1, 0, self.nk - 2)
-        t = (logk - self.logk[i]) / (self.logk[i + 1] - self.logk[i])
-        diff = mu[:, None] ** 2 - self.nodes2[None, :]
-        ones = jnp.ones_like(diff[:, :1])
-        left = jnp.cumprod(jnp.concatenate([ones, diff[:, :-1]], axis=1), axis=1)
-        right = jnp.cumprod(jnp.concatenate([ones, diff[:, :0:-1]], axis=1), axis=1)[:, ::-1]
-        lagrange = left * right / self.denominators  # (ngroup, nmu)
-        out = jnp.zeros((self.nk, self.weights.shape[0], self.nmu))
-        for index, factor in ((i, 1 - t), (i + 1, t)):
-            contribution = self.weights.T[:, :, None] * (factor[:, None] * lagrange)[:, None, :]  # (ngroup, nentry, nmu)
-            out = out + jax.ops.segment_sum(contribution, index, num_segments=self.nk)
-        return volume * jnp.transpose(out, (1, 0, 2)).reshape(self.weights.shape[0], self.nk * self.nmu)
+        return ap_matrix(self.weights, self.kmodes, self.mumodes, self.logk, self.nodes2, self.denominators, qpar,
+                         qperp)
 
     def at(self, qpar=1.0, qperp=1.0):
         """(nentry, nk * nmu) at the AP ratios."""

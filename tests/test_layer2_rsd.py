@@ -101,3 +101,31 @@ def test_s21m_ap_projection_matches_fixed_projection_and_scales_with_volume():
     ones = np.ones(grid.size)
     np.testing.assert_allclose(np.asarray(ap.at(1.02, 0.99)) @ ones, (np.asarray(ap.at(1.0, 1.0)) @ ones) / (1.02 * 0.99**2),
                                rtol=1e-10)
+
+
+def test_ap_polynomial_matches_exact_ap_projections():
+    from numpy.polynomial.legendre import leggauss
+
+    from wstfast import WSTConfig
+    from wstfast.config import Coefficient
+    from wstfast.theory.rsd import APPolynomial, RSDGrid, s1m_ap_projection
+    from wstfast.theory.rsd_moduli import S21mAPProjection, first_layer_fields
+
+    config = WSTConfig(J=3, L=2, L2=2, sigma0=2.5, step=2**0.5, cellsize=10.0, min_dj=3)
+    grid = RSDGrid(kmax=0.3)
+    rows = (np.exp(-((grid.k[:, None] / 0.1) ** 2)) * (1 + grid.mu[None, :] ** 2) / (1 + (grid.k[:, None] / 0.02) ** 2))
+    exact = s1m_ap_projection(config, [Coefficient("S1", ell, j) for j in (0, 3) for ell in (0, 2)], grid,
+                              boxsize=1500.0, nmesh=96)
+    poly = APPolynomial(exact)
+    coefficients = [Coefficient("S21", ell, 0, 3) for ell in (1, 2)]
+    x, _ = leggauss(12)
+    k, mu = np.geomspace(4e-3, 0.12, 24), x[6:]
+    exact21 = S21mAPProjection(config, coefficients, first_layer_fields(coefficients), k, mu, boxsize=2000.0, nmesh=128)
+    poly21 = APPolynomial(exact21)
+    grid21 = (np.exp(-((k[:, None] / 0.05) ** 2)) * (1 + 0.5 * mu[None, :] ** 2)).ravel()
+    for qpar, qperp in ((1.0, 1.0), (1.06, 0.97), (0.93, 1.03)):
+        a = np.asarray(exact(rows[None], qpar, qperp, 1e3))
+        b = np.asarray(poly(rows[None], qpar, qperp, 1e3))
+        np.testing.assert_allclose(b, a, rtol=1e-3)
+        np.testing.assert_allclose(np.asarray(poly21.at(qpar, qperp)) @ grid21,
+                                   np.asarray(exact21.at(qpar, qperp)) @ grid21, rtol=1e-3)
