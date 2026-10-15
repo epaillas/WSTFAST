@@ -363,3 +363,36 @@ def test_window_correction_pairing_and_covariance():
     assert np.all(np.diag(paired["ratio_covariance"]) < 0.01 * np.diag(unpaired["ratio_covariance"]))
     extra = covariance_of(paired, np.full(ndata, 3.0), [f"x{i}" for i in range(ndata)])
     np.testing.assert_allclose(extra["covariance"], 9.0 * paired["ratio_covariance"])
+
+
+def test_survey_window_factor_build_and_roundtrip(tmp_path):
+    from wstfast.survey import LambdaWindow, SurveyWindow, noise_variance_maps, s1m_window_factor
+
+    # trivial window: no transfer, survey noise = box noise -> factor 1
+    w, t, n = np.ones((2, 3)), np.ones((2, 3)), np.full((2, 3), 0.2)
+    np.testing.assert_allclose(s1m_window_factor(w, t, n, np.array([1.0, 2.0]), np.array([0.4, 0.4]), 2.0, 0.8), 1.0)
+    # full support: every transfer is 1, so the factor is 1 at box noise
+    n_mesh = 24
+    config = WSTConfig(J=1, L=2, sigma0=1.5, min_dj=10, cellsize=1.0)
+    lattice = Lattice(n_mesh)
+    support = np.ones((n_mesh,) * 3, dtype=bool)
+    los = np.zeros((3,) + support.shape, dtype=np.float32)
+    los[2] = 1.0
+    lw = LambdaWindow(config, support, los, lattice, nbins=4)
+    noise = noise_variance_maps(np.full(support.shape, 0.3), config, support, lattice)
+    window = SurveyWindow.build(lw, {b: np.ones((2 * b[1] + 1, 4)) for b in lw.blocks}, noise, np.ones(n_mesh**3))
+    for key, block in window.s1m.items():
+        np.testing.assert_allclose(block["transfer"], 1.0, rtol=1e-5)
+        box_noise = block["noise"][0]
+        assert abs(window.factor(key, 1.0, box_noise) - 1.0) < 1e-5
+    # calibration of delta from paired mocks
+    key = next(iter(window.s1m))
+    ratios = window.calibrate_s1m(key, np.full(10, 1.1), np.full(10, 1.0), 1.0, 0.1)
+    assert abs(window.s1m[key]["delta"] - 1.1) < 1e-4 and len(ratios) == 10
+    window.s21m[(25.0, 70.7, 1, 0, 1)] = 0.9
+    window.save(tmp_path / "w.npz")
+    loaded = SurveyWindow.load(tmp_path / "w.npz")
+    assert loaded.s21m == window.s21m and loaded.q == window.q
+    for k, b in window.s1m.items():
+        for name, value in b.items():
+            np.testing.assert_allclose(loaded.s1m[k][name], value)

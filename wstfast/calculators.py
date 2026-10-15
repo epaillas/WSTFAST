@@ -718,12 +718,16 @@ class S1mTheory(Calculator):
     "separate" (c_v_s1). c_v = (f sigma_v k_NL)^2 / 2 reproduces the linear damping to second order.
 
     "slope" and "per-scale" need ``sigmas``, the filter scale of each coefficient.
+
+    ``window`` (``survey.SurveyWindow`` of one survey cap; needs ``sigmas``): the survey S1m, delta x
+    ``survey.s1m_window_factor`` x the box S1m, with the factor evaluated at the box signal and noise variances of the
+    blocks (with AP when ``ap`` is set) and the survey noise maps scaled by the shot-noise amplitude.
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                  cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
                  sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None,
-                 kappa_shot: bool = False, fog: str | None = None):
+                 kappa_shot: bool = False, fog: str | None = None, window=None):
         self.basis = basis
         self.fog_params = {k: v for k, v in _fog_counterterms(fog).items() if k == "s1"}
         self.k2_params = _k2_stochastic(k2_stochastic)
@@ -737,8 +741,14 @@ class S1mTheory(Calculator):
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
                       cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
                       sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
-                      cubic_biases: str | None = None, kappa_shot: bool = False, fog: str | None = None):
+                      cubic_biases: str | None = None, kappa_shot: bool = False, fog: str | None = None, window=None):
         self.projection, self.shotnoise = projection, float(shotnoise)
+        self.window = None
+        if window is not None:
+            if sigmas is None:
+                raise ValueError("window needs sigmas, the filter scale of each coefficient")
+            keys = [(window.key(sigma), c.ell, m) for c, sigma in zip(coefficients, sigmas) for m in range(c.ell + 1)]
+            self.window = tuple(jnp.asarray(a) for a in window.s1m_arrays(keys))
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
             raise ValueError(f"ng_amplitude={ng_amplitude!r} needs the filter scales (sigmas)")
@@ -797,6 +807,16 @@ class S1mTheory(Calculator):
                                                 jnp.stack([noise, linear_noise]) * self.shotnoise)
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude, block_scale=block_scale)
+        if self.window is not None:  # survey: delta x the window factor at the box signal and noise of every block
+            from .survey import s1m_window_factor
+
+            if self.ap is None:
+                signal = self.matrix @ grid.ravel()
+            else:
+                signal = self.projection(grid[None], qpar, qperp, 0.0)[0]
+            weight, transfer, noise_map, delta = self.window
+            factor = s1m_window_factor(weight, transfer, noise_map, signal, variances - signal, noise, self.q)
+            self.flattheory = self.flattheory * delta * factor
         return self.flattheory
 
     def ng_amplitude(self):
@@ -836,7 +856,7 @@ class S21mTheory(Calculator):
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                  cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
                  fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
-                 first_ap=None):
+                 first_ap=None, window=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
@@ -912,8 +932,20 @@ class S21mTheory(Calculator):
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                       cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
                       fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
-                 first_ap=None):
+                 first_ap=None, window=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
+
+        # Survey window (survey.SurveyWindow of one cap, biased tracers): S21m x K / (delta W) of the entry's first-layer
+        # block, W the S1m window factor of that block at its box (tree + noise) variances.
+        self.window = None
+        if window is not None:
+            if config is None or tracer != "biased":
+                raise ValueError("window needs the WST config and tracer='biased'")
+            keys1 = [(window.key(config.sigma(c.j)), c.ell, m) for c in first_layer for m in range(c.ell + 1)]
+            weight, transfer, noise_map, delta = window.s1m_arrays(keys1)
+            k21 = [window.s21m[(window.key(config.sigma(coefficients[i].j)), window.key(config.sigma(coefficients[i].j2)),
+                                coefficients[i].ell, m1, m2)] for i, m1, m2 in s21m_entries(coefficients)]
+            self.window = tuple(jnp.asarray(a) for a in (weight, transfer, noise_map, delta, k21))
 
         # Unprojected basis (RSDBasis(s21_projected=False)): lambda_2 is projected here from the field grids, with
         # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
@@ -1088,6 +1120,17 @@ class S21mTheory(Calculator):
             c = (jnp.stack([self.ng2_params[ell].value for ell in self.ng2_ell]) if self.ng2_params else self.ng2_c)
             renorm = 1.0 / (1.0 + c * self.ng2_var * scale)
             self.flattheory = self.flattheory * (1 + self.ng2_d0 + renorm * self.ng2_d2 * scale)
+        if self.window is not None:
+            from .survey import s1m_window_factor
+
+            if self.first_ap is not None and self.ap is not None:
+                signal = self.first_ap(tree[None], *self.ap.ratios(self.ap_params), 0.0)[0]
+            else:
+                signal = self.matrix @ tree.ravel()
+            weight, transfer, noise_map, delta, k21 = self.window
+            factor = s1m_window_factor(weight, transfer, noise_map, signal, linear - signal,
+                                       1 + self.bias_params["alpha0"].value, self.q)
+            self.flattheory = self.flattheory * k21 / (delta * factor)[self.block_index]
         return self.flattheory
 
     def _ap_s21(self, s21):

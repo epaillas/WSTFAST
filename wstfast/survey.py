@@ -843,6 +843,110 @@ def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, r
     return calibrate_window((mocks(seed + r) for r in range(realizations)), config, support, **kwargs)
 
 
+def s1m_window_factor(weight, transfer, noise, signal, box_noise, noise_scale, q: float):
+    """Survey / box ratio of the Gaussian part of S1m for blocks (B,) with window histograms (B, nbin): the
+    weighted mean over the histogram bins of [(T signal + noise_scale lambda_N) / (signal + box_noise)]^{q/2}.
+    ``signal``, ``box_noise``: the box signal and noise variances of the blocks (the theory's, with AP);
+    ``noise_scale``: the shot-noise amplitude (1 + alpha0) of the survey noise maps. NumPy or JAX."""
+    import jax.numpy as jnp
+
+    xp = jnp if any(isinstance(v, jnp.ndarray) for v in (signal, box_noise, noise_scale)) else np
+    lam = transfer * signal[:, None] + noise_scale * noise
+    ratio = lam / (signal + box_noise)[:, None]
+    return xp.sum(weight * xp.maximum(ratio, 1e-30) ** (q / 2), axis=1) / xp.sum(weight, axis=1)
+
+
+@dataclass
+class SurveyWindow:
+    """Window of one survey cap for the likelihood (``S1mTheory(window=)``, ``S21mTheory(window=)``).
+
+    ``s1m``: per first-layer block, keyed (sigma [Mpc/h], l, |m|), the histogram of the support cells in (transfer,
+    noise) bins: FKP ``weight``, mean ``transfer`` T (``LambdaWindow``, averaged over the +-m components) and mean
+    ``noise`` lambda_N per unit shot-noise amplitude (``noise_variance_maps``), and the S-level correction ``delta``.
+    The survey S1m is delta x ``s1m_window_factor`` x the box S1m. ``s21m``: per S21m entry, keyed (sigma1, sigma2, l,
+    |m1|, |m2|), K = <S2m_survey / S2m_box> of paired mocks; the survey S21m is K / (delta W)_first layer x the box
+    S21m. ``nbin`` bins per block (zero weight where a block has fewer).
+    """
+
+    s1m: dict
+    s21m: dict
+    q: float = 0.8
+
+    @staticmethod
+    def key(sigma: float) -> float:
+        return round(float(sigma), 1)
+
+    @classmethod
+    def build(cls, window: "LambdaWindow", correction: dict, noise: dict, weights: np.ndarray, q: float = 0.8,
+              ntransfer: int = 16, nnoise: int = 4) -> "SurveyWindow":
+        """Histograms of the first-layer blocks from a ``LambdaWindow`` (its coverage), its ``correction``, the
+        ``noise_variance_maps`` (per unit shot noise) and the FKP ``weights`` of the support cells; delta = 1 and no
+        S21m entries until calibrated (``calibrate``)."""
+        config = window.config
+        weights = np.asarray(weights, dtype=np.float64)
+        s1m = {}
+        for (j, ell), transfer in window.transfer(correction).items():
+            for m in range(ell + 1):
+                t = transfer[ell] if m == 0 else 0.5 * (transfer[ell - m] + transfer[ell + m])
+                lam_n = noise[j, ell]
+                tb = np.digitize(t, np.unique(np.quantile(t, np.linspace(0, 1, ntransfer + 1)[1:-1])))
+                nb = np.digitize(lam_n, np.unique(np.quantile(lam_n, np.linspace(0, 1, nnoise + 1)[1:-1])))
+                _, label = np.unique(tb * (nnoise + 1) + nb, return_inverse=True)
+                h = np.bincount(label, weights=weights)
+                s1m[cls.key(config.sigma(j)), ell, m] = dict(
+                    weight=h, transfer=np.bincount(label, weights=weights * t) / h,
+                    noise=np.bincount(label, weights=weights * lam_n) / h, delta=1.0)
+        return cls(s1m=s1m, s21m={}, q=q)
+
+    def factor(self, key, signal, box_noise, noise_scale=1.0):
+        """``s1m_window_factor`` of one block (scalars)."""
+        b = self.s1m[key]
+        return float(s1m_window_factor(b["weight"][None], b["transfer"][None], b["noise"][None],
+                                       np.atleast_1d(signal), np.atleast_1d(box_noise), noise_scale, self.q)[0])
+
+    def calibrate_s1m(self, key, survey, box, signal, box_noise):
+        """delta of a block from paired mocks (``survey``, ``box`` (nmock,) measured on the support and unmasked on the
+        same cells), at the box variances of the mocks' spectrum: delta = <survey / box> x F(T = 1) / F(T), the box
+        reference having the survey's local noise. Returns the per-mock ratios (for the calibration covariance)."""
+        b = self.s1m[key]
+        unit = float(s1m_window_factor(b["weight"][None], np.ones_like(b["transfer"])[None], b["noise"][None],
+                                       np.atleast_1d(signal), np.atleast_1d(box_noise), 1.0, self.q)[0])
+        ratio = np.asarray(survey) / np.asarray(box) * unit / self.factor(key, signal, box_noise)
+        b["delta"] = float(ratio.mean())
+        return ratio
+
+    def save(self, path):
+        arrays = {"q": self.q}
+        for (sigma, ell, m), b in self.s1m.items():
+            for name, value in b.items():
+                arrays[f"s1m_{sigma}_{ell}_{m}_{name}"] = value
+        for key, value in self.s21m.items():
+            arrays["s21m_" + "_".join(str(k) for k in key)] = value
+        np.savez(path, **arrays)
+
+    @classmethod
+    def load(cls, path) -> "SurveyWindow":
+        f = np.load(path)
+        s1m, s21m = {}, {}
+        for name in f.files:
+            parts = name.split("_")
+            if parts[0] == "s1m":
+                key = (float(parts[1]), int(parts[2]), int(parts[3]))
+                s1m.setdefault(key, {})["_".join(parts[4:])] = (float(f[name]) if f[name].ndim == 0 else f[name])
+            elif parts[0] == "s21m":
+                s21m[(float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]))] = float(f[name])
+        return cls(s1m=s1m, s21m=s21m, q=float(f["q"]))
+
+    def s1m_arrays(self, keys):
+        """(weight, transfer, noise) (B, nbin) and delta (B,) of the blocks ``keys``, zero-padded to one nbin."""
+        nbin = max(len(self.s1m[k]["weight"]) for k in keys)
+        pad = lambda v: np.pad(np.asarray(v, dtype=float), (0, nbin - len(v)))  # noqa: E731
+        return (np.array([pad(self.s1m[k]["weight"]) for k in keys]),
+                np.array([pad(self.s1m[k]["transfer"]) for k in keys]),
+                np.array([pad(self.s1m[k]["noise"]) for k in keys]),
+                np.array([self.s1m[k]["delta"] for k in keys]))
+
+
 def window_correction(survey: np.ndarray, model: np.ndarray, box: np.ndarray | None = None,
                       box_model: np.ndarray | None = None) -> dict:
     """S-level correction delta of the window model and its calibration covariance, from fiducial mocks.
