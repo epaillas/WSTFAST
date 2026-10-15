@@ -401,6 +401,28 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
 - Its remaining uncertainty enters the fit as an extra covariance, Cov_δ (as DESI does for window systematics).
 - Next: the parameter shift from the δ_b error, and the N_cal it needs.
 
+**Analytic survey covariance on the Gaussian mocks (2026-10-15,** `dr1_window.py --test covariance`**).**
+- The model: box covariance (`RSDWSTCovariance`, 2nd + 4th chaos, box 1 Gpc/h / 128³, Gaussian inputs: Kaiser P + 1/n̄_eff,
+  zero modulus response, Gaussian-chaos noise of U), with every variance rescaled to the entry's effective volume on
+  the cap (`SurveyWindow.veff_block`) and the box correlations kept.
+- Against 400 survey S1m and 134 S21m mocks per cap (ln S):
+
+  | | σ analytic / mocks | Correlations, rms diff (noise) | ⟨χ²⟩ |
+  |---|---|---|---|
+  | NGC S1m | 1.06 (± 0.035) | 0.044 (0.044) | 94 / 60 |
+  | SGC S1m | 1.11 | 0.043 (0.044) | 97 / 60 |
+  | NGC S21m | 1.13 (± 0.06) | 0.087 (0.083) | 45 / 54 |
+  | SGC S21m | 1.18 | 0.094 (0.083) | 43 / 54 |
+
+- **Variances 5–18% too large**, the direction of the modes the RIC and the binned second-layer mean remove.
+- **Directions:**
+  - S21m: the eigenvalues of A⁻¹S span 0.10–2.3, as sampling noise does.
+  - S1m: a few nearly degenerate directions are 2.5–5× larger in the mocks (eigenvalues to 5.2, against a noise
+    spread of ≤ 1.9), hence the ⟨χ²⟩ excess.
+- **Parameters:** the marginalised errors on ω_cdm, logA and h from the two covariances agree within 1–5% (8% for
+  ω_cdm from SGC S21m). The analytic covariance is fine for parameter errors, but not for the goodness of fit of S1m.
+- **Per-block vs single V_eff:** makes almost no difference.
+
 **Next:**
 1. Propagate the δ_b calibration error to the parameters (Cov_δ in the fit) and size N_cal for the 25-mock mean.
 2. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction

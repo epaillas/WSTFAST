@@ -895,7 +895,8 @@ class SurveyWindow:
                 _, label = np.unique(tb * (nnoise + 1) + nb, return_inverse=True)
                 h = np.bincount(label, weights=weights)
                 s1m[cls.key(config.sigma(j)), ell, m] = dict(
-                    weight=h, transfer=np.bincount(label, weights=weights * t) / h,
+                    weight=h, weight2=np.bincount(label, weights=weights**2),
+                    transfer=np.bincount(label, weights=weights * t) / h,
                     noise=np.bincount(label, weights=weights * lam_n) / h, delta=1.0)
         return cls(s1m=s1m, s21m={}, q=q)
 
@@ -904,6 +905,17 @@ class SurveyWindow:
         b = self.s1m[key]
         return float(s1m_window_factor(b["weight"][None], b["transfer"][None], b["noise"][None],
                                        np.atleast_1d(signal), np.atleast_1d(box_noise), noise_scale, self.q)[0])
+
+    def veff_block(self, key, signal, box_noise, noise_scale=1.0) -> float:
+        """Effective volume of a block [(Gpc/h)^3]: the cap's ``veff`` with the cells weighted by w s, s the block's
+        local mean [(T signal + noise_scale lambda_N) / (signal + box_noise)]^{q/2} relative to the box (the weight of a
+        cell in the fluctuation of ln S): veff (sum H s)^2 / sum H2 s^2 x sum H2 / (sum H)^2."""
+        b = self.s1m[key]
+        if self.veff is None or "weight2" not in b:
+            raise ValueError("the window has no effective volume or no sum of squared weights (rebuild it)")
+        local = ((b["transfer"] * signal + noise_scale * b["noise"]) / (signal + box_noise)) ** (self.q / 2)
+        h, h2 = b["weight"], b["weight2"]
+        return float(self.veff * (h @ local) ** 2 / (h2 @ local**2) * h2.sum() / h.sum() ** 2)
 
     def calibrate_s1m(self, key, survey, box, signal, box_noise):
         """delta of a block from paired mocks (``survey``, ``box`` (nmock,) measured on the support and unmasked on the

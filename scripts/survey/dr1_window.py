@@ -34,6 +34,11 @@ each) on the frozen geometry and estimator (FKP field, FKP weights, local line o
 ``fit_rsd.py`` survey data: ``<output>/<cap>/wst_r<mock>.npz`` (``data.save_measurement``, with the shot noise
 1 / nbar_eff of the geometry).
 
+``--test covariance``: the analytic covariance (``theory.covariance_rsd.RSDWSTCovariance``: 2nd + 4th chaos) of the
+Gaussian mocks' ln S1m and ln S21m, a box covariance with the variance of every entry rescaled to its effective volume
+on the cap (``SurveyWindow.veff_block``), against the sample covariance of the survey mocks (``--s1m-mocks``,
+``--s21m-mocks``). For a Gaussian field the modulus has no response (r = 0), only its Gaussian-chaos noise.
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -81,7 +86,8 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure"), required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance"),
+                        required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -104,6 +110,12 @@ def get_args():
     parser.add_argument("--paired", action="store_true",
                         help="lambda: also measure each test mock unmasked on the same cells (its box), so that the "
                              "S-level correction is calibrated paired, without the mocks' cosmic variance")
+    parser.add_argument("--window-files", type=Path, nargs="*", default=[],
+                        help="covariance: SurveyWindow file of each cap (in the order NGC, SGC)")
+    parser.add_argument("--s1m-mocks", type=Path, nargs="*", default=[],
+                        help="covariance: --test lambda results.npz / partial_fiducial.npz (survey S1m of mocks)")
+    parser.add_argument("--covariance-box", type=float, nargs=2, default=[1000.0, 128], metavar=("BOXSIZE", "NMESH"),
+                        help="covariance: box of the analytic mode sums")
     parser.add_argument("--correction", type=Path, default=None,
                         help="products: correction.npz of a --test lambda run (first-layer correction c_m(f))")
     parser.add_argument("--paired-mocks", type=Path, nargs="*", default=[],
@@ -462,6 +474,116 @@ def run_measure(args, geometries, setups, pk):
     return summary
 
 
+def run_covariance(args, geometries, setups, pk):
+    from numpy.polynomial.legendre import leggauss
+
+    from wstfast.config import select_coefficients
+    from wstfast.survey import SurveyWindow
+    from wstfast.theory.covariance_rsd import ModulusCrossRSD, ModulusTables, RSDWSTCovariance
+    from wstfast.theory.rsd_moduli import first_layer_fields
+
+    b, f, a, t = VARIANTS["fiducial"]
+    plin = spectrum(pk, a, t)
+    boxsize, nmesh = args.covariance_box
+    summary = {}
+    for (cap, g), path in zip(geometries.items(), args.window_files):
+        s, window = setups[cap], SurveyWindow.load(path)
+        config = s["config"]
+        noise = g.shotnoise
+        s1m = [c for c in select_coefficients(config, s1_min_scale=25.0) if c.kind == "S1"]
+        s21 = [c for c in select_coefficients(config, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
+               if c.kind == "S21"]
+        keys = first_layer_fields(s21)
+        fields = [(config.sigma(j), ell, m) for j, ell, m in keys]
+        entries = [(c.j, c.j2, c.ell, m1, m2, keys.index((c.j, c.ell, m1)))
+                   for c in s21 for m1 in range(c.ell + 1) for m2 in range(c.ell + 1)]
+        pfield = lambda k, mu: (b + f * np.asarray(mu) ** 2) ** 2 * plin(k) + noise  # noqa: E731
+        z1 = lambda k, mu: b + f * np.asarray(mu) ** 2  # noqa: E731
+        x, _ = leggauss(12)
+        kgrid, mugrid = np.geomspace(4e-3, 0.12, 24), x[6:]
+        t0 = time.time()
+        r, gnoise, _ = ModulusCrossRSD(fields, kgrid, mugrid).spectra(plin, f, 0.0, [1.0, b, 0.0, 0.0, 0.0], noise)
+        moduli = ModulusTables(kgrid, mugrid, 0.0 * r, gnoise)  # Gaussian field: U does not correlate with delta
+        cov = RSDWSTCovariance(config, s1m, entries, fields, args.q, boxsize, pfield, plin, z1, moduli, nmesh=int(nmesh))
+        n = cov.ns1m + cov.ns21m
+        box = cov.lncov + cov.chaos4(int(nmesh))
+        print(f"{cap}: box covariance of {n} entries ({time.time() - t0:.0f} s)", flush=True)
+        # effective volume of every entry: its S1m block, or the sigma_j2 block of the second layer for S21m
+        veff = []
+        for label in cov.labels:
+            parts = label.split("_")
+            if parts[0] == "S1m":
+                j, ell, m = int(parts[1][1:]), int(parts[2][1:]), int(parts[3][1:])
+            else:
+                j, ell, m = int(parts[2][1:]), int(parts[3][1:]), int(parts[5][1:])
+            key = (SurveyWindow.key(config.sigma(j)), ell, m)
+            block = window.s1m[key]
+            box_noise = float(block["weight"] @ block["noise"] / block["weight"].sum())
+            sig = float(pfield_block_signal(config, j, ell, m, pfield, noise, boxsize))
+            veff.append(window.veff_block(key, sig, box_noise))
+        veff = np.array(veff)
+        vbox = (boxsize / 1000.0) ** 3
+        std = np.sqrt(np.diag(box))
+        corr = box / np.outer(std, std)
+        models = {"per-block V_eff": corr * np.outer(std * np.sqrt(vbox / veff), std * np.sqrt(vbox / veff)),
+                  "single V_eff": box * vbox / window.veff}
+        # the mocks, in the order of cov.labels
+        measured = {}
+        if args.s1m_mocks:
+            files = [np.load(p) for p in args.s1m_mocks]
+            arr = np.concatenate([x[cap] if cap in x.files else x[f"fiducial_{cap}_measured"] for x in files])
+            idx = [tuple(int(p[1:]) for p in label.split("_")[1:]) for label in cov.labels[:cov.ns1m]]
+            measured["S1m"] = (np.log(np.array([arr[:, j, ell, m] for j, ell, m in idx]).T), slice(0, cov.ns1m))
+        if args.s21m_mocks:
+            files = [np.load(p) for p in args.s21m_mocks]
+            pick = lambda x: x[f"{cap}_measured"] if f"{cap}_measured" in x.files else x[f"fiducial_{cap}_measured"]  # noqa: E731
+            arr = np.concatenate([pick(x) for x in files])
+            order = [(ell, m1, m2) for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+            idx = [order.index(tuple(int(p[1:]) for p in label.split("_")[3:])) for label in cov.labels[cov.ns1m:n]]
+            measured["S21m"] = (np.log(arr[:, idx]), slice(cov.ns1m, n))
+        summary[cap] = {}
+        for kind, (vectors, sl) in measured.items():
+            sample = np.cov(vectors, rowvar=False)
+            nm = len(vectors)
+            sstd = np.sqrt(np.diag(sample))
+            scorr = sample / np.outer(sstd, sstd)
+            off = ~np.eye(len(sstd), dtype=bool)
+            row = dict(nmocks=nm, std_error=float(1 / np.sqrt(2 * (nm - 1))))
+            for name, model in models.items():
+                m = model[sl, sl]
+                mstd = np.sqrt(np.diag(m))
+                ratio = mstd / sstd
+                mcorr = m / np.outer(mstd, mstd)
+                resid = vectors - vectors.mean(axis=0)
+                chi2 = float(np.mean(np.einsum("ni,ij,nj->n", resid, np.linalg.inv(m), resid)))
+                row[name] = dict(std_ratio_median=float(np.median(ratio)),
+                                 std_ratio_16_84=np.percentile(ratio, [16, 84]).tolist(),
+                                 std_ratio_min_max=[float(ratio.min()), float(ratio.max())],
+                                 corr_rms_diff=float(np.sqrt(np.mean((mcorr - scorr)[off] ** 2))),
+                                 corr_rms_noise=float(np.sqrt(np.mean(((1 - mcorr**2) / np.sqrt(nm))[off] ** 2))),
+                                 mean_chi2=chi2, ndata=int(len(sstd)))
+                print(f"{cap} {kind} ({nm} mocks, {name}): std analytic / mocks median {row[name]['std_ratio_median']:.3f}"
+                      f" [16-84% {row[name]['std_ratio_16_84'][0]:.3f}-{row[name]['std_ratio_16_84'][1]:.3f},"
+                      f" error {row['std_error']:.3f}]; corr rms diff {row[name]['corr_rms_diff']:.3f}"
+                      f" (noise {row[name]['corr_rms_noise']:.3f}); <chi2> {chi2:.1f} / {len(sstd)}", flush=True)
+            summary[cap][kind] = row
+        np.savez(args.output / f"covariance_{cap}.npz", labels=cov.labels[:n], box=box, veff=veff,
+                 **{name.replace(" ", "_"): model for name, model in models.items()})
+    return summary
+
+
+def pfield_block_signal(config, j, ell, m, pfield, noise, boxsize, nmesh=128):
+    """Signal variance of an |m| block of a box with field power ``pfield`` (continuum mode sum on a half lattice)."""
+    from wstfast.theory.covariance import HalfLattice, components
+
+    lat = HalfLattice(nmesh, boxsize)
+    keep = lat.positive & (lat.k <= np.pi * nmesh / boxsize)
+    k, mu, mult = lat.k[keep], lat.mu[keep], lat.multiplicity[keep]
+    w = lat.radial(config.sigma(j), ell)[keep] ** 2 * np.sum(lat.harmonics(ell)[components(ell, m)][:, keep] ** 2, axis=0)
+    ncomp = 1 if m == 0 else 2
+    return float(((pfield(k, mu) - noise) * w * mult).sum() / boxsize**3 / ncomp)
+
+
 def data_vector(out) -> np.ndarray:
     """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l >= 1, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
@@ -551,6 +673,7 @@ def main():
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
+                covariance=run_covariance,
                 **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
