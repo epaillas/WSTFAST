@@ -16,6 +16,10 @@ survey S1m of any spectrum is then the weighted mean over the support of the Gau
 lambda_m(x) = T_m(x) lambda_m^box + lambda_N(x), with the exact lattice lambda^box and noise maps. It is tested on
 noisy, constrained mocks of several spectra; "coverage" sets c = 1 and "none" T = 1.
 
+``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7))
+before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
+and on the footprint with the RIC. Saves the means and a figure.
+
     python scripts/survey/dr1_window.py --test ric --realizations 10 --width 2.5 5 10 --output outputs/survey/dr1_ric
     python scripts/survey/dr1_window.py --test lambda --calibrate 12 --realizations 6 \\
         --output outputs/survey/dr1_lambda_window
@@ -59,7 +63,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda"), required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "vector"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -248,6 +252,69 @@ def run_lambda(args, geometries, setups, pk):
     return summary
 
 
+def data_vector(out) -> np.ndarray:
+    """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l, |m1|, |m2|)."""
+    s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
+    s21 = [out["S2m"][0, 3, ell, m1, m2] / out["S1m"][0, ell, m1]
+           for ell in range(5) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+    return np.array(s1 + s21)
+
+
+def run_vector(args, geometries, setups, pk):
+    ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+    mocks = mocks_of(geometries, pk, "fiducial")
+    caps = list(geometries)
+    vectors = {(cap, kind): [] for cap in caps for kind in ("box", "window")}
+    for r in range(args.realizations):
+        t0 = time.time()
+        fields = [mocks[cap](seed=[300 + r, k]) for k, cap in enumerate(caps)]
+        for cap, survey, field in zip(caps, ric(*fields), fields):
+            s = setups[cap]
+            common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
+            masked = args.measure(survey, s["config"], support=s["g"].support, **common)
+            reference = args.measure(field, s["config"], moment_support=s["g"].support, **common)
+            vectors[cap, "window"].append(data_vector({k: masked[k][0] for k in ("S1m", "S2m")}))
+            vectors[cap, "box"].append(data_vector({k: reference[k][0] for k in ("S1m", "S2m")}))
+        print(f"vector {r}: {time.time() - t0:.0f} s", flush=True)
+    vectors = {key: np.array(v) for key, v in vectors.items()}
+    np.savez(args.output / "vector.npz", **{f"{cap}_{kind}": v for (cap, kind), v in vectors.items()})
+    plot_vector(vectors, caps, args.output / "vector.png")
+    return {f"{cap}_ratio": (vectors[cap, "window"].mean(0) / vectors[cap, "box"].mean(0)).tolist() for cap in caps}
+
+
+def plot_vector(vectors, caps, path):
+    import matplotlib.pyplot as plt
+
+    colors = {"NGC": "#2a78d6", "SGC": "#eb6834"}  # categorical slots 1 and 2
+    n1 = 60
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True, gridspec_kw=dict(height_ratios=(2.2, 1), hspace=0.06))
+    x = np.arange(len(vectors[caps[0], "box"][0]))
+    for cap in caps:
+        box, window = vectors[cap, "box"].mean(0), vectors[cap, "window"].mean(0)
+        axes[0].plot(x, box, ls="--", lw=1.6, color=colors[cap], label=f"{cap}, box (before)")
+        axes[0].plot(x, window, ls="-", lw=1.6, color=colors[cap], label=f"{cap}, DR1 window + RIC (after)")
+        axes[1].plot(x, window / box - 1, ls="-", lw=1.6, color=colors[cap], label=cap)
+    axes[0].set_yscale("log")
+    axes[0].set_ylabel("coefficient")
+    axes[1].set_ylabel("after / before − 1")
+    axes[1].axhline(0, color="#52514e", lw=0.8)
+    axes[1].set_xlabel("data-vector index")
+    for ax in axes:
+        ax.axvline(n1 - 0.5, color="#52514e", lw=0.8)
+        for b in (15, 30, 45):
+            ax.axvline(b - 0.5, color="#c3c2b7", lw=0.6, ls=":")
+        ax.grid(False)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    top = axes[0].get_ylim()[1]
+    for b, label in zip((0, 15, 30, 45, 60), ("S1m σ=25", "σ=35", "σ=50", "σ=71", "S21m (25, 70.7)")):
+        axes[0].text(b + 0.5, top, label, va="top", ha="left", fontsize=9, color="#52514e")
+    axes[0].legend(frameon=False, fontsize=9, ncol=2, loc="lower left")
+    axes[0].set_title("Baseline WST data vector of the DR1 LRG 0.4 < z < 0.6 geometry (Gaussian mocks, fiducial spectrum)",
+                      fontsize=11, loc="left")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+
+
 def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -266,12 +333,12 @@ def main():
               f" (Gpc/h)^3, regions {np.bincount(g.region[g.support])}", flush=True)
         # sigma = 25, 35, 50, 71 Mpc/h; with --test ric, S21m at (25, 71)
         config = WSTConfig(J=3, L=args.L, L2=args.L, sigma0=25.0 / g.cellsize, step=2**0.5, cellsize=g.cellsize,
-                           min_dj=3 if args.test == "ric" else 10, q=args.q)
+                           min_dj=10 if args.test == "lambda" else 3, q=args.q)
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g)
         if args.test == "lambda":
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
-    summary = (run_ric if args.test == "ric" else run_lambda)(args, geometries, setups, pk)
+    summary = dict(ric=run_ric, vector=run_vector, **{"lambda": run_lambda})[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
 
 
