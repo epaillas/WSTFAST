@@ -20,8 +20,8 @@ noisy, constrained mocks of several spectra; "coverage" sets c = 1 and "none" T 
     python scripts/survey/dr1_window.py --test lambda --calibrate 12 --realizations 6 \\
         --output outputs/survey/dr1_lambda_window
 
-With ``--device cuda`` the WST, the window and the variances run on a GPU (``wstfast.measure_torch``); the mocks and
-the RIC stay on the CPU. At NERSC, with the public tree as the catalogue root, one test per GPU:
+With ``--device cuda`` (or ``cpu``) the WST, the window and the variances run with torch (``wstfast.measure_torch``),
+on a GPU (or multithreaded on the CPU); the mocks and the RIC stay in numpy. At NERSC, with the public tree as the catalogue root, one test per GPU:
 
     ROOT=/global/cfs/cdirs/desi/public/dr1/survey/catalogs/dr1/mocks/AbacusSummit/dark/v4.2
     sbatch -A <account> -C gpu -q regular -N 1 --gpus-per-node=4 -t 02:00:00 --wrap "
@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument("--realizations", type=int, default=10, help="test mocks (per variant for lambda)")
     parser.add_argument("--catalogue-root", type=Path, default=survey.DESI_ROOT,
                         help="directory with mock<i>/LRG_complete_* catalogues")
-    parser.add_argument("--device", default="cpu", help="cpu (numpy) or a torch device, e.g. cuda")
+    parser.add_argument("--device", default="numpy", help="numpy, or a torch device (cpu, cuda)")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -252,8 +252,9 @@ def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
     geometries = build_geometries(args)
+    pk = linear_power(np.mean(args.zrange))  # CLASS before torch: their two OpenMP runtimes clash the other way round
     nmesh = next(iter(geometries.values())).nmesh
-    if args.device == "cpu":
+    if args.device == "numpy":
         lattice, args.measure = Lattice(nmesh), measure_wst_survey
     else:
         from wstfast.measure_torch import TorchLattice, measure_wst_survey_torch
@@ -270,7 +271,6 @@ def main():
         if args.test == "lambda":
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
-    pk = linear_power(np.mean(args.zrange))
     summary = (run_ric if args.test == "ric" else run_lambda)(args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
 
