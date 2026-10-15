@@ -435,6 +435,29 @@ def run_products(args, geometries, setups, pk):
         z = "-".join(f"{v:g}" for v in args.zrange)
         product.save(args.output / f"window_z{z}_{cap}.npz")
         np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
+        if ratios:  # calibration error of delta and K for fit_rsd --extra-covariance (one mock set per statistic)
+            labels, blocks = [], []
+            config = s["config"]
+            for kind in ("s1m", "s21m"):
+                names = [k for k in ratios if k.startswith(kind + "_")]
+                if not names:
+                    continue
+                values = np.array([ratios[k] / ratios[k].mean() for k in names]).T
+                blocks.append(np.cov(values, rowvar=False, ddof=1) / len(values))
+                for k in names:
+                    p = k.split("_")
+                    j = [jj for jj in range(config.J + 1) if SurveyWindow.key(config.sigma(jj)) == float(p[1])][0]
+                    if kind == "s1m":
+                        labels.append(f"{cap}:S1m_j{j}_l{p[2]}_m{p[3]}")
+                    else:
+                        j2 = [jj for jj in range(config.J + 1) if SurveyWindow.key(config.sigma(jj)) == float(p[2])][0]
+                        labels.append(f"{cap}:S21m_j{j}_j{j2}_l{p[3]}_m{p[4]}_m{p[5]}")
+            fractional = np.zeros((len(labels), len(labels)))
+            start = 0
+            for block in blocks:
+                fractional[start:start + len(block), start:start + len(block)] = block
+                start += len(block)
+            np.savez(args.output / f"window_calibration_z{z}_{cap}.npz", labels=np.array(labels), fractional=fractional)
         deltas = [blk["delta"] for blk in product.s1m.values()]
         summary[cap] = dict(nblocks=len(product.s1m), nentries=len(product.s21m),
                             delta_range=[float(min(deltas)), float(max(deltas))],

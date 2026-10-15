@@ -74,8 +74,9 @@ def parse_args(argv=None):
                         help="survey: analytic covariance (analytic_covariance_rsd_wst.py --survey: labels, lncov of one "
                              "survey) instead of the --covariance-data-dir boxes; no Hartlap / Percival factors")
     parser.add_argument("--extra-covariance", type=Path, nargs="*", default=[],
-                        help="npz files (labels, covariance) of modelling errors added to the covariance as they are "
-                             "(not scaled with the volume), e.g. the window calibration (survey.window_correction)")
+                        help="npz files (labels, covariance in data units, or fractional) of modelling errors added "
+                             "to the covariance as they are (not scaled with the volume), e.g. the window calibration "
+                             "(dr1_window.py --test products)")
     parser.add_argument("--no-percival", action="store_true",
                         help="do not multiply the likelihood covariance by the Percival et al. (2014) factor m1 (the "
                              "posterior widening from the noise of the sample covariance; applied by default)")
@@ -644,11 +645,15 @@ def main():
     for path in args.extra_covariance:  # modelling errors in data units, matched by label
         extra = np.load(path)
         index = {str(label): i for i, label in enumerate(extra["labels"])}
-        missing = [label for label in labels if label not in index]
-        if missing:
-            raise SystemExit(f"{path} has no covariance for {missing[:5]}...")
-        rows = np.array([index[label] for label in labels])
-        covariance = covariance + extra["covariance"][np.ix_(rows, rows)]
+        present = np.array([i for i, label in enumerate(labels) if label in index])  # e.g. one cap's entries
+        if not len(present):
+            raise SystemExit(f"{path} has no covariance for any of the data points")
+        rows = np.array([index[labels[i]] for i in present])
+        block = extra["fractional" if "fractional" in extra.files else "covariance"][np.ix_(rows, rows)]
+        if "fractional" in extra.files:  # relative errors (e.g. the window calibration): in data units via the mean
+            mean = vectors.mean(axis=0)[present]
+            block = block * np.outer(mean, mean)
+        covariance[np.ix_(present, present)] += block
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
 
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)
