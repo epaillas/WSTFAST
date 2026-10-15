@@ -14,6 +14,10 @@ resummation. The results equal ``loop_integrals`` to rounding.
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
 import numpy as np
 
 from .bias import MATTER_BETA, galaxy_kernel_powers, multiply_first
@@ -123,3 +127,54 @@ class LoopTables:
             out = {name: value[..., 0] for name, value in out.items()}
         out["loop"] = out["22"] + out["13"]
         return out
+
+
+_STATE = ("p", "p22", "pr", "t22", "t13")
+
+
+def cached_tables(k, mu, quadrature: Quadrature = Quadrature(), biased: bool = False) -> LoopTables:
+    """``LoopTables`` from a disk cache, built and saved on a miss: building costs minutes and is otherwise repeated by
+    every process (e.g. every MPI rank of an emulator training). The tables (~1 GB for the biased grid) are memory-mapped,
+    so the processes of a node share one copy. Directory ``$WSTFAST_CACHE`` (an empty value disables the cache), else
+    ``$SCRATCH/.cache/wstfast`` or ~/.cache/wstfast. The key hashes the grids, the quadrature and the source of the
+    kernel modules, so a code change rebuilds; the entry is written atomically (concurrent builders are safe)."""
+    from . import bias, eft_loop
+
+    default = Path(os.environ["SCRATCH"]) if os.environ.get("SCRATCH") else Path.home()
+    directory = os.environ.get("WSTFAST_CACHE", str(default / ".cache" / "wstfast"))
+    if not directory:
+        return LoopTables(k, mu, quadrature, biased=biased)
+    key = hashlib.sha256()
+    for array in (np.asarray(k, "f8"), np.asarray(mu, "f8")):
+        key.update(array.tobytes())
+    key.update(repr((quadrature, bool(biased))).encode())
+    for module in (bias, eft_loop):
+        key.update(Path(module.__file__).read_bytes())
+    key.update(Path(__file__).read_bytes())
+    path = Path(directory) / f"loop_tables_{key.hexdigest()[:16]}"
+    nk = len(k)
+    try:
+        tables = LoopTables.__new__(LoopTables)
+        tables.k, tables.mu = np.asarray(k, dtype=float), np.asarray(mu, dtype=float)
+        tables.quadrature, tables.biased = quadrature, biased
+        tables.columns22, tables.columns13 = np.load(path / "columns22.npy"), np.load(path / "columns13.npy")
+        for name in _STATE:
+            setattr(tables, name, [np.load(path / f"{name}_{i}.npy", mmap_mode="r") for i in range(nk)])
+        return tables
+    except (OSError, ValueError):
+        pass
+    tables = LoopTables(k, mu, quadrature, biased=biased)
+    try:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.mkdir(parents=True, exist_ok=True)
+        np.save(tmp / "columns22.npy", tables.columns22)
+        np.save(tmp / "columns13.npy", tables.columns13)
+        for name in _STATE:
+            for i, value in enumerate(getattr(tables, name)):
+                np.save(tmp / f"{name}_{i}.npy", value)
+        os.replace(tmp, path)  # fails if another process got there first: its entry is equal
+    except OSError:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+    return tables

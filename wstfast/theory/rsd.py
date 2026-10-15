@@ -102,6 +102,46 @@ def edgeworth_tensors(eigenvalues, multiplicities, q):
     return moment, t4 * scale ** (a - 2), t22 * scale ** (a - 2)
 
 
+def spherical_harmonics(keys, vec):
+    """{(l, m): Y_lm} at the direction of ``vec`` (..., 3) for every (l, m) of ``keys``, equal to
+    ``scipy.special.sph_harm_y(l, m, theta, phi)`` (same normalization and Condon-Shortley phase) but from the
+    Cartesian components, about 10x faster: the normalized associated Legendre recurrence in cos(theta), shared by all l
+    of a given |m|, times (sin(theta) e^{i phi})^|m| = ((x + i y) / r)^|m|. The zero vector takes the direction
+    (1, 0, 0), as scipy at theta = pi / 2, phi = 0."""
+    vec = np.asarray(vec, "f8")
+    norm = np.sqrt(np.sum(vec**2, axis=-1))
+    zero = norm == 0
+    inv = 1.0 / np.where(zero, 1.0, norm)
+    z = vec[..., 2] * inv
+    w = np.where(zero, 1.0, (vec[..., 0] + 1j * vec[..., 1]) * inv)
+    keys = [(int(ell), int(m)) for ell, m in keys]
+    out = {}
+    for a in sorted({abs(m) for _, m in keys}):
+        ells = {ell for ell, m in keys if abs(m) == a}
+        value = np.full(z.shape, (-1.0) ** a * np.sqrt((2 * a + 1) / (4 * np.pi)
+                                                        * np.prod([(2 * k - 1) / (2 * k) for k in range(1, a + 1)])))
+        phase = w**a if a else 1.0
+        legendre = {a: value}
+        if max(ells) > a:  # P_l^m from P_m^m and P_{m+1}^m
+            previous, value = value, np.sqrt(2 * a + 3) * z * value
+            legendre[a + 1] = value
+            for ell in range(a + 2, max(ells) + 1):
+                c = np.sqrt((4 * ell**2 - 1) / (ell**2 - a**2))
+                c1 = np.sqrt((4 * (ell - 1) ** 2 - 1) / ((ell - 1) ** 2 - a**2))
+                previous, value = value, c * (z * value - previous / c1)
+                legendre[ell] = value
+        for ell in ells:
+            y = legendre[ell] * phase
+            for m in {m for l, m in keys if l == ell and abs(m) == a}:
+                out[ell, m] = (y if m >= 0 else (-1) ** a * np.conj(y)).astype(complex)
+    return out
+
+
+def spherical_harmonic(ell, m, vec):
+    """Y_lm at the direction of ``vec`` (..., 3), as ``scipy.special.sph_harm_y`` (``spherical_harmonics``)."""
+    return spherical_harmonics([(ell, m)], vec)[ell, m]
+
+
 def angular_weights(ell, mu):
     """c_l^2 |Y_l|m|(mu)|^2 for |m| = 0..l, shape (l + 1, nmu); they sum (with multiplicity) to 1."""
     c2 = 4 * np.pi / (2 * ell + 1)
@@ -156,10 +196,8 @@ def _block_angles(ell, legs):
     c2 = 4 * np.pi / (2 * ell + 1)
     ys = []
     for leg in legs:
-        norm = np.sqrt(np.sum(leg**2, axis=-1))
-        theta = np.arccos(np.clip(leg[:, 2] / norm, -1, 1))
-        phi = np.arctan2(leg[:, 1], leg[:, 0])
-        ys.append(np.array([sph_harm_y(ell, m, theta, phi) for m in range(ell + 1)]))  # (l+1, N) complex
+        y = spherical_harmonics([(ell, m) for m in range(ell + 1)], leg)
+        ys.append(np.array([y[ell, m] for m in range(ell + 1)]))  # (l+1, N) complex
     w = multiplicity(ell)[:, None]
     pair12 = c2 * w * np.real(ys[0] * np.conj(ys[1]))
     pair34 = c2 * w * np.real(ys[2] * np.conj(ys[3]))
@@ -427,8 +465,9 @@ class RSDGrid:
     def __init__(self, kmax: float = 0.3, nk: int = 240, nmu: int = 16, nk_loop: int = 40, nmu_loop: int = 8,
                  quadrature: Quadrature = Quadrature(), ir: bool = False, tables: bool = True):
         self.ir = ir
-        #: Evaluate the loop from cosmology-independent tables (``loop_tables.LoopTables``, built at the first call,
-        #: equal to ``loop_integrals`` to rounding) instead of the direct quadrature.
+        #: Evaluate the loop from cosmology-independent tables (``loop_tables.LoopTables``, built at the first call or read
+        #: from the disk cache of ``loop_tables.cached_tables``, equal to ``loop_integrals`` to rounding) instead of the
+        #: direct quadrature.
         self.tables = tables
         self._tables = None
         self.k = np.geomspace(1e-3, kmax, nk)
@@ -448,9 +487,9 @@ class RSDGrid:
             return loop_integrals(self.k_loop, self.mu_loop, spectrum, f, None, self.quadrature, rsd=True,
                                   biased=self._biased)
         if self._tables is None:
-            from .loop_tables import LoopTables
+            from .loop_tables import cached_tables
 
-            self._tables = LoopTables(self.k_loop, self.mu_loop, self.quadrature, biased=self._biased)
+            self._tables = cached_tables(self.k_loop, self.mu_loop, self.quadrature, biased=self._biased)
         return self._tables(spectrum, f)
 
     def _to_grid(self, coarse):
@@ -646,6 +685,9 @@ class APNodes:
         self.points = [(a * xmax[0], b * xmax[1]) for a in cheb for b in cheb]
         design = np.array([[a**p * b**r for p, r in self.powers[1:]] for a, b in self.points])
         self._solve = np.linalg.pinv(design)  # (nalpha - 1, npoint): least squares of the remainder
+        #: (nalpha, 1 + npoint): ``fit`` as a linear map of the values at q = 1 and at the nodes, stacked
+        self.matrix = np.block([[np.ones((1, 1)), np.zeros((1, len(self.points)))],
+                                [-self._solve.sum(axis=1, keepdims=True), self._solve]])
 
     def fit(self, center, values):
         """D_alpha (nalpha, ...) from the value at q = 1 (``center``, (...)) and at the nodes (``values``, (npoint, ...))."""

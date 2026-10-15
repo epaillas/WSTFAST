@@ -47,7 +47,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
-from scipy.special import gammaln, sph_harm_y
+from scipy.special import gammaln
 
 from ..config import WSTConfig
 from .eft_loop import matter_kernel
@@ -70,9 +70,9 @@ def first_layer_fields(coefficients):
 
 
 def _harmonic(ell, m, vec):
-    norm = np.sqrt(np.sum(vec**2, axis=-1))
-    theta = np.arccos(np.clip(vec[..., 2] / np.maximum(norm, 1e-30), -1, 1))
-    return sph_harm_y(ell, m, theta, np.arctan2(vec[..., 1], vec[..., 0]))
+    from .rsd import spherical_harmonic
+
+    return spherical_harmonic(ell, m, vec)
 
 
 class ModulusSpectraRSD:

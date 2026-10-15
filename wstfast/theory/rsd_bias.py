@@ -25,13 +25,12 @@ With beta = (1, 1, 0, 0, 0) and no shot noise, all of these reduce to the matter
 from __future__ import annotations
 
 import numpy as np
-from scipy.special import sph_harm_y
 
 from .bias import (CUBIC_NAMES, cubic_kernel, galaxy_kernel, monomial_exponents, monomial_position,
                    monomial_product, product_coefficients)
 from .eft_loop import LinearSpectrum, Quadrature, radial_rule
-from .rsd import RSDGrid, RSDS1Basis
-from .rsd_moduli import SIGMA_V_FACTOR, ModulusSpectraRSD, S21mProjection, _harmonic, first_layer_fields
+from .rsd import RSDGrid, RSDS1Basis, spherical_harmonic, spherical_harmonics
+from .rsd_moduli import SIGMA_V_FACTOR, ModulusSpectraRSD, S21mProjection, first_layer_fields
 
 #: Degree-2 monomials of the tree spectrum: beta_0^2 (f^2 mu^4), beta_0 b1 (2 f mu^2), b1^2 (1).
 TREE = tuple(monomial_position(e) for e in ([2, 0, 0, 0, 0], [1, 1, 0, 0, 0], [0, 2, 0, 0, 0]))
@@ -121,24 +120,36 @@ class BiasedRSDGrid(RSDGrid):
 class _ScaleFreeTerms:
     """Sum_t C_t(n) prod_{v in V_t} P_L(|v(n)| / sigma) over sample points n: the kernel coefficients C_t (scale-free:
     Z kernels depend on directions only) are built once, the spectra per sigma. Terms with the same degree are
-    stacked: ``coefficients[d]`` (nterm, N, nmono(d)) and ``norms[d]`` (nterm, nfactor, N)."""
+    stacked: ``coefficients[d]`` (nterm, N, nmono(d)) and ``index[d]`` (nterm, nfactor) into the distinct leg norms
+    ``unique`` (nunique, N): the terms share a few legs, so P_L is evaluated once per distinct norm and sigma (and
+    reused across the degrees at the same sigma)."""
 
     def __init__(self):
-        self.terms = {}
+        self.terms, self._lookup, self._unique = {}, {}, []
 
     def add(self, degree, coefficients, vectors):
-        norms = np.array([np.sqrt(np.sum(v**2, axis=-1)) for v in vectors]).reshape(len(vectors), len(coefficients))
-        self.terms.setdefault(degree, []).append((coefficients, norms))
+        index = []
+        for v in vectors:
+            norm = np.sqrt(np.sum(v**2, axis=-1))
+            key = norm.tobytes()
+            if key not in self._lookup:
+                self._lookup[key] = len(self._unique)
+                self._unique.append(norm)
+            index.append(self._lookup[key])
+        self.terms.setdefault(degree, []).append((coefficients, index))
 
     def freeze(self):
         self.coefficients = {d: np.stack([c for c, _ in t]) for d, t in self.terms.items()}
-        self.norms = {d: np.stack([n for _, n in t]) for d, t in self.terms.items()}
-        del self.terms
+        self.index = {d: np.array([i for _, i in t], dtype=int).reshape(len(t), -1) for d, t in self.terms.items()}
+        self.unique = np.array(self._unique).reshape(len(self._unique), -1)
+        self._cache = (None, None, None)
+        del self.terms, self._lookup, self._unique
 
     def __call__(self, degree, scale, pk, weight):
         """sum_n weight(n, ...) sum_t C_t(n) prod P_L: weight (N, nout) -> (nout, nmono(degree))."""
-        norms = self.norms[degree]
-        factors = np.prod(pk(norms / scale), axis=1)  # (nterm, N); 1 for a term without spectra
+        if self._cache[0] is not pk or self._cache[1] != scale:
+            self._cache = (pk, scale, pk(self.unique / scale))
+        factors = np.prod(self._cache[2][self.index[degree]], axis=1)  # (nterm, N); 1 for a term without spectra
         combined = np.einsum("tnm,tn->nm", self.coefficients[degree], factors)  # (N, nmono)
         return weight.T @ combined
 
@@ -281,8 +292,7 @@ class BiasedRSDS1Basis(RSDS1Basis):
             legs = [np.asarray(x) for x in self.bis_samplers[ell].legs(0.0)]
             terms = _bispectrum_terms(legs, f)
             c = np.sqrt(4 * np.pi / (2 * ell + 1))
-            ys = [c * np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / np.sqrt(np.sum(x**2, axis=-1)), -1, 1)), 0.0))
-                  for x in legs]
+            ys = [c * np.real(spherical_harmonic(ell, 0, x)) for x in legs]
             for index in members:
                 sigma = self.config.sigma(self.coefficients[index].j)
                 factors = np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) * y for x, y in zip(legs, ys)],
@@ -361,8 +371,7 @@ class BiasedRSDS1Basis(RSDS1Basis):
             terms = _bispectrum_terms(legs, f)
             c = np.sqrt(4 * np.pi / (2 * ell + 1))
             observed = [[x * stretch for x in legs] for stretch in stretches]
-            ys = [[c * np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / np.sqrt(np.sum(x**2, axis=-1)), -1, 1)), 0.0))
-                   for x in obs] for obs in observed]
+            ys = [[c * np.real(spherical_harmonic(ell, 0, x)) for x in obs] for obs in observed]
             for index in members:
                 sigma = self.config.sigma(self.coefficients[index].j)
                 weights = np.array([(self.bis_samplers[ell].weights / sigma**6
@@ -387,12 +396,14 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
     [... | R0' | R1' | G0' | G1' | R0'' | R1'' | G0'' | G1''], norms [n0 | n1 | n0' | n0'']. R0 = r^2 is expanded to
     second order in c_v consistently: R0' = 2 r rho1, R0'' = rho1^2 + 2 r rho2 with r = r0 - c_v rho1 + c_v^2 rho2."""
 
-    def __call__(self, pk, f: float, sigma_v: float, fog: bool = False, stretches=None):
+    def __call__(self, pk, f: float, sigma_v: float, fog: bool = False, stretches=None, fit=None):
         """``grids``, ``norms`` as in the class docstring. With ``stretches`` (a list of (q_perp, q_perp, q_par)), the
         first-layer filters and harmonics of every short leg are evaluated at its observed wavevector (the true one
         times the stretch) while the physics stays in the true frame (the Jacobians cancel in true-frame variables), and
         the outputs gain a leading axis over the stretches: grids (nstretch, nfield, nk, nmu, ncol), norms (nstretch,
-        nfield, nnorm). Needs ``fog`` (no velocity damping)."""
+        nfield, nnorm). Needs ``fog`` (no velocity damping). With ``fit`` (nout, nstretch), a linear map of the stretches
+        (``rsd.APNodes.matrix``: the AP polynomial), the leading axis is that of its output instead; the terms linear in
+        the squared kernels are contracted before their products with the p integrands (fewer rows)."""
         if fog:
             sigma_v = 0.0
         if stretches is not None and not fog:
@@ -409,8 +420,7 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
         for stretch in stretches:
             pobs = self.pvec * stretch
             po = np.sqrt(np.sum(pobs**2, axis=-1))
-            harm = self.harmonics if single or np.all(stretch == 1) else {
-                key: _harmonic(key[0], key[1], pobs) for key in self.harmonics}
+            harm = self.harmonics if single or np.all(stretch == 1) else spherical_harmonics(self.harmonics, pobs)
             radial = {s: np.exp(-0.5 * (s * po) ** 2) * self.window(po) for s, _, _ in self.fields}
             nrm, ker = [], []
             for s, ell, m in self.fields:
@@ -423,9 +433,11 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
             norms.append(nrm)
             kernels.append(ker)
             harmonics.append(harm)
+        kernels = np.array(kernels)  # (nstretch, nfield, np)
         nk, nmu = self.k.size, self.mu.size
         ncol = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
-        grids = np.zeros((len(stretches), len(self.fields), nk, nmu, ncol))
+        grids = np.zeros((len(stretches) if fit is None else len(fit), len(self.fields), nk, nmu, ncol))
+        contract = (lambda x: x) if fit is None else (lambda x: np.tensordot(fit, x, axes=1))  # noqa: E731
         for i, kk in enumerate(self.k):
             pkk = pk(np.array([kk]))[0]
             for a, mk in enumerate(self.mu):
@@ -450,30 +462,46 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                     pair1, pair2 = pair * s2[:, None], pair * (0.5 * s2**2)[:, None]
                     shot1 = w[:, None] * (psp * (2 * sp)[:, None] + psq * (2 * sq)[:, None])
                     shot2 = w[:, None] * (psp * (2 * sp**2)[:, None] + psq * (2 * sq**2)[:, None])
+                # kernel of every (stretch, field): its filter at the observed q leg, times the p-leg factor
+                kernel = np.empty(kernels.shape)
                 for n, stretch in enumerate(stretches):
                     qobs = qvec * stretch
                     qo = np.sqrt(np.sum(qobs**2, axis=-1))
-                    cache = {}
+                    cache = {key: np.real(harmonics[n][key] * np.conj(y))
+                             for key, y in spherical_harmonics(harmonics[n], qobs).items()}
+                    gauss = {s: np.exp(-0.5 * (s * qo) ** 2) * self.window(qo) for s, _, _ in self.fields}
+                    radial = {}  # (s q)^l exp(-(s q)^2 / 2) per distinct (s, l), integer powers by products
+                    for s, ell, _ in self.fields:
+                        if (s, ell) not in radial:
+                            radial[s, ell] = gauss[s].copy()
+                            for _ in range(ell):
+                                radial[s, ell] *= s * qo
                     for index, (s, ell, m) in enumerate(self.fields):
-                        if (ell, m) not in cache:
-                            cache[ell, m] = np.real(harmonics[n][ell, m] * np.conj(_harmonic(ell, m, qobs)))
-                        kernel = (kernels[n][index] * (s * qo) ** ell * np.exp(-0.5 * (s * qo) ** 2) * self.window(qo)
-                                  * cache[ell, m])
-                        r = kernel @ long / 2
-                        r1 = np.sum(w * kernel) / 2 * z1k
-                        k2 = kernel**2 / 2
-                        columns = [monomial_product(r, 2, r, 2) * pkk, 2 * monomial_product(r, 2, r1, 2) * pkk,
-                                   monomial_product(r1, 2, r1, 2) * pkk, k2 @ pair, k2 @ shot, [np.sum(w * k2)]]
-                        if fog:
-                            rho1, rho2 = kernel @ long1 / 2, kernel @ long2 / 2
-                            columns += [2 * monomial_product(r, 2, rho1, 2) * pkk, 2 * monomial_product(rho1, 2, r1, 2) * pkk,
-                                        k2 @ pair1, k2 @ shot1,
-                                        (monomial_product(rho1, 2, rho1, 2) + 2 * monomial_product(r, 2, rho2, 2)) * pkk,
-                                        2 * monomial_product(rho2, 2, r1, 2) * pkk, k2 @ pair2, k2 @ shot2]
-                        grids[n, index, i, a] = np.concatenate(columns)
+                        np.multiply(kernels[n, index], radial[s, ell], out=kernel[n, index])
+                        kernel[n, index] *= cache[ell, m]
+                # all (stretch, field) at once: matrix products over the p points, then the beta polynomials
+                longs = [long, long1, long2] if fog else [long]
+                rs = np.split(kernel @ np.concatenate(longs, axis=1) / 2, len(longs), axis=-1)
+                r = rs[0]
+                r1 = (kernel @ w / 2)[..., None] * z1k
+                quads = [pair, shot, w[:, None]] + ([pair1, shot1, pair2, shot2] if fog else [])
+                quad = np.split(contract(np.square(kernel)) @ np.concatenate(quads, axis=1) / 2,
+                                np.cumsum([x.shape[1] for x in quads])[:-1], axis=-1)
+                bilinear = [monomial_product(r, 2, r, 2) * pkk, 2 * monomial_product(r, 2, r1, 2) * pkk,
+                            monomial_product(r1, 2, r1, 2) * pkk]
+                if fog:
+                    rho1, rho2 = rs[1], rs[2]
+                    bilinear += [2 * monomial_product(r, 2, rho1, 2) * pkk, 2 * monomial_product(rho1, 2, r1, 2) * pkk,
+                                 (monomial_product(rho1, 2, rho1, 2) + 2 * monomial_product(r, 2, rho2, 2)) * pkk,
+                                 2 * monomial_product(rho2, 2, r1, 2) * pkk]
+                bilinear = [contract(x) for x in bilinear]
+                columns = bilinear[:3] + quad[:3]
+                if fog:
+                    columns += bilinear[3:5] + quad[3:5] + bilinear[5:7] + quad[5:7]
+                grids[:, :, i, a] = np.concatenate(columns, axis=-1)
         if single:
             return grids[0], np.array(norms[0])
-        return grids, np.array(norms)
+        return grids, contract(np.array(norms))
 
 
 class BiasedRSDS21mBasis:
@@ -541,8 +569,7 @@ class BiasedRSDS21mBasis:
         sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
         if self.ap:  # the first-layer filters at q = 1 and the AP nodes, fitted as a polynomial in x = ln q
             stretches = [np.ones(3)] + [np.exp([b, b, a]) for a, b in self.nodes.points]
-            grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog, stretches=stretches)
-            grids, norms = self.nodes.fit(grids[0], grids[1:]), self.nodes.fit(norms[0], norms[1:])
+            grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog, stretches=stretches, fit=self.nodes.matrix)
             nalpha, nfield, nk, nmu, ncol = grids.shape
             return np.moveaxis(grids, -1, 2).reshape(nalpha, nfield, ncol, nk * nmu), norms
         grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog)
