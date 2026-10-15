@@ -12,6 +12,12 @@ smaller kmax can use it). Examples:
     python scripts/train_emulator.py --data-dir data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256 \
         --vary omega_cdm logA n_s h omega_b --budget 2 --output outputs/emulators/wst_basis_taylor_superset_5p.h5
 
+    # survey (DESI DR1 LRG 0.4 < z < 0.6): settings from the options, AbacusSummit c000 fiducial, survey lattice
+    python scripts/train_emulator.py --stat rsd --tracer biased --cubic-biases --fog --ir --fiducial abacus \\
+        --config '{"J": 3, "L": 4, "L2": 4, "sigma0": 2.5, "step": 1.4142135623730951, "cellsize": 10.0, "min_dj": 3}' \\
+        --redshift 0.509 --shotnoise 1841 --lattice 3440 344 --s21-cellsize 10 --s1-min-scale 25 --s21-min-scale 25 \\
+        --vary omega_cdm logA n_s h --output outputs/emulators/survey_lrg_z0.51.h5
+
     # one-loop P(k) with dsc-model's regulator (Lambda = 0.5 h/Mpc); --cutoff none for unregulated SPT
     python scripts/train_emulator.py --stat pk --data-dir data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256 \
         --vary omega_cdm logA --output outputs/emulators/pk_taylor.h5
@@ -25,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+import wstfast
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, setup_logging
 from desilike.emulators import Emulator, Space
@@ -38,6 +45,17 @@ from wstfast.theory.power import ORDERS, LatticeBinning, default_knodes
 #: Default emulation box: about +-15% around the Quijote fiducial (as in dsc-model).
 DEFAULT_BOUNDS = {"h": (0.6111, 0.7311), "omega_cdm": (0.0959, 0.1459), "logA": (2.761, 3.361),
                   "omega_b": (0.0200, 0.0241), "n_s": (0.90, 1.02)}
+
+
+def default_bounds(name: str, fiducial: str = "quijote") -> tuple:
+    """DEFAULT_BOUNDS, recentred on the fiducial (the Taylor expansion point is the centre of the box)."""
+    low, high = DEFAULT_BOUNDS[name]
+    if fiducial == "quijote":
+        return low, high
+    from wstfast.config import ABACUS_COSMOLOGY
+
+    half = 0.5 * (high - low)
+    return ABACUS_COSMOLOGY[name] - half, ABACUS_COSMOLOGY[name] + half
 
 
 def basis_settings(data_dir: Path, space: str, q: float | None = None) -> dict:
@@ -102,9 +120,14 @@ def train_rsd(args):
     (counterterms at zero) and S21m (noise amplitudes at zero) against the exact basis at random points."""
     from wstfast.theory.rsd import MultipoleProjection, RSDGrid, S1mProjection
 
-    first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
-    measurement = load_measurement(first, q=0.8 if args.q is None else args.q)
-    config, meta = measurement["config"], measurement["metadata"]
+    if args.config is not None:  # survey: no box measurements; the settings come from the options
+        config = wstfast.WSTConfig(**args.config)
+        meta = dict(redshift=args.redshift)
+    else:
+        first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
+        measurement = load_measurement(first, q=0.8 if args.q is None else args.q)
+        config, meta = measurement["config"], measurement["metadata"]
+    lattice = dict(boxsize=args.lattice[0], nmesh=int(args.lattice[1]))
     coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale) if c.kind == "S1"]
     s21 = [] if args.no_s21 else [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
                                                                    s21_min_ratio=args.s21_min_ratio,
@@ -114,14 +137,15 @@ def train_rsd(args):
     missing = [c.label for c in first_layer if c not in coefficients]
     if missing:
         raise SystemExit(f"--s1-min-scale must include the first-layer coefficients {missing}")
-    bounds = {name: tuple(args.bounds.get(name, DEFAULT_BOUNDS[name])) for name in args.vary}
+    bounds = {name: tuple(args.bounds.get(name, default_bounds(name, args.fiducial))) for name in args.vary}
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
-                    fog=args.fog)
-    basis = RSDBasis(cosmo=build_cosmology(args.vary), config=config, coefficients=coefficients, z=meta["redshift"],
-                     kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer, s21_damping=args.s21_damping,
-                     cubic_biases=args.cubic_biases, fog=args.fog)
+                    fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize)
+    basis = RSDBasis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
+                     z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
+                     s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
+                     s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -130,21 +154,29 @@ def train_rsd(args):
     args.output.with_suffix(".json").write_text(json.dumps(settings, indent=2))
     print(f"wrote {args.output}")
 
-    s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=config.q)
-    power = load_power_dataset(args.data_dir, "rsd", kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files, ells=(0, 2, 4))
+    if args.config is not None:
+        shotnoise = args.shotnoise
+        kfund = 2 * np.pi / lattice["boxsize"]
+        edges = np.arange(0.5, 0.2 / (2 * kfund) + 1.0, 1.0) * 2 * kfund  # bins of two fundamental modes to 0.2
+    else:
+        s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=config.q)
+        power = load_power_dataset(args.data_dir, "rsd", kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files,
+                                   ells=(0, 2, 4))
+        shotnoise, edges = s1m.shotnoise, power.edges
     grid = RSDGrid(kmax=args.kmax)  # the same grid as the basis
-    projections = dict(s1m=S1mProjection(config, coefficients, grid), pk=MultipoleProjection(power.edges, grid))
+    projections = dict(s1m=S1mProjection(config, coefficients, grid, **lattice),
+                       pk=MultipoleProjection(edges, grid, **lattice))
     # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles.
     fog = dict(fog="shared") if args.fog else {}  # validated at c_v = 0 (the undamped orders 0)
 
     def theories(b):
-        out = [S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b, shotnoise=s1m.shotnoise,
+        out = [S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b, shotnoise=shotnoise,
                          tracer=args.tracer, **fog),
-               RSDPowerTheory(projections["pk"], basis=b, shotnoise=power.shotnoise, tracer=args.tracer)]
+               RSDPowerTheory(projections["pk"], basis=b, shotnoise=shotnoise, tracer=args.tracer)]
         if s21:
-            out.append(S21mTheory(S1mProjection(config, first_layer, grid), s21, first_layer, q=config.q, basis=b,
-                                  cumulant_index=[coefficients.index(c) for c in first_layer],
-                                  shotnoise=s1m.shotnoise, tracer=args.tracer, **fog))
+            out.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), s21, first_layer, q=config.q,
+                                  basis=b, cumulant_index=[coefficients.index(c) for c in first_layer],
+                                  shotnoise=shotnoise, tracer=args.tracer, **fog))
         return out
 
     graphs = {name: build(JointTheory(theories(b))) for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
@@ -188,6 +220,18 @@ def main():
     parser.add_argument("--s21-min-scale2", type=float, default=70.0, help="rsd: smallest sigma_j2 of the S21m terms")
     parser.add_argument("--s21-min-ratio", type=float, default=2.8, help="rsd: smallest sigma_j2 / sigma_j1 of S21m")
     parser.add_argument("--data-dir", type=Path, default=Path("data/quijote/fiducial/z0.5/J4_L4_sigma0.8_n256"))
+    parser.add_argument("--config", type=json.loads, default=None,
+                        help='rsd, survey: WSTConfig as JSON instead of the --data-dir measurements, e.g. \'{"J": 3, "L": 4, '
+                             '"L2": 4, "sigma0": 2.5, "step": 1.4142135623730951, "cellsize": 10.0, "min_dj": 3}\'')
+    parser.add_argument("--redshift", type=float, default=None, help="rsd, with --config: effective redshift")
+    parser.add_argument("--shotnoise", type=float, default=None,
+                        help="rsd, with --config: shot noise 1 / nbar of the validation [(Mpc/h)^3]")
+    parser.add_argument("--lattice", type=float, nargs=2, default=[1000.0, 256], metavar=("BOXSIZE", "NMESH"),
+                        help="rsd: periodic lattice of the mode sums (S21m terms; S1m and P(k) validation)")
+    parser.add_argument("--s21-cellsize", type=float, default=0.0,
+                        help="rsd: mass-assignment window of the first-layer legs of the modulus spectra [Mpc/h]")
+    parser.add_argument("--fiducial", choices=("quijote", "abacus"), default="quijote",
+                        help="fiducial (expansion point and fixed parameters); abacus = AbacusSummit c000")
     parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")
     parser.add_argument("--q", type=float, default=None, help="WST exponent (default: the measurement's first q)")
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY))

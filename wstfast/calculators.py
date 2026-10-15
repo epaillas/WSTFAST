@@ -18,7 +18,7 @@ from desilike.base import Calculator, GaussianLikelihood
 from desilike.parameter import Parameter
 from desilike.theories import CosmoprimoCosmology
 
-from .config import QUIJOTE_COSMOLOGY, WSTConfig
+from .config import ABACUS_COSMOLOGY, ABACUS_M_NCDM, QUIJOTE_COSMOLOGY, WSTConfig
 from .theory import Assembly, WSTMatterBasis
 from .theory.power import LatticeBinning, matter_power_terms
 
@@ -27,15 +27,19 @@ COSMOLOGY_PRIORS = {"h": (0.5, 0.9), "omega_cdm": (0.08, 0.16), "logA": (2.5, 3.
                     "omega_b": (0.015, 0.03), "n_s": (0.85, 1.1)}
 
 
-def build_cosmology(varied=("omega_cdm", "logA"), engine="class") -> CosmoprimoCosmology:
-    """Quijote fiducial cosmology (massless neutrinos); only ``varied`` parameters are free."""
+def build_cosmology(varied=("omega_cdm", "logA"), engine="class", fiducial: str = "quijote") -> CosmoprimoCosmology:
+    """Fiducial cosmology, Quijote (massless neutrinos) or AbacusSummit c000 (``fiducial="abacus"``: one 0.06 eV
+    neutrino); only ``varied`` parameters are free."""
+    if fiducial not in ("quijote", "abacus"):
+        raise ValueError(f"unknown fiducial {fiducial!r}")
+    values, m_ncdm = (QUIJOTE_COSMOLOGY, 0.0) if fiducial == "quijote" else (ABACUS_COSMOLOGY, ABACUS_M_NCDM)
     params = CosmoprimoCosmology.propose_params(engine=engine, fiducial="DESI")
-    for name, value in QUIJOTE_COSMOLOGY.items():
+    for name, value in values.items():
         params[name].update(value=value, fixed=name not in varied)
         if name in varied:
             params[name].update(prior=dict(limits=list(COSMOLOGY_PRIORS[name])),
                                 ref=dict(dist="norm", loc=value, scale=params[name].ref.std()))
-    params["m_ncdm"].update(value=0.0, fixed=True)
+    params["m_ncdm"].update(value=m_ncdm, fixed=True)
     params["tau_reio"].update(fixed=True)
     unknown = set(varied) - set(QUIJOTE_COSMOLOGY)
     if unknown:
@@ -245,13 +249,14 @@ class RSDBasis(Calculator):
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                  s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
-                 cubic_biases: bool = False, fog: bool = False):
+                 cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
-                      cubic_biases: bool = False, fog: bool = False):
+                      cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
+                      s21_cellsize: float = 0.0):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -284,15 +289,19 @@ class RSDBasis(Calculator):
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
         if self.fog:
             s21_kwargs["fog"] = True
+        # The lattice of the S21m mode sums (the periodic reference of the measurement) and the mass-assignment window
+        # of the first-layer legs of the modulus spectra (0: none, as for the box fits).
+        s21_kwargs.update(boxsize=float(s21_lattice[0]), nmesh=int(s21_lattice[1]), cellsize=float(s21_cellsize))
         self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients), **s21_kwargs)
                           if len(s21_coefficients) else None)
         self.klin = np.geomspace(1e-4, 10.0, 1024)
-        self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_m", "z": self.z, "k": self.klin}],
+        # cb (cold dark matter + baryons) power: the tracers follow it; equal to delta_m without massive neutrinos.
+        self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_cb", "z": self.z, "k": self.klin}],
                                      "fourier.sigma8_z": [{"of": "delta_cb", "z": self.z}, {"of": "theta_cb", "z": self.z}],
                                      "params.A_s": None, "params.h": None, "thermodynamics.rs_drag": None})
 
     def __call__(self):
-        pk = np.asarray(self.cosmo.get("fourier.pk", of="delta_m", z=self.z, k=self.klin))
+        pk = np.asarray(self.cosmo.get("fourier.pk", of="delta_cb", z=self.z, k=self.klin))
         f = float(self.cosmo.get("fourier.sigma8_z", of="theta_cb", z=self.z)
                   / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
         ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE

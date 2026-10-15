@@ -22,7 +22,7 @@ survey S2m as R2 x the box S2m, R2 = <T2^{q/2}> over the support. Tested per moc
 cancels cosmic variance) on several spectra: S21m = S2m / S1m with the measured survey S1m, so only the
 second-layer window is tested; "coverage" sets c2 = 1 and "none" R2 = 1.
 
-``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7))
+``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
 
@@ -333,10 +333,10 @@ def run_s21m(args, geometries, setups, pk):
 
 
 def data_vector(out) -> np.ndarray:
-    """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l, |m1|, |m2|)."""
+    """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l >= 1, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
     s21 = [out["S2m"][0, 3, ell, m1, m2] / out["S1m"][0, ell, m1]
-           for ell in range(5) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+           for ell in range(1, 5) for m1 in range(ell + 1) for m2 in range(ell + 1)]
     return np.array(s1 + s21)
 
 

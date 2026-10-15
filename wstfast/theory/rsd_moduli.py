@@ -82,8 +82,12 @@ class ModulusSpectraRSD:
     [0, pi] (the integrands are even in phi_p for K in the x-z plane). The geometry is shared by all fields.
     """
 
-    def __init__(self, fields, k, mu, npts: int = 56, nx: int = 24, nphi: int = 16, pmin: float = 2e-3):
+    def __init__(self, fields, k, mu, npts: int = 56, nx: int = 24, nphi: int = 16, pmin: float = 2e-3,
+                 cellsize: float = 0.0):
         self.fields = [(float(s), int(ell), int(m)) for s, ell, m in fields]
+        #: Mass-assignment window of the first-layer legs, exp(-k^2 c^2 / 12) (the Gaussian approximation of CIC used by
+        #: the S1m cumulants); 0 (no window) by default, as for the box fits.
+        self.cellsize = float(cellsize)
         self.k, self.mu = np.asarray(k, "f8"), np.asarray(mu, "f8")
         pmax = 7.0 / min(s for s, _, _ in self.fields)
         p = np.geomspace(pmin, pmax, npts)
@@ -98,6 +102,10 @@ class ModulusSpectraRSD:
                         * (2 * np.pi / nphi) / (2 * np.pi) ** 3 * np.ones_like(P)).ravel()
         self.harmonics = {(ell, m): _harmonic(ell, m, self.pvec) for _, ell, m in self.fields}
 
+    def window(self, k):
+        """Mass-assignment window of a first-layer leg of wavenumber ``k`` (1 without ``cellsize``)."""
+        return np.exp(-((k * self.cellsize) ** 2) / 12.0) if self.cellsize else 1.0
+
     def __call__(self, pk, f: float, sigma_v: float):
         """Return (response, noise), each (nfield, nk, nmu); ``pk`` is a callable linear spectrum."""
         damp = lambda k, mu: np.exp(-0.5 * (f * k * mu * sigma_v) ** 2)  # noqa: E731
@@ -105,7 +113,7 @@ class ModulusSpectraRSD:
         p, w = self.p, self.weights
         dp, pkp = damp(p, self.mup), pk(p)
         psp = pkp * z1(self.mup) ** 2 * dp**2
-        radial = {s: np.exp(-0.5 * (s * p) ** 2) for s, _, _ in self.fields}
+        radial = {s: np.exp(-0.5 * (s * p) ** 2) * self.window(p) for s, _, _ in self.fields}
         norms, kernels = [], []
         for s, ell, m in self.fields:
             c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
@@ -131,7 +139,8 @@ class ModulusSpectraRSD:
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
                         cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(_harmonic(ell, m, qvec)))
-                    kernel = kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * cache[ell, m]
+                    kernel = (kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * self.window(qn)
+                              * cache[ell, m])
                     r = np.sum(long * kernel) / (2 * norms[index])
                     response[index, i, a] = r**2 * pkk
                     noise[index, i, a] = np.sum(pair * kernel**2) / (2 * norms[index] ** 2)

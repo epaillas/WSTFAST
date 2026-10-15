@@ -311,7 +311,7 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
         sp = (p * self.mup) ** 2 / FOG_KNL**2  # k_z^2 / k_NL^2 of the leg p
         z1p = linear_components(self.pvec, f)
         psp = (pkp * dp**2)[:, None] * product_coefficients(z1p, z1p)  # (np, 15)
-        radial = {s: np.exp(-0.5 * (s * p) ** 2) for s, _, _ in self.fields}
+        radial = {s: np.exp(-0.5 * (s * p) ** 2) * self.window(p) for s, _, _ in self.fields}
         norms, kernels = [], []
         for s, ell, m in self.fields:
             c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
@@ -351,7 +351,8 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
                         cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(_harmonic(ell, m, qvec)))
-                    kernel = kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * cache[ell, m]
+                    kernel = (kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * self.window(qn)
+                              * cache[ell, m])
                     r = kernel @ long / 2
                     r1 = np.sum(w * kernel) / 2 * z1k
                     k2 = kernel**2 / 2

@@ -7,6 +7,10 @@ from dataclasses import asdict, dataclass, replace
 # Quijote fiducial cosmology (massless neutrinos), in the parameterisation desilike varies.
 QUIJOTE_COSMOLOGY = dict(h=0.6711, omega_b=0.02206838529, omega_cdm=0.120925743885,
                          n_s=0.9624, logA=3.061143632659324)
+# AbacusSummit c000 (Planck 2018 base_plikHM_TTTEEE_lowl_lowE_lensing mean), the cosmology of the DESI DR1 Abacus
+# mocks: A_s = 2.0830e-9, one massive neutrino of 0.06 eV (omega_ncdm = 0.00064420) on top of omega_cdm.
+ABACUS_COSMOLOGY = dict(h=0.6736, omega_b=0.02237, omega_cdm=0.1200, n_s=0.9649, logA=3.036394)
+ABACUS_M_NCDM = 0.06
 
 
 @dataclass(frozen=True)
