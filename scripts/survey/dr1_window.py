@@ -91,6 +91,9 @@ def get_args():
     parser.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS),
                         help="spectra of the test mocks (lambda, s21m)")
     parser.add_argument("--seed-offset", type=int, default=0, help="offset of the test-mock seeds (independent runs)")
+    parser.add_argument("--paired", action="store_true",
+                        help="lambda: also measure each test mock unmasked on the same cells (its box), so that the "
+                             "S-level correction is calibrated paired, without the mocks' cosmic variance")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -224,16 +227,21 @@ def run_lambda(args, geometries, setups, pk):
         b, f, a, t = VARIANTS[name]
         mocks = mocks_of(geometries, pk, name)
         measured = {cap: [] for cap in caps}
+        boxes = {cap: [] for cap in caps}  # the same mock unmasked on the same cells: pairs the S-level calibration
         for r in range(args.realizations):
             t0 = time.time()
             fields = [mocks[cap](seed=[200 + args.seed_offset + r, k]) for k, cap in enumerate(caps)]
-            for cap, field in zip(caps, ric(*fields)):
+            for cap, survey, field in zip(caps, ric(*fields), fields):
                 s = setups[cap]
-                out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
-                                   qs=[args.q], los=s["los"], lattice=s["lattice"], second_layer_bins=s["bins2"])
+                common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
+                out = args.measure(survey, s["config"], support=s["g"].support, second_layer_bins=s["bins2"], **common)
                 measured[cap].append(out["S1m"][0])
+                if args.paired:
+                    boxes[cap].append(args.measure(field, s["config"], moment_support=s["g"].support,
+                                                   **common)["S1m"][0])
             print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
-            np.savez(args.output / f"partial_{name}.npz", **{cap: np.array(v) for cap, v in measured.items()})
+            np.savez(args.output / f"partial_{name}.npz", **{cap: np.array(v) for cap, v in measured.items()},
+                     **{f"{cap}_box": np.array(v) for cap, v in boxes.items() if v})
         for cap in caps:
             s, g = setups[cap], geometries[cap]
             grid = getattr(s["lattice"], "numpy", s["lattice"])  # the numpy Lattice of a TorchLattice

@@ -12,6 +12,13 @@ rows (data) and a treatment of the columns (nuisance parameters):
   of the same variance, so that unconstrained directions stay finite);
 - ``shared``: as ``marg``, but with one set of counterterms for P_l and S1m (c0 = c0_pk, ...).
 
+With ``--window-ratios`` (one npz per cap, from the survey window tests: per-mock ratios measured / window model of
+the S1m and S21m entries, and the cap's FKP effective volume), it instead sizes the calibration of the S-level window
+correction delta_b (docs/survey_plan.md section 8): the model and covariance are those of the fit with ``--fit-args``
+(e.g. the halo baseline), the data covariance is that of the mean of ``--nmean`` surveys of the caps' effective
+volumes, and the error of delta_b calibrated on N mocks, Cov(ratio) / N per cap, is propagated to the marginalised
+parameters. It prints the rms parameter shift in units of the parameter errors for each N of ``--ncal``.
+
 Example (halos):
 
     python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
@@ -59,6 +66,13 @@ def parse_args():
                                  Path("outputs/inference/rsd/halos_bias_only_V60_pk/summary.json")],
                         help="fit summaries whose best fits set the nuisance values (later files take precedence)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/rsd.json"))
+    parser.add_argument("--fit-args", default="", help="window mode: further fit_rsd.py arguments (the fit to size)")
+    parser.add_argument("--window-ratios", type=Path, nargs="*", default=None,
+                        help="window mode: npz per cap (s1m (nmock, J+1, L+1, L+1), s21m (nmock, nentry), s21m_keys, "
+                             "sigma, veff) of measured / window-model ratios of fiducial survey mocks")
+    parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
+    parser.add_argument("--ncal", type=int, nargs="+", default=[100, 300, 1000, 3000, 10000],
+                        help="window mode: numbers of calibration mocks to size")
     return parser.parse_args()
 
 
@@ -76,9 +90,110 @@ def prior_sigma(param):
     return float(prior.std()) if prior.is_proper() else np.inf
 
 
+def window_calibration(args, fr):
+    """Rms shift of the marginalised parameters from the calibration error of delta_b, per number of mocks."""
+    import shlex
+
+    fit = fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused"]
+                        + shlex.split(args.fit_args))
+    problem = fr.build_problem(fit)
+    theory = problem["theories"][0] if len(problem["theories"]) == 1 else JointTheory(problem["theories"])
+    labels, vectors, meta = problem["labels"], problem["vectors"], problem["meta"]
+    config = fr.load_measurement(sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0], q=0.8)["config"]
+    params = get_params(theory).select(varied=True, derived=False)
+    names = params.names()
+    fiducial = {name: float(params[name].value) for name in names}
+    for path in args.fiducial:
+        if path.exists():
+            best = json.loads(path.read_text())["bestfit"]
+            fiducial.update({name: float(value) for name, value in best.items() if name in names})
+    model = build(theory)
+    mean = np.asarray(model(fiducial))
+    jacobian = np.array([(np.asarray(model({**fiducial, n: fiducial[n] + step_of(n)}))
+                          - np.asarray(model({**fiducial, n: fiducial[n] - step_of(n)}))) / (2 * step_of(n))
+                         for n in names])
+    box = np.cov(vectors, rowvar=False, ddof=1) * (meta["boxsize"] / 1000.0) ** 3  # one box of 1 (Gpc/h)^3
+    common = np.zeros_like(box)  # volume-independent theory error, the same in every cap
+    if getattr(fit, "s21_layer2", None) is not None:
+        common += np.diag(fr.layer2_variance(fit, labels, vectors.mean(axis=0)))
+        if fit.s21_layer2_marg is not None:
+            templates = list(fr.layer2_templates(fit, labels, vectors.mean(axis=0)))
+        else:
+            templates = []
+    else:
+        templates = []
+
+    def survey_index(label):
+        """(kind, index) of a fit label in the survey ratio arrays."""
+        parts = label.split("_")
+        if parts[0] == "S1m":
+            j, ell, m = int(parts[1][1:]), int(parts[2][1:]), int(parts[3][1:])
+            jj = int(round(np.log(config.sigma(j) / 25.0) / np.log(np.sqrt(2.0))))
+            return "s1m", (jj, ell, m)
+        ell, m1, m2 = int(parts[3][1:]), int(parts[4][1:]), int(parts[5][1:])
+        return "s21m", (ell, m1, m2)
+
+    caps = []
+    for path in args.window_ratios:
+        f = np.load(path)
+        keys = [tuple(k) for k in f["s21m_keys"]]
+        columns, blocks = [], []
+        for label in labels:
+            kind, key = survey_index(label)
+            column = f["s1m"][(slice(None),) + key] if kind == "s1m" else f["s21m"][:, keys.index(key)]
+            columns.append(column / column.mean())
+            blocks.append(kind)
+        cov = np.zeros((len(labels), len(labels)))
+        for kind in ("s1m", "s21m"):  # one mock set per statistic: no cross-covariance between the blocks
+            rows = np.flatnonzero([b == kind for b in blocks])
+            if len(rows):
+                sub = np.array([columns[i] for i in rows]).T  # (nmock, nrow)
+                cov[np.ix_(rows, rows)] = np.cov(sub[np.all(np.isfinite(sub), axis=1)], rowvar=False, ddof=1)
+        caps.append(dict(name=path.stem, veff=float(f["veff"]), ratio_cov=cov * np.outer(mean, mean)))
+    n = len(labels)
+    data_cov = np.zeros((n * len(caps), n * len(caps)))
+    for i, cap in enumerate(caps):
+        data_cov[i * n:(i + 1) * n, i * n:(i + 1) * n] = box / (cap["veff"] * args.nmean)
+    data_cov += np.kron(np.ones((len(caps), len(caps))), common)
+    for vector in templates:
+        stacked = np.tile(vector, len(caps))
+        data_cov += fit.s21_layer2_marg_width**2 * np.outer(stacked, stacked)
+    jac = np.tile(jacobian, (1, len(caps)))
+    priors = np.array([np.inf if name in COSMOLOGY else prior_sigma(params[name]) for name in names])
+    precision = np.linalg.inv(data_cov)
+    fisher = jac @ precision @ jac.T + np.diag(1.0 / priors**2)
+    inverse = np.linalg.inv(fisher)
+    gain = inverse @ jac @ precision  # parameters per unit data shift (nuisances marginalised)
+    cosmo = [names.index(name) for name in COSMOLOGY if name in names]
+    sigma = np.sqrt(np.diag(inverse))[cosmo]
+    calib = np.zeros_like(data_cov)
+    for i, cap in enumerate(caps):
+        calib[i * n:(i + 1) * n, i * n:(i + 1) * n] = cap["ratio_cov"]
+    shift1 = np.sqrt(np.diag(gain @ calib @ gain.T))[cosmo]  # one calibration mock
+    print(f"{n} data points per cap, caps {[c['name'] for c in caps]} (V_eff {[round(c['veff'], 3) for c in caps]}),"
+          f" data = mean of {args.nmean}; {len(names)} parameters")
+    print("sigma(param), data:", dict(zip([names[i] for i in cosmo], np.round(sigma, 5).tolist())))
+    print(f"{'N_cal':>8s}" + "".join(f"{names[i]:>16s}" for i in cosmo) + "   (rms shift / sigma)")
+    out = {}
+    for ncal in args.ncal:
+        ratio = shift1 / np.sqrt(ncal) / sigma
+        out[ncal] = dict(zip([names[i] for i in cosmo], ratio.tolist()))
+        print(f"{ncal:>8d}" + "".join(f"{r:>16.3f}" for r in ratio))
+    need = {names[i]: float((shift1[k] / sigma[k] / 0.1) ** 2) for k, i in enumerate(cosmo)}
+    print("N_cal for an rms shift of 0.1 sigma:", {k: int(np.ceil(v)) for k, v in need.items()})
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(dict(fit_args=args.fit_args, nmean=args.nmean, fiducial=fiducial,
+                                           sigma=dict(zip([names[i] for i in cosmo], sigma.tolist())),
+                                           shift_over_sigma=out, ncal_for_0p1_sigma=need,
+                                           caps={c["name"]: c["veff"] for c in caps}), indent=2))
+    print(f"wrote {args.output}")
+
+
 def main():
     args = parse_args()
     fr = load_fit_rsd()
+    if args.window_ratios:
+        return window_calibration(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
     # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit_rsd's default cuts.
