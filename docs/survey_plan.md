@@ -357,9 +357,29 @@ spectrum, test error 0.1σ**).** The λ window does **not** reach 0.1σ on its o
 - Validation over the ±15% box, max relative error: S1m 3.2e-4, S21m 1.1e-3, P_l 0.6% (the box emulator: 3.7e-4,
   1.0e-3, 3.9%).
 
+**S21m window (2026-10-15,** `dr1_window.py --test s21m`**).** T₂ = f₂ c₂ on the σ_j2 coverage, with survey
+S2m = R₂ × box S2m. Each test mock is paired with its own box. The residuals below are over the 54 baseline entries
+(l ≥ 1), in units of one survey's error.
+
+| Estimator | Run | NGC max / rms | SGC max / rms | Fractional residual |
+|---|---|---|---|---|
+| Global support mean | local, 16 mocks | 0.61–1.15σ / 0.26–0.42σ | 1.11–1.12σ / 0.35–0.44σ | ≤ 4.3% |
+| Binned mean (E4) | NERSC A100, 32 mocks | 0.54–0.62σ / 0.22–0.23σ | 0.50–0.54σ / 0.21–0.22σ | ≤ 1.6% (0.5–0.6% rms) |
+
+- **Global mean.** The residual depends on b and f (pattern correlation 0.84–0.91): a deterministic offset, the
+  edge profile of ⟨U⟩, which ψ₂ carries into X₂.
+- **Binned mean** (`second_layer_bins`: 10 coverage quantile bins + 1 interior bin, × 3 n̄ bins). The residual is
+  the same for all four spectra (correlation 0.93–0.999), so it is geometric, as for S1m.
+- **With the S-level δ_b** (16 fiducial mocks to calibrate, the other 16 to test): χ² 73–83 / 54 (NGC) and
+  58–68 / 54 (SGC), consistent with the test error of ≤ 0.37σ.
+- **The window model for both layers is the λ window × δ_b.** The 0.1σ level still needs more mocks.
+- The l = 0 S21 entry (not in the baseline) keeps U's mean (the second-layer low-pass) and carries the largest
+  residual (−3.1σ NGC): another reason to keep it out.
+- Measured with the binned estimator, the survey S21m moves farther from the box (up to ~280σ in NGC). This is the
+  same statistic in a box, so it is all window.
+
 **Next:**
-1. More test mocks (GPU) to bring the test error to ≤ 0.1σ, with the S-level δ_b; then the window for S21m (P_UU
-   through the same coverage-and-correction form).
+1. More test mocks (GPU) to bring the test error to ≤ 0.1σ for both layers, with δ_b.
 2. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
    (E4).
 2. The parameter-level test: fit the masked halo S1m (+S21m) with R × the box model, using the cubic halo emulator
