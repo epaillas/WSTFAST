@@ -24,6 +24,11 @@ profile of U; ``global`` is the support mean. Tested per mock (paired with its o
 cancels cosmic variance) on several spectra: S21m = S2m / S1m with the measured survey S1m, so only the
 second-layer window is tested; "coverage" sets c2 = 1 and "none" R2 = 1.
 
+``--test products``: the window files of the likelihood (``survey.SurveyWindow``, one per cap): the first-layer
+histograms of the transfer (``--correction``) and noise, delta of every S1m block from paired mocks
+(``--paired-mocks``), K of every S21m entry from the S21m test mocks (``--s21m-mocks``), and the per-mock ratios of
+both (the calibration covariance, ``survey.window_correction``).
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -71,7 +76,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector"), required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -94,6 +99,12 @@ def get_args():
     parser.add_argument("--paired", action="store_true",
                         help="lambda: also measure each test mock unmasked on the same cells (its box), so that the "
                              "S-level correction is calibrated paired, without the mocks' cosmic variance")
+    parser.add_argument("--correction", type=Path, default=None,
+                        help="products: correction.npz of a --test lambda run (first-layer correction c_m(f))")
+    parser.add_argument("--paired-mocks", type=Path, nargs="*", default=[],
+                        help="products: partial_fiducial.npz of --test lambda --paired runs (delta of S1m)")
+    parser.add_argument("--s21m-mocks", type=Path, nargs="*", default=[],
+                        help="products: results.npz / partial_fiducial.npz of --test s21m runs (K of S21m)")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -354,6 +365,63 @@ def run_s21m(args, geometries, setups, pk):
     return summary
 
 
+def run_products(args, geometries, setups, pk):
+    from wstfast.survey import SurveyWindow
+
+    if args.correction is None:
+        raise SystemExit("--test products needs --correction (correction.npz of a --test lambda run)")
+    f = np.load(args.correction)
+    b, fr, a, t = VARIANTS["fiducial"]
+    summary = {}
+    for cap, g in geometries.items():
+        s = setups[cap]
+        window = LambdaWindow(s["config"], g.support, s["los"], s["lattice"])
+        correction = {blk: f[f"{cap}_{blk[0]}_{blk[1]}"] for blk in window.blocks}
+        weights = g.weights.ravel()[window.index]
+        product = SurveyWindow.build(window, correction, s["noise"], weights, q=args.q)
+        # box variances of the calibration mocks' spectrum (the delta ratio needs them only through T and lambda_N)
+        grid = getattr(s["lattice"], "numpy", s["lattice"])
+        kphys = grid.kmag / g.cellsize
+        pcell = np.where(kphys > 0, (b + fr * grid.mu**2) ** 2 * spectrum(pk, a, t)(np.clip(kphys, 1e-4, None))
+                         / g.cellsize**3, 0.0)
+        lam = signal_variances(pcell, s["config"], s["lattice"])
+        ratios = {}
+        if args.paired_mocks:
+            files = [np.load(path) for path in args.paired_mocks]
+            survey = np.concatenate([x[cap] for x in files])
+            box = np.concatenate([x[f"{cap}_box"] for x in files])
+            for j in range(s["config"].J + 1):
+                for ell in range(s["config"].L + 1):
+                    for m in range(ell + 1):
+                        key = (SurveyWindow.key(s["config"].sigma(j)), ell, m)
+                        signal = lam[j, ell][ell] if m == 0 else 0.5 * (lam[j, ell][ell - m] + lam[j, ell][ell + m])
+                        ratios[f"s1m_{key[0]}_{ell}_{m}"] = product.calibrate_s1m(
+                            key, survey[:, j, ell, m], box[:, j, ell, m], signal, float(s["noise"][j, ell].mean()))
+        if args.s21m_mocks:
+            files = [np.load(path) for path in args.s21m_mocks]
+            pick = lambda x, k: x[f"{cap}_{k}"] if f"{cap}_{k}" in x else x[f"fiducial_{cap}_{k}"]  # noqa: E731
+            measured = np.concatenate([pick(x, "measured") for x in files])
+            box = np.concatenate([pick(x, "none") for x in files])  # S2m_box / S1m_survey: the ratio is S2m_s / S2m_b
+            config = s["config"]
+            entries = [(j1, j2, ell, m1, m2) for j1, j2 in config.second_layer_pairs() for ell in range(args.L + 1)
+                       for m1 in range(ell + 1) for m2 in range(ell + 1)]
+            for n, (j1, j2, ell, m1, m2) in enumerate(entries):
+                key = (SurveyWindow.key(config.sigma(j1)), SurveyWindow.key(config.sigma(j2)), ell, m1, m2)
+                ratio = measured[:, n] / box[:, n]
+                product.s21m[key] = float(ratio.mean())
+                ratios["s21m_" + "_".join(str(k) for k in key)] = ratio
+        z = "-".join(f"{v:g}" for v in args.zrange)
+        product.save(args.output / f"window_z{z}_{cap}.npz")
+        np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
+        deltas = [blk["delta"] for blk in product.s1m.values()]
+        summary[cap] = dict(nblocks=len(product.s1m), nentries=len(product.s21m),
+                            delta_range=[float(min(deltas)), float(max(deltas))],
+                            k_range=[float(min(product.s21m.values())), float(max(product.s21m.values()))]
+                            if product.s21m else None)
+        print(f"{cap}: {summary[cap]}", flush=True)
+    return summary
+
+
 def data_vector(out) -> np.ndarray:
     """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l >= 1, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
@@ -439,10 +507,10 @@ def main():
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
         if args.layer2_mean == "binned" and config.second_layer_pairs():
             setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice)
-        if args.test == "lambda":
+        if args.test in ("lambda", "products"):
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
-    runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, **{"lambda": run_lambda})
+    runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
 
