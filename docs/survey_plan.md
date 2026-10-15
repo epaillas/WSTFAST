@@ -305,8 +305,43 @@ The shift is the same for shell widths of 2.5, 5 and 10 Mpc/h. Against the 25-mo
 RIC is part of the window: the calibration mocks get it on the survey side (`calibrate_window` and `LambdaWindow`
 take paired survey / reference inputs).
 
+**λ-level window (2026-10-14).** `LambdaWindow` (`scripts/survey/dr1_window.py --test lambda`,
+outputs/survey/dr1_lambda_window) puts the window on the component variances, which are linear in P:
+
+    λ_m(x) = T_m(x) λ_m^box + λ_N(x),   T_m(x) = f(x) c_m(f).
+
+- f is the coverage of the wavelet by the support (an FFT; exact for white noise).
+- c_m is a correction calibrated in 40 coverage bins on 16 paired signal-only Gaussian mocks at the fiducial spectrum,
+  with the RIC.
+- A per-cell ratio estimator of T was too noisy: the concave moment turned its noise into a large bias.
+- The survey S1m is the FKP-weighted mean of the Gaussian moment cell by cell, with the exact λ^box of any spectrum.
+
+Tested on 8 noisy, constrained mocks per spectrum, in units of one survey's error (max / rms over 60 S1m blocks):
+
+| Spectrum | NGC window | SGC window | Coverage only | No window |
+|---|---|---|---|---|
+| Fiducial (b 2, f 0.76) | 0.52 / 0.23, χ² 25 | 0.76 / 0.35, χ² 58 | 8–9 | 29–40 |
+| b 1.6, f 0.6 | 0.46 / 0.19, χ² 25 | 0.66 / 0.30, χ² 65 | 7 | 23–32 |
+| Amplitude × 1.21 | 0.56 / 0.25, χ² 25 | 0.83 / 0.37, χ² 56 | 9–10 | 31–44 |
+| Tilt Δn_s = −0.06 | 0.60 / 0.28, χ² 36 | 0.86 / 0.37, χ² 65 | 8–9 | 29–39 |
+
+- The edge effect of the DR1 footprint is large: S1m is 8–24% below the box value.
+- The window brings every spectrum to agreement within the test's own precision (≤ 0.35–0.40σ per block, from
+  8 mocks). That precision is not yet the 0.1σ target.
+- Spectrum dependence of the correction, from residuals paired across spectra (same seeds), max / rms:
+
+  | Variant | Paired difference |
+  |---|---|
+  | Amplitude | 0.07 / 0.02σ (none expected) |
+  | b, f | ≤ 0.20 / 0.06σ (error 0.08) |
+  | Tilt | ≤ 0.16 / 0.08σ (error 0.01, significant) |
+
+  A Δn_s of 0.06 is ~15× the Planck error, so recalibrating c once at the best fit removes it.
+
 **Next:**
-1. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
+1. More test mocks (GPU) to bring the test error to ≤ 0.1σ, then the window for S21m (P_UU through the same
+   coverage-and-correction form).
+2. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
    (E4).
 2. The parameter-level test: fit the masked halo S1m (+S21m) with R × the box model, using the cubic halo emulator
    and analytic covariance.
