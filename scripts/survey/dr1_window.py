@@ -16,6 +16,12 @@ survey S1m of any spectrum is then the weighted mean over the support of the Gau
 lambda_m(x) = T_m(x) lambda_m^box + lambda_N(x), with the exact lattice lambda^box and noise maps. It is tested on
 noisy, constrained mocks of several spectra; "coverage" sets c = 1 and "none" T = 1.
 
+``--test s21m``: the second-layer window. The transfer of the second-layer variances, T2 = f2 c2 (coverage of the
+sigma_j2 wavelet times a correction calibrated in coverage bins on paired noisy mocks with the RIC), gives the
+survey S2m as R2 x the box S2m, R2 = <T2^{q/2}> over the support. Tested per mock (paired with its own box, which
+cancels cosmic variance) on several spectra: S21m = S2m / S1m with the measured survey S1m, so only the
+second-layer window is tested; "coverage" sets c2 = 1 and "none" R2 = 1.
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7))
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -63,7 +69,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda", "vector"), required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -252,6 +258,80 @@ def run_lambda(args, geometries, setups, pk):
     return summary
 
 
+def run_s21m(args, geometries, setups, pk):
+    caps = list(geometries)
+    ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+    windows = {cap: LambdaWindow(s["config"], s["g"].support, s["los"], s["lattice"], second_layer=True)
+               for cap, s in setups.items()}
+    path = args.output / "correction2.npz"
+    if path.exists():
+        f = np.load(path)
+        correction = {cap: {b: f[f"{cap}_" + "_".join(map(str, b))] for b in windows[cap].blocks2} for cap in caps}
+    else:
+        mocks = mocks_of(geometries, pk, "fiducial")
+        for r in range(args.calibrate):
+            t0 = time.time()
+            fields = [mocks[cap](seed=[400 + r, k]) for k, cap in enumerate(caps)]
+            for cap, survey, field in zip(caps, ric(*fields), fields):
+                windows[cap].add(survey, field)
+            print(f"calibration {r}: {time.time() - t0:.0f} s", flush=True)
+        correction = {cap: w.correction2() for cap, w in windows.items()}
+        np.savez(path, **{f"{cap}_" + "_".join(map(str, b)): c for cap, cc in correction.items()
+                          for b, c in cc.items()})
+    ratios = {}
+    for cap, w in windows.items():
+        weights = geometries[cap].weights.ravel()[w.index]
+        ones = {b: np.ones_like(c) for b, c in correction[cap].items()}
+        ratios[cap] = {"window": w.s2m_ratio(weights, args.q, correction[cap]),
+                       "coverage": w.s2m_ratio(weights, args.q, ones)}
+    del windows
+
+    def s21m(s1m, s2m, ratio=None):
+        return np.array([s2m[j1, j2, ell, m1, m2] * (1.0 if ratio is None else ratio[j1, j2, ell, m1][m2])
+                         / s1m[j1, ell, m1] for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
+                         for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)])
+
+    results = {}
+    for name in VARIANTS:
+        mocks = mocks_of(geometries, pk, name)
+        rows = {cap: {k: [] for k in ("measured", "window", "coverage", "none")} for cap in caps}
+        for r in range(args.realizations):
+            t0 = time.time()
+            fields = [mocks[cap](seed=[500 + r, k]) for k, cap in enumerate(caps)]
+            for cap, survey, field in zip(caps, ric(*fields), fields):
+                s = setups[cap]
+                common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
+                masked = args.measure(survey, s["config"], support=s["g"].support, **common)
+                box = args.measure(field, s["config"], moment_support=s["g"].support, **common)
+                s1m = masked["S1m"][0]
+                rows[cap]["measured"].append(s21m(s1m, masked["S2m"][0]))
+                rows[cap]["none"].append(s21m(s1m, box["S2m"][0]))
+                for model in ("window", "coverage"):
+                    rows[cap][model].append(s21m(s1m, box["S2m"][0], ratios[cap][model]))
+            print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
+        for cap in caps:
+            results[name, cap] = {k: np.array(v) for k, v in rows[cap].items()}
+        np.savez(args.output / "results.npz", **{f"{n}_{c}_{k}": v for (n, c), d in results.items()
+                                                  for k, v in d.items()})
+    summary = {}
+    for (name, cap), d in results.items():
+        scatter = results["fiducial", cap]["measured"].std(axis=0, ddof=1)
+        row = {}
+        for model in ("window", "coverage", "none"):
+            diff = d["measured"] - d[model]  # paired: the residual of each mock against its own box
+            z = diff.mean(axis=0) / scatter
+            error = diff.std(axis=0, ddof=1) / np.sqrt(len(diff)) / scatter
+            row[model] = dict(max=float(np.nanmax(np.abs(z))), rms=float(np.sqrt(np.nanmean(z**2))),
+                              chi2=float(np.nansum((z / error) ** 2)), error_max=float(np.nanmax(error)),
+                              nentries=int(np.isfinite(z).sum()))
+        summary[f"{name}_{cap}"] = row
+        print(f"{name:9s} {cap} S21m: window max {row['window']['max']:.2f} rms {row['window']['rms']:.2f}"
+              f" chi2 {row['window']['chi2']:.0f}/{row['window']['nentries']} (error <= {row['window']['error_max']:.2f})"
+              f" | coverage only max {row['coverage']['max']:.2f} | none max {row['none']['max']:.2f} sigma_survey",
+              flush=True)
+    return summary
+
+
 def data_vector(out) -> np.ndarray:
     """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
@@ -338,7 +418,8 @@ def main():
         if args.test == "lambda":
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
-    summary = dict(ric=run_ric, vector=run_vector, **{"lambda": run_lambda})[args.test](args, geometries, setups, pk)
+    runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, **{"lambda": run_lambda})
+    summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
 
 

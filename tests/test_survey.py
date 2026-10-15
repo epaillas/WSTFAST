@@ -285,3 +285,27 @@ def test_torch_survey_backend_matches_numpy():
     for key in a:
         np.testing.assert_allclose(b[key], a[key], rtol=1e-4, atol=1e-8)
         np.testing.assert_allclose(d[key], c[key], rtol=1e-4)
+
+
+def test_lambda_window_second_layer_matches_the_estimator():
+    from wstfast.survey import LambdaWindow
+
+    geometry = _two_region_cone(32)
+    config = WSTConfig(J=2, L=2, L2=2, sigma0=1.2, min_dj=2, cellsize=1.0)
+    delta = anisotropic_field(32, seed=11)
+    los = geometry.line_of_sight(full=True)
+    lattice = Lattice(32)
+    window = LambdaWindow(config, geometry.support, los, lattice, nbins=8, second_layer=True)
+    masked = measure_wst_survey(delta, config, support=geometry.support, qs=[2.0], los=los, lattice=lattice)["S2m"][0]
+    box = measure_wst_survey(delta, config, moment_support=geometry.support, qs=[2.0], los=los,
+                             lattice=lattice)["S2m"][0]
+    for survey, reference in ((True, masked), (False, box)):
+        for (j1, j2, ell, m1), x2 in window.second_layer_squares(delta, survey):
+            powers = [x2[ell]] + [x2[ell - m] + x2[ell + m] for m in range(1, ell + 1)]
+            np.testing.assert_allclose([p.mean() for p in powers], reference[j1, j2, ell, m1, :ell + 1], rtol=2e-4)
+
+    full = np.ones((32,) * 3, dtype=bool)
+    window = LambdaWindow(config, full, los, lattice, nbins=8, second_layer=True)
+    window.add(delta, delta)
+    for ratio in window.s2m_ratio(np.ones(32**3), 0.8).values():
+        np.testing.assert_allclose(ratio, 1.0, rtol=1e-5)

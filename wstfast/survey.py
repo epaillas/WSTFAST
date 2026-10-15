@@ -530,11 +530,18 @@ class LambdaWindow:
     and ``signal_variances``).
     """
 
-    def __init__(self, config: WSTConfig, support: np.ndarray, los, lattice: Lattice | None = None, nbins: int = 40):
+    def __init__(self, config: WSTConfig, support: np.ndarray, los, lattice: Lattice | None = None, nbins: int = 40,
+                 second_layer: bool = False):
         self.config, self.support = config, np.asarray(support, dtype=bool)
         self.index = np.flatnonzero(self.support)
         self.lattice = lattice or Lattice(support.shape[0])
         los = np.asarray(los)
+        self.second_layer = second_layer
+        if second_layer:
+            if los.ndim != 4 or _on_device(self.lattice):
+                raise ValueError("the second layer needs the line of sight of every mesh cell, and the numpy Lattice")
+            # angles of every cell, for the first layer of the periodic reference
+            self._angles_full = tuple(a.astype(np.float32) for a in _angles(los.reshape(3, -1).T.astype(np.float64)))
         if los.ndim == 4:
             los = los.reshape(3, -1)[:, self.index]
         theta, phi = _angles(los.T.astype(np.float64))
@@ -561,6 +568,11 @@ class LambdaWindow:
         self.nbins = nbins
         self.masked = {b: np.zeros((2 * b[1] + 1, nbins)) for b in self.blocks}
         self.reference = {b: np.zeros((2 * b[1] + 1, nbins)) for b in self.blocks}
+        self.pairs = config.second_layer_pairs() if second_layer else []
+        self.blocks2 = [(j1, j2, ell, m1) for j1, j2 in self.pairs for ell in range(config.lmax2 + 1)
+                        for m1 in range(ell + 1)]
+        self.masked2 = {b: np.zeros((2 * b[2] + 1, nbins)) for b in self.blocks2}
+        self.reference2 = {b: np.zeros((2 * b[2] + 1, nbins)) for b in self.blocks2}
         self.count = 0
 
     def squares(self, field: np.ndarray):
@@ -587,6 +599,36 @@ class LambdaWindow:
                     x = self.rotations[ell].rotate(x, self.tables[ell])
                 yield (j, ell), x * x
 
+    def second_layer_squares(self, field: np.ndarray, survey: bool):
+        """Squared rotated second-layer components X'_m2(x)^2 (2l + 1, ncells) on the support cells, for every
+        (j1, j2, l, |m1|): as ``measure_wst_survey`` for the survey field (first-layer moduli on the support, minus
+        their support mean for l >= 1, zero elsewhere), and as the periodic box for the reference (moduli everywhere)."""
+        n = self.support.shape[0]
+        fk = _rfft(np.asarray(np.where(self.support, field, 0.0) if survey else field, dtype=np.float32))
+        cells = self.index if survey else np.arange(n**3)
+        for ell in range(self.config.lmax2 + 1):
+            harmonics = self.lattice.harmonics(ell)
+            tables = None
+            if ell > 0:
+                tables = self.tables[ell] if survey else self.rotations[ell].tables(*self._angles_full)
+            for j1 in sorted({j for j, _ in self.pairs}):
+                x = _components(fk, self.lattice, harmonics, self.config.sigma0 * self.config.step**j1, ell, cells)
+                if ell > 0:
+                    x = self.rotations[ell].rotate(x, tables)
+                for m1, power in enumerate(m_powers(x)):
+                    u = np.sqrt(power)
+                    second = np.zeros(n**3, dtype=np.float32)
+                    second[cells] = u if ell == 0 else u - u.mean(dtype=np.float64)
+                    fu = _rfft(second.reshape((n,) * 3))
+                    for _, j2 in (pair for pair in self.pairs if pair[0] == j1):
+                        x2 = _components(fu, self.lattice, harmonics, self.config.sigma0 * self.config.step**j2, ell,
+                                         self.index)
+                        if ell > 0:
+                            x2 = self.rotations[ell].rotate(x2, self.tables[ell])
+                        yield (j1, j2, ell, m1), x2 * x2
+                del x
+            del tables
+
     def _binned(self, block, values):
         return np.array([np.bincount(self.bins[block], weights=v, minlength=self.nbins) for v in values])
 
@@ -596,7 +638,31 @@ class LambdaWindow:
             self.masked[block] += self._binned(block, x2)
         for block, x2 in self.squares(reference):
             self.reference[block] += self._binned(block, x2 * self.coverage[block])
+        for survey, store in ((True, self.masked2), (False, self.reference2)):
+            for block, x2 in (self.second_layer_squares(masked if survey else reference, survey)
+                              if self.second_layer else []):
+                coverage_block = (block[1], block[2])  # the sigma_j2 wavelet of degree l
+                store[block] += self._binned(coverage_block, x2 if survey else x2 * self.coverage[coverage_block])
         self.count += 1
+
+    def correction2(self) -> dict:
+        """{(j1, j2, l, |m1|): c (2l + 1, nbins)} of the second layer, 1 in bins without cells."""
+        return {b: np.where(self.reference2[b] > 0, self.masked2[b] / np.where(self.reference2[b] > 0,
+                                                                               self.reference2[b], 1.0), 1.0)
+                for b in self.blocks2}
+
+    def s2m_ratio(self, weights: np.ndarray, q: float, correction2: dict | None = None) -> dict:
+        """Survey / box S2m of every (j1, j2, l, |m1|) as an array over |m2|: the weighted mean over the support of
+        T^{q/2}, with T = f c the transfer of the two components +-m2 (averaged), so that the box moment, with its
+        non-Gaussianity, is rescaled cell by cell."""
+        correction2 = self.correction2() if correction2 is None else correction2
+        w = np.asarray(weights, dtype=np.float64) / np.sum(weights)
+        out = {}
+        for (j1, j2, ell, m1), c in correction2.items():
+            t = self.coverage[j2, ell][None, :] * c[:, self.bins[j2, ell]]
+            per_m = [t[ell]] + [0.5 * (t[ell - m] + t[ell + m]) for m in range(1, ell + 1)]
+            out[j1, j2, ell, m1] = np.array([(np.clip(tm, 0.0, None) ** (q / 2)) @ w for tm in per_m])
+        return out
 
     def correction(self) -> dict:
         """{(j, l): c (2l + 1, nbins)}, 1 in bins without cells."""
