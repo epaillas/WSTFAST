@@ -478,7 +478,7 @@ def run_covariance(args, geometries, setups, pk):
     from numpy.polynomial.legendre import leggauss
 
     from wstfast.config import select_coefficients
-    from wstfast.survey import SurveyWindow
+    from wstfast.survey import SurveyWindow, block_signal
     from wstfast.theory.covariance_rsd import ModulusCrossRSD, ModulusTables, RSDWSTCovariance
     from wstfast.theory.rsd_moduli import first_layer_fields
 
@@ -519,7 +519,7 @@ def run_covariance(args, geometries, setups, pk):
             key = (SurveyWindow.key(config.sigma(j)), ell, m)
             block = window.s1m[key]
             box_noise = float(block["weight"] @ block["noise"] / block["weight"].sum())
-            sig = float(pfield_block_signal(config, j, ell, m, pfield, noise, boxsize))
+            sig = block_signal(config, j, ell, m, pfield, noise, boxsize)
             veff.append(window.veff_block(key, sig, box_noise))
         veff = np.array(veff)
         vbox = (boxsize / 1000.0) ** 3
@@ -570,18 +570,6 @@ def run_covariance(args, geometries, setups, pk):
         np.savez(args.output / f"covariance_{cap}.npz", labels=cov.labels[:n], box=box, veff=veff,
                  **{name.replace(" ", "_"): model for name, model in models.items()})
     return summary
-
-
-def pfield_block_signal(config, j, ell, m, pfield, noise, boxsize, nmesh=128):
-    """Signal variance of an |m| block of a box with field power ``pfield`` (continuum mode sum on a half lattice)."""
-    from wstfast.theory.covariance import HalfLattice, components
-
-    lat = HalfLattice(nmesh, boxsize)
-    keep = lat.positive & (lat.k <= np.pi * nmesh / boxsize)
-    k, mu, mult = lat.k[keep], lat.mu[keep], lat.multiplicity[keep]
-    w = lat.radial(config.sigma(j), ell)[keep] ** 2 * np.sum(lat.harmonics(ell)[components(ell, m)][:, keep] ** 2, axis=0)
-    ncomp = 1 if m == 0 else 2
-    return float(((pfield(k, mu) - noise) * w * mult).sum() / boxsize**3 / ncomp)
 
 
 def data_vector(out) -> np.ndarray:

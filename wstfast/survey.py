@@ -962,6 +962,39 @@ class SurveyWindow:
                 np.array([self.s1m[k]["delta"] for k in keys]))
 
 
+def block_signal(config: WSTConfig, j: int, ell: int, m: int, pfield, noise: float, boxsize: float = 1000.0,
+                 nmesh: int = 128) -> float:
+    """Signal variance per component of the |m| block (j, l) of a periodic box with field power ``pfield(k, mu)``
+    (shot noise ``noise`` removed), by a half-lattice mode sum: the ``signal`` of ``SurveyWindow.veff_block``."""
+    from .theory.covariance import HalfLattice, components
+
+    lat = HalfLattice(nmesh, boxsize)
+    keep = lat.positive & (lat.k <= np.pi * nmesh / boxsize)
+    k, mu, mult = lat.k[keep], lat.mu[keep], lat.multiplicity[keep]
+    w = lat.radial(config.sigma(j), ell)[keep] ** 2 * np.sum(lat.harmonics(ell)[components(ell, m)][:, keep] ** 2, axis=0)
+    return float(((pfield(k, mu) - noise) * w * mult).sum() / boxsize**3 / (1 if m == 0 else 2))
+
+
+def survey_covariance(box: np.ndarray, labels, config: WSTConfig, window: "SurveyWindow", pfield, noise: float,
+                      boxsize: float = 1000.0) -> np.ndarray:
+    """A box covariance of ln S1m / ln S21m entries (``labels``, of ``config``) on a survey cap: the box correlations,
+    with the variance of every entry rescaled from the box volume to its effective volume on the cap
+    (``SurveyWindow.veff_block`` of its S1m block, or of the sigma_j2 block of an S21m second layer)."""
+    veff = []
+    for label in labels:
+        parts = label.split(":")[-1].split("_")
+        if parts[0] == "S1m":
+            j, ell, m = int(parts[1][1:]), int(parts[2][1:]), int(parts[3][1:])
+        else:
+            j, ell, m = int(parts[2][1:]), int(parts[3][1:]), int(parts[5][1:])
+        key = (window.key(config.sigma(j)), ell, m)
+        block = window.s1m[key]
+        box_noise = float(block["weight"] @ block["noise"] / block["weight"].sum())
+        veff.append(window.veff_block(key, block_signal(config, j, ell, m, pfield, noise, boxsize), box_noise))
+    scale = np.sqrt((boxsize / 1000.0) ** 3 / np.array(veff))
+    return box * np.outer(scale, scale)
+
+
 def window_correction(survey: np.ndarray, model: np.ndarray, box: np.ndarray | None = None,
                       box_model: np.ndarray | None = None) -> dict:
     """S-level correction delta of the window model and its calibration covariance, from fiducial mocks.

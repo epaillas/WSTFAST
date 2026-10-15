@@ -68,7 +68,7 @@ def measured_field_power(files):
     return pfield
 
 
-def model_field_power(data_dir, emulator, fiducial_files, cellsize):
+def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=None, cosmology=None):
     """P_field(k, mu) of the fit_rsd.py model: the P_s grid of RSDPowerTheory (identity projection) at the fiducial."""
     import json
     import sys
@@ -94,12 +94,14 @@ def model_field_power(data_dir, emulator, fiducial_files, cellsize):
         k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2
         k2 = grid.k[:, None] ** 2 * np.ones_like(grid.mu)[None, :]
 
-    first = sorted((data_dir / "rsd").glob("wst_r*.npz"))[0]
-    meta = json.loads(str(np.load(first)["metadata"]))
-    shotnoise = meta["boxsize"] ** 3 / meta["nparticles"]
+    if shotnoise is None:  # the box's V / N (a survey passes 1 / nbar_eff)
+        first = sorted((data_dir / "rsd").glob("wst_r*.npz"))[0]
+        meta = json.loads(str(np.load(first)["metadata"]))
+        shotnoise = meta["boxsize"] ** 3 / meta["nparticles"]
     theory = RSDPowerTheory(Identity(), basis=basis, shotnoise=shotnoise, tracer=settings.get("tracer", "matter"))
     names = get_params(theory).select(varied=True, derived=False).names()
-    values = {name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm", "logA", "n_s", "h") if name in names}
+    cosmology = QUIJOTE_COSMOLOGY if cosmology is None else cosmology
+    values = {name: cosmology[name] for name in ("omega_cdm", "logA", "n_s", "h") if name in names}
     for path in fiducial_files:
         best = json.loads(Path(path).read_text())["bestfit"]
         values.update({k: float(v) for k, v in best.items() if k in names and k not in values})

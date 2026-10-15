@@ -70,6 +70,9 @@ def parse_args(argv=None):
                              "measure), one survey.SurveyWindow each (--window); shared parameters, the covariance from "
                              "the --covariance-data-dir boxes scaled to each cap's effective volume")
     parser.add_argument("--window", type=Path, nargs="+", default=None, help="survey: window file of each cap")
+    parser.add_argument("--covariance-file", type=Path, default=None,
+                        help="survey: analytic covariance (analytic_covariance_rsd_wst.py --survey: labels, lncov of one "
+                             "survey) instead of the --covariance-data-dir boxes; no Hartlap / Percival factors")
     parser.add_argument("--extra-covariance", type=Path, nargs="*", default=[],
                         help="npz files (labels, covariance) of modelling errors added to the covariance as they are "
                              "(not scaled with the volume), e.g. the window calibration (survey.window_correction)")
@@ -553,8 +556,8 @@ def survey_problem(args):
 
     if args.window is None or len(args.window) != len(args.survey):
         raise SystemExit("--survey needs one --window file per cap")
-    if args.covariance_data_dir is None:
-        raise SystemExit("--survey needs --covariance-data-dir (box realizations for the covariance)")
+    if args.covariance_data_dir is None and args.covariance_file is None:
+        raise SystemExit("--survey needs --covariance-data-dir (box realizations) or --covariance-file (analytic)")
     basis = settings = None
     caps = []
     for cap, path in zip(args.survey, args.window):
@@ -572,15 +575,27 @@ def survey_problem(args):
     vectors = np.concatenate([p["vectors"] for _, _, p in caps], axis=1)
     labels = [label for _, _, p in caps for label in p["labels"]]
     blocks, nsims = [], None
-    for cap, window, problem in caps:
-        box, vbox = box_entries(args.covariance_data_dir, problem["labels"], args.layer2_config, args.q[0])
-        nsims = box.shape[0]
-        blocks.append(sample(box) * vbox / window.veff / (nreal if args.covariance_of_mean else 1))
-    covariance = np.zeros((len(labels), len(labels)))
-    start = 0
-    for block in blocks:
-        covariance[start:start + len(block), start:start + len(block)] = block
-        start += len(block)
+    if args.covariance_file is not None:  # analytic ln covariance of one survey, in data units through the data mean
+        analytic = np.load(args.covariance_file)
+        index = {str(label): i for i, label in enumerate(analytic["labels"])}
+        missing = [label for label in labels if label not in index]
+        if missing:
+            raise SystemExit(f"{args.covariance_file} has no entries {missing[:5]}...")
+        rows = np.array([index[label] for label in labels])
+        mean = vectors.mean(axis=0)
+        covariance = analytic["lncov"][np.ix_(rows, rows)] * np.outer(mean, mean)
+        covariance /= nreal if args.covariance_of_mean else 1
+        nsims = 10**9  # exact: no Hartlap / Percival factors
+    else:
+        for cap, window, problem in caps:
+            box, vbox = box_entries(args.covariance_data_dir, problem["labels"], args.layer2_config, args.q[0])
+            nsims = box.shape[0]
+            blocks.append(sample(box) * vbox / window.veff / (nreal if args.covariance_of_mean else 1))
+        covariance = np.zeros((len(labels), len(labels)))
+        start = 0
+        for block in blocks:
+            covariance[start:start + len(block), start:start + len(block)] = block
+            start += len(block)
     if getattr(args, "s21_layer2", None) is not None:  # the template's error is the same in every cap
         mean = vectors.mean(axis=0)
         error = np.sqrt(layer2_variance(args, labels, mean))
