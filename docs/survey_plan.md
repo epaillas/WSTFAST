@@ -347,7 +347,134 @@ Tested on 8 noisy, constrained mocks per spectrum, in units of one survey's erro
    and analytic covariance.
 3. The DR1 geometry from the randoms, once the Abacus LRG HOD boxes are available.
 
-## 8. Open decisions
+## 8. End-to-end pipeline (design, 2026-10-14)
+
+This section assumes the λ-level window (`LambdaWindow`) works for the whole data vector. It is validated for S1m on
+Gaussian mocks (§7, status). The S21m form below is the same construction one layer up, and is still to be tested.
+
+### 8.1 How DESI does it, and what we copy
+
+In desilike / desi-clustering `full_shape`, **the window is not inside the emulator.**
+- The Taylor emulator is fitted to `theory.pt` only: the bias-independent PT blocks (`desi-clustering
+  full_shape/tools.py`, `TaylorEmulator(compile(theory.pt))`).
+- The window enters the emulator in only two ways:
+  - it sets the k-grid (and ells) on which those blocks are emulated: `Spectrum2PolesObservable` does
+    `theory.update(k=window.theory k, ells=window.theory.ells)`;
+  - its options are part of the emulator's cache key.
+- At every likelihood call, the bias combination is analytic and the window matrix is applied in JAX:
+  `flattheory = W @ theory.poles` (`desilike/observables/galaxy_clustering/stats.py:236-241`).
+
+We keep the same split:
+- **Emulator:** the cosmology-dependent box basis on a survey-matched grid.
+- **Window:** a precomputed, cosmology-independent geometry product applied at assembly, after the biases and AP.
+
+The difference is that our statistic is not linear in P, so the window acts on the block variances λ, which are, and
+the moment is taken afterwards.
+
+### 8.2 Stages
+
+**Stage 1. Inputs** (per tracer, z-bin, cap). The data, all 18 random files and the n(z), read in place at NERSC
+(`/global/cfs/cdirs/desi/public/dr1/...`).
+
+**Stage 2. Geometry** (once per z-bin, from the randoms; `SurveyGeometry.from_angular_mask`):
+- angular completeness;
+- n_R(r) per photometric region;
+- n̄(x), FKP weights and regions on a 10 Mpc/h mesh;
+- the `RadialIntegralConstraint` over both caps;
+- the local line of sight.
+
+The two caps share one mesh size.
+
+**Stage 3. Window products** (once per z-bin, cosmology-independent, GPU):
+- **First layer.** For every block b = (j, l, |m|):
+  - the coverage map f_b(x);
+  - the noise map λ_N,b(x) (exact from n̄);
+  - the correction c_b(f), from ~32 paired signal-only Gaussian mocks at the fiducial spectrum, with the RIC.
+- **Second layer.** The same three for the σ₂ wavelet acting on the masked, mean-subtracted modulus:
+  - f₂ and its correction c₂ from the same mocks, with T₂ = f₂ c₂ multiplying λ₂ (which is linear in P_UU);
+  - the first-layer normalisation ⟨U⟩ of the survey, from the first-layer products.
+- **Compression.** The likelihood never sees cells. Per block, the cells are binned in (coverage, noise) and
+  stored as weighted histograms: FKP weight sums, mean T and mean λ_N per bin. This is ~40 × 8 bins per block, so
+  the products are a few MB per z-bin.
+- Products are recomputed once at the best fit (to remove the tilt dependence of c, which is 0.16σ at Δn_s = 0.06).
+
+**Stage 4. Measurement** (GPU, `measure_wst_survey_torch`):
+- The field is the FKP form δ = (n_g − α n_r)/(n̄ V_cell) on the geometry's support. This needs a small extension of
+  `SurveyMesh`, which today divides by α n_r per cell.
+- The randoms carry the RIC automatically.
+- The coefficients are FKP-weighted moments with the local line of sight.
+- The data vector per cap and z-bin is S1m (60) + S21m (55). There are 25 mocks × 2 caps × 3 bins; the mean is
+  taken per cap and bin.
+
+**Stage 5. Emulator** (retrained once per z-bin, with `train_emulator.py`, no new script):
+- **Survey config:** σ₀ = 25 Mpc/h, step √2, J = 3, L = 4, S21 at (j1, j2) = (0, 3), cell 10 Mpc/h. The CIC filter
+  of the cumulant legs uses the 10 Mpc/h cell, which the current emulator bakes in at 3.9 Mpc/h.
+- **Unprojected S21m terms.** S21m is emulated on the (field, K, μ_K) grid, and λ₂ is projected at likelihood time,
+  as S1m already is. Today the λ₂ lattice sum (box 1000, mesh 256) is inside the emulator, so neither AP nor the
+  window could act on it.
+- **Redshift:** one emulator per z_eff (0.51, 0.71, 0.92). The z-evolution inside a bin (M4) is a later refinement.
+
+**Stage 6. Survey model** (likelihood time; JAX; `S1mTheory` / `S21mTheory` get an optional `window=` of stage 3
+products):
+1. Box λ_b from the emulated grid with AP: `S1mProjection` on a 10 Mpc/h lattice.
+2. Survey S1m_b = Σ_bins H_b,i · M_q[T_i λ_b + λ_N,i ; κ_i, skew_i] / Σ H_b,i.
+   - `s1m_from_variances` is vmapped over bins.
+   - The noise-dependent cumulant columns use the bin's N_i.
+   - The cumulants scale as κ → T²κ and skew² → T³ skew², which leaves the Edgeworth ratio invariant. This is the
+     approximation to test on halos.
+3. Survey S21m: λ₂ = T₂ (response + noise terms) per bin, normalised by the survey first-layer λ, then
+   `s21m_from_terms`. The layer-2 template is unchanged.
+4. **Caps** are separate data vectors with their own window products and shared parameters.
+5. **z-bins** share cosmology and have their own biases, c_v and W.
+
+**Stage 7. Covariance** (analytic, `RSDWSTCovariance` extended, no new file):
+- The box covariance at the survey's effective n̄, with V → V_eff,b per block, where
+  V_eff,b = (Σ w)² / Σ w² × V_cell on that block's support.
+- Cross-blocks use √(V_eff,a V_eff,b).
+- For the Abacus mean: Cov / 25.
+- This is checked later against EZmock covariances (C1), and on cut-sky halo mocks (V2).
+
+**Stage 8. Fit** (`fit_rsd.py` with `--survey <products>` and the DR1 data vectors; NUTS):
+- Varied: ω_cdm, logA, h (n_s fixed, as in the baseline), plus the per-bin cubic biases, c_v and W, with the
+  layer-2 amplitudes marginalised analytically.
+- Truth: AbacusSummit c000 (ω_cdm 0.1200, ω_b 0.02237, h 0.6736, n_s 0.9649).
+- AP is relative to the Quijote fiducial frame of the coordinates.
+
+### 8.3 Validation before the Abacus fit
+
+| Step | Test | Pass |
+|---|---|---|
+| W1 | S1m λ-window, 100 Gaussian mocks × 4 spectra (running) | ≤ 0.1σ per block, χ² ok |
+| W2 | S21m λ₂-window, same mocks and spectra | ≤ 0.1σ |
+| W3 | Non-Gaussian edges: Quijote halos cut to the DR1 geometry (`box_to_survey`), windowed box model vs measured, with the halo emulator | ≤ 0.1σ, or a residual template |
+| W4 | End-to-end fit to the mean of cut-sky halo mocks (known cosmology), survey covariance | shifts ≤ 0.3σ |
+| W5 | Analytic V_eff covariance vs the scatter of the cut-sky halo mocks | ≤ 10–20% |
+| V3 | Fit to the mean of the 25 Abacus complete mocks, 0.4–0.6 first, then all bins | recovers c000 |
+
+### 8.4 Where the code goes (extending existing files)
+
+| Piece | File |
+|---|---|
+| Geometry, RIC, window products, FKP mesh from a geometry, histogram compression | `wstfast/survey.py` |
+| GPU estimator and window | `wstfast/measure_torch.py` |
+| `window=` products in the assembly | `wstfast/calculators.py` (`S1mTheory`, `S21mTheory`) |
+| Unprojected S21m terms, survey config, per-z emulators | `wstfast/theory/rsd_moduli.py`, `rsd_bias.py`, `scripts/train_emulator.py` |
+| V_eff covariance | `wstfast/theory/covariance_rsd.py`, `scripts/analytic_covariance_rsd_wst.py` |
+| Survey data and window options | `scripts/fit_rsd.py` |
+| Geometry / window tests / mock measurement driver (gains a measurement mode) | `scripts/survey/dr1_window.py` |
+
+### 8.5 Main risks
+
+1. **Non-Gaussian edges.** On halos the edge effect differed from Gaussian mocks by ~4% (V0b). If W3 fails, the
+   correction c is calibrated on halo cut-sky mocks instead, with the same products and different mocks.
+2. **S21m window.** The σ₂ = 70.7 wavelets are 150–200 Mpc/h across. Coverage is low over much of a bin, so T₂ is far
+   from 1 and the mean subtraction of the second layer (E4) interacts with the RIC. This is the riskiest piece.
+3. **Retraining.** The emulator retrain (survey cell, unprojected S21m) is the largest single cost, with three per z
+   if bins are kept separate.
+4. **HOD galaxies vs halos.** The Abacus mocks are HOD galaxies, whose satellites give FoG; the model is validated
+   on halos. Deferred by decision (§0); check first if V3 fails.
+
+## 9. Open decisions
 
 - **Mesh per z-bin:** the 0.8–1.1 LRG bin extends to r ≈ 2.4 Gpc/h, so the NGC box is ~4 Gpc/h on a side. At
   6–7 Mpc/h cells that is a 600–700³ mesh: check the torch backend's memory with L = 4 and per-|m| outputs.
