@@ -338,9 +338,28 @@ Tested on 8 noisy, constrained mocks per spectrum, in units of one survey's erro
 
   A Δn_s of 0.06 is ~15× the Planck error, so recalibrating c once at the best fit removes it.
 
+**100-mock test (2026-10-15,** outputs/survey/dr1_lambda_window_100: 32 calibration mocks, 100 test mocks per
+spectrum, test error 0.1σ**).** The λ window does **not** reach 0.1σ on its own.
+- Residual: max 0.37–0.57σ, rms 0.14–0.25σ, χ² 158–359 / 60. The 8-mock agreement was the test's noise.
+- It is a fixed geometric residual: 0.2% rms (≤ 0.5%) of S1m, correlated at 0.98–0.997 across the four spectra. The
+  window still removes > 98% of the 19–32σ edge effect.
+- An S-level correction per block, δ_b = ⟨S_measured⟩ / S_window from fiducial mocks 0–49, applied to mocks 50–99 of
+  every spectrum, leaves:
+  - NGC: max 0.43–0.60σ, rms 0.18–0.23σ, χ² 60–73 / 60 (error ≤ 0.22σ);
+  - SGC: rms 0.22–0.30σ, χ² 99–141 / 60.
+- So the window model is λ window × δ_b. The residual left in SGC, and the 0.1σ level, need more mocks (GPU). The
+  candidate causes of the geometric residual are the coverage-binned correction (c varies within a bin) and the
+  correlation of ±m components near edges, which the independent-component moment ignores.
+
+**Survey emulator (2026-10-15):** `outputs/emulators/survey_lrg_z0.51.h5`.
+- Settings: biased, cubic, FoG, IR; c000 fiducial (one 0.06 eV neutrino, cb power); 10 Mpc/h cells; lattice
+  3440 Mpc/h / 344³; z = 0.509; unprojected S21m, so AP applies to every statistic; 369 nodes.
+- Validation over the ±15% box, max relative error: S1m 3.2e-4, S21m 1.1e-3, P_l 0.6% (the box emulator: 3.7e-4,
+  1.0e-3, 3.9%).
+
 **Next:**
-1. More test mocks (GPU) to bring the test error to ≤ 0.1σ, then the window for S21m (P_UU through the same
-   coverage-and-correction form).
+1. More test mocks (GPU) to bring the test error to ≤ 0.1σ, with the S-level δ_b; then the window for S21m (P_UU
+   through the same coverage-and-correction form).
 2. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
    (E4).
 2. The parameter-level test: fit the masked halo S1m (+S21m) with R × the box model, using the cubic halo emulator
