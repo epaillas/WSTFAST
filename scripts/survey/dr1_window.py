@@ -88,6 +88,9 @@ def get_args():
     parser.add_argument("--catalogue-root", type=Path, default=survey.DESI_ROOT,
                         help="directory with mock<i>/LRG_complete_* catalogues")
     parser.add_argument("--device", default="numpy", help="numpy, or a torch device (cpu, cuda)")
+    parser.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS),
+                        help="spectra of the test mocks (lambda, s21m)")
+    parser.add_argument("--seed-offset", type=int, default=0, help="offset of the test-mock seeds (independent runs)")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -217,18 +220,20 @@ def run_lambda(args, geometries, setups, pk):
     del windows
 
     results = {}
-    for name, (b, f, a, t) in VARIANTS.items():
+    for name in args.variants:
+        b, f, a, t = VARIANTS[name]
         mocks = mocks_of(geometries, pk, name)
         measured = {cap: [] for cap in caps}
         for r in range(args.realizations):
             t0 = time.time()
-            fields = [mocks[cap](seed=[200 + r, k]) for k, cap in enumerate(caps)]
+            fields = [mocks[cap](seed=[200 + args.seed_offset + r, k]) for k, cap in enumerate(caps)]
             for cap, field in zip(caps, ric(*fields)):
                 s = setups[cap]
                 out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
                                    qs=[args.q], los=s["los"], lattice=s["lattice"], second_layer_bins=s["bins2"])
                 measured[cap].append(out["S1m"][0])
             print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
+            np.savez(args.output / f"partial_{name}.npz", **{cap: np.array(v) for cap, v in measured.items()})
         for cap in caps:
             s, g = setups[cap], geometries[cap]
             grid = getattr(s["lattice"], "numpy", s["lattice"])  # the numpy Lattice of a TorchLattice
@@ -299,12 +304,12 @@ def run_s21m(args, geometries, setups, pk):
                          for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)])
 
     results = {}
-    for name in VARIANTS:
+    for name in args.variants:
         mocks = mocks_of(geometries, pk, name)
         rows = {cap: {k: [] for k in ("measured", "window", "coverage", "none")} for cap in caps}
         for r in range(args.realizations):
             t0 = time.time()
-            fields = [mocks[cap](seed=[500 + r, k]) for k, cap in enumerate(caps)]
+            fields = [mocks[cap](seed=[500 + args.seed_offset + r, k]) for k, cap in enumerate(caps)]
             for cap, survey, field in zip(caps, ric(*fields), fields):
                 s = setups[cap]
                 common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
@@ -316,6 +321,8 @@ def run_s21m(args, geometries, setups, pk):
                 for model in ("window", "coverage"):
                     rows[cap][model].append(s21m(s1m, box["S2m"][0], ratios[cap][model]))
             print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
+            np.savez(args.output / f"partial_{name}.npz", **{f"{cap}_{k}": np.array(v) for cap, d in rows.items()
+                                                             for k, v in d.items()})
         for cap in caps:
             results[name, cap] = {k: np.array(v) for k, v in rows[cap].items()}
         np.savez(args.output / "results.npz", **{f"{n}_{c}_{k}": v for (n, c), d in results.items()
