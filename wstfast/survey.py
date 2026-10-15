@@ -843,6 +843,38 @@ def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, r
     return calibrate_window((mocks(seed + r) for r in range(realizations)), config, support, **kwargs)
 
 
+def window_correction(survey: np.ndarray, model: np.ndarray, box: np.ndarray | None = None,
+                      box_model: np.ndarray | None = None) -> dict:
+    """S-level correction delta of the window model and its calibration covariance, from fiducial mocks.
+
+    ``survey`` (nmock, ndata): the coefficients measured on the survey geometry; ``model`` (ndata,) or (nmock, ndata):
+    the window model's prediction (``s1m_gaussian`` with the transfer, or R2 x the mock's own box S2m). Unpaired,
+    delta = <survey> / model. Paired, with ``box`` (nmock, ndata) the same mocks measured unmasked on the same cells
+    and ``box_model`` (ndata,) the model's box prediction, delta = <survey / box> x box_model / model: the same
+    expectation without the mocks' cosmic variance. The window-corrected model of a survey is delta x model; the
+    calibration error of delta, Cov(per-mock ratio) / nmock, enters the fit as ``covariance`` in data units (multiply
+    by the data vector: ``covariance_of``).
+
+    Returns delta (ndata,), ratio_covariance (fractional, of delta) and the number of mocks.
+    """
+    survey, model = np.asarray(survey, dtype=float), np.asarray(model, dtype=float)
+    if box is None:
+        ratio = survey / model
+    else:
+        ratio = survey / np.asarray(box, dtype=float) * (np.asarray(box_model, dtype=float) / model)
+    delta = ratio.mean(axis=0)
+    fractional = ratio / delta
+    return dict(delta=delta, ratio_covariance=np.cov(fractional, rowvar=False, ddof=1) / len(ratio),
+                nmock=len(ratio))
+
+
+def covariance_of(correction: dict, data: np.ndarray, labels) -> dict:
+    """The calibration covariance of ``window_correction`` in data units, for ``fit_rsd.py --extra-covariance``:
+    dict(labels, covariance) with covariance = diag(data) ratio_covariance diag(data)."""
+    data = np.asarray(data, dtype=float)
+    return dict(labels=np.asarray(labels), covariance=correction["ratio_covariance"] * np.outer(data, data))
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Survey geometry and catalogue mocks cut to it
 

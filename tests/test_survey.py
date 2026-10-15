@@ -345,3 +345,21 @@ def test_binned_second_layer_mean():
     for (j1, j2, ell, m1), x2 in window.second_layer_squares(delta, False):
         powers = [x2[ell]] + [x2[ell - m] + x2[ell + m] for m in range(1, ell + 1)]
         np.testing.assert_allclose([p.mean() for p in powers], box[j1, j2, ell, m1, :ell + 1], rtol=5e-4)
+
+
+def test_window_correction_pairing_and_covariance():
+    from wstfast.survey import covariance_of, window_correction
+
+    rng = np.random.default_rng(1)
+    nmock, ndata = 400, 6
+    true_delta = 1.0 + 0.01 * np.arange(ndata)
+    model, box_model = np.full(ndata, 2.0), np.full(ndata, 2.5)
+    cosmic = 1.0 + 0.05 * rng.standard_normal((nmock, 1))  # common to the survey and its box
+    box = box_model * cosmic * (1 + 0.001 * rng.standard_normal((nmock, ndata)))
+    survey = model * true_delta * cosmic * (1 + 0.002 * rng.standard_normal((nmock, ndata)))
+    unpaired = window_correction(survey, model)
+    paired = window_correction(survey, model, box=box, box_model=box_model)
+    np.testing.assert_allclose(paired["delta"], true_delta, rtol=3e-3)
+    assert np.all(np.diag(paired["ratio_covariance"]) < 0.01 * np.diag(unpaired["ratio_covariance"]))
+    extra = covariance_of(paired, np.full(ndata, 3.0), [f"x{i}" for i in range(ndata)])
+    np.testing.assert_allclose(extra["covariance"], 9.0 * paired["ratio_covariance"])

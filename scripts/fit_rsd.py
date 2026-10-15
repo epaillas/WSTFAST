@@ -65,6 +65,9 @@ def parse_args(argv=None):
     parser.add_argument("--volume", type=float, default=None,
                         help="errors of a survey of this volume in (Gpc/h)^3: single-box covariance / (V / V_box)")
     parser.add_argument("--covariance-of-mean", action="store_true", help="errors of the realization mean")
+    parser.add_argument("--extra-covariance", type=Path, nargs="*", default=[],
+                        help="npz files (labels, covariance) of modelling errors added to the covariance as they are "
+                             "(not scaled with the volume), e.g. the window calibration (survey.window_correction)")
     parser.add_argument("--no-percival", action="store_true",
                         help="do not multiply the likelihood covariance by the Percival et al. (2014) factor m1 (the "
                              "posterior widening from the noise of the sample covariance; applied by default)")
@@ -494,6 +497,14 @@ def main():
         if args.s21_layer2_marg is not None:  # analytic marginalisation over the template amplitudes
             for vector in layer2_templates(args, labels, vectors.mean(axis=0)):
                 covariance = covariance + args.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    for path in args.extra_covariance:  # modelling errors in data units, matched by label
+        extra = np.load(path)
+        index = {str(label): i for i, label in enumerate(extra["labels"])}
+        missing = [label for label in labels if label not in index]
+        if missing:
+            raise SystemExit(f"{path} has no covariance for {missing[:5]}...")
+        rows = np.array([index[label] for label in labels])
+        covariance = covariance + extra["covariance"][np.ix_(rows, rows)]
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
 
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)
