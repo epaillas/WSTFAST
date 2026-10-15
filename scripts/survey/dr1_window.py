@@ -18,7 +18,9 @@ noisy, constrained mocks of several spectra; "coverage" sets c = 1 and "none" T 
 
 ``--test s21m``: the second-layer window. The transfer of the second-layer variances, T2 = f2 c2 (coverage of the
 sigma_j2 wavelet times a correction calibrated in coverage bins on paired noisy mocks with the RIC), gives the
-survey S2m as R2 x the box S2m, R2 = <T2^{q/2}> over the support. Tested per mock (paired with its own box, which
+survey S2m as R2 x the box S2m, R2 = <T2^{q/2}> over the support. The survey second layer subtracts the mean of the
+first-layer modulus per bin of coverage and nbar (``--layer2-mean binned``), which removes the deterministic edge
+profile of U; ``global`` is the support mean. Tested per mock (paired with its own box, which
 cancels cosmic variance) on several spectra: S21m = S2m / S1m with the measured survey S1m, so only the
 second-layer window is tested; "coverage" sets c2 = 1 and "none" R2 = 1.
 
@@ -76,6 +78,10 @@ def get_args():
     parser.add_argument("--randoms", type=int, nargs="+", default=[0, 1], help="random files for the mask")
     parser.add_argument("--width", type=float, nargs="+", default=[5.0], help="RIC shell widths [Mpc/h]")
     parser.add_argument("--L", type=int, default=4)
+    parser.add_argument("--layer2-mean", choices=("binned", "global"), default="binned",
+                        help="mean subtracted from the first-layer modulus before the second layer of the survey "
+                             "measurement: per bin of first-layer coverage and nbar (survey.second_layer_bins), or "
+                             "over the whole support")
     parser.add_argument("--q", type=float, default=0.8)
     parser.add_argument("--calibrate", type=int, default=12, help="signal-only mocks for the lambda window")
     parser.add_argument("--realizations", type=int, default=10, help="test mocks (per variant for lambda)")
@@ -156,7 +162,7 @@ def run_ric(args, geometries, setups, pk):
             for cap, field in meshes.items():
                 s = setups[cap]
                 out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
-                                         qs=[args.q], los=s["los"], lattice=s["lattice"])
+                                   qs=[args.q], los=s["los"], lattice=s["lattice"], second_layer_bins=s["bins2"])
                 for key in keys:
                     results[cap][name][key].append(out[key][0])
         print(f"realization {i}: {time.time() - t0:.0f} s", flush=True)
@@ -220,7 +226,7 @@ def run_lambda(args, geometries, setups, pk):
             for cap, field in zip(caps, ric(*fields)):
                 s = setups[cap]
                 out = args.measure(field, s["config"], support=s["g"].support, weights=s["g"].weights,
-                                         qs=[args.q], los=s["los"], lattice=s["lattice"])
+                                   qs=[args.q], los=s["los"], lattice=s["lattice"], second_layer_bins=s["bins2"])
                 measured[cap].append(out["S1m"][0])
             print(f"{name} test {r}: {time.time() - t0:.0f} s", flush=True)
         for cap in caps:
@@ -261,7 +267,8 @@ def run_lambda(args, geometries, setups, pk):
 def run_s21m(args, geometries, setups, pk):
     caps = list(geometries)
     ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
-    windows = {cap: LambdaWindow(s["config"], s["g"].support, s["los"], s["lattice"], second_layer=True)
+    windows = {cap: LambdaWindow(s["config"], s["g"].support, s["los"], s["lattice"], second_layer=True,
+                                 second_layer_bins=s["bins2"])
                for cap, s in setups.items()}
     path = args.output / "correction2.npz"
     if path.exists():
@@ -301,7 +308,7 @@ def run_s21m(args, geometries, setups, pk):
             for cap, survey, field in zip(caps, ric(*fields), fields):
                 s = setups[cap]
                 common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
-                masked = args.measure(survey, s["config"], support=s["g"].support, **common)
+                masked = args.measure(survey, s["config"], support=s["g"].support, second_layer_bins=s["bins2"], **common)
                 box = args.measure(field, s["config"], moment_support=s["g"].support, **common)
                 s1m = masked["S1m"][0]
                 rows[cap]["measured"].append(s21m(s1m, masked["S2m"][0]))
@@ -351,7 +358,7 @@ def run_vector(args, geometries, setups, pk):
         for cap, survey, field in zip(caps, ric(*fields), fields):
             s = setups[cap]
             common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
-            masked = args.measure(survey, s["config"], support=s["g"].support, **common)
+            masked = args.measure(survey, s["config"], support=s["g"].support, second_layer_bins=s["bins2"], **common)
             reference = args.measure(field, s["config"], moment_support=s["g"].support, **common)
             vectors[cap, "window"].append(data_vector({k: masked[k][0] for k in ("S1m", "S2m")}))
             vectors[cap, "box"].append(data_vector({k: reference[k][0] for k in ("S1m", "S2m")}))
@@ -414,7 +421,9 @@ def main():
         # sigma = 25, 35, 50, 71 Mpc/h; with --test ric, S21m at (25, 71)
         config = WSTConfig(J=3, L=args.L, L2=args.L, sigma0=25.0 / g.cellsize, step=2**0.5, cellsize=g.cellsize,
                            min_dj=10 if args.test == "lambda" else 3, q=args.q)
-        setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g)
+        setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
+        if args.layer2_mean == "binned" and config.second_layer_pairs():
+            setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice)
         if args.test == "lambda":
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)

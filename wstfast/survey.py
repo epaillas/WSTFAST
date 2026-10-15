@@ -292,7 +292,8 @@ def _components(fk, lattice: Lattice, harmonics, sigma, ell, index):
 
 def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray | None = None,
                        weights: np.ndarray | None = None, qs=None, los=None, erosion: float = 0.0,
-                       moment_support: np.ndarray | None = None, lattice: Lattice | None = None) -> dict:
+                       moment_support: np.ndarray | None = None, lattice: Lattice | None = None,
+                       second_layer_bins: dict | None = None) -> dict:
     """WST coefficients of a density contrast mesh restricted to a survey support, for one or several exponents q.
 
     ``support``: boolean mesh of the cells inside the footprint (default: every cell, a periodic box). ``weights``:
@@ -303,6 +304,10 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
     (``SurveyGeometry.line_of_sight(full=True)``, needed when the field support is not the footprint). ``moment_support`` (default ``support``, and inside it):
     the cells the moments average over, before erosion; with a full ``support`` it gives the coefficients the
     unmasked field would have on the same cells, the edge-free reference of a masked measurement.
+    ``second_layer_bins`` (``second_layer_bins``): {(j1, l): label per support cell}; for l >= 1 the first-layer modulus
+    then loses its mean in each bin (of first-layer coverage and nbar) before the second layer, instead of its mean over
+    the support. Near the edges the mean of U follows the coverage, and a single mean would leave that profile in the
+    second layer as a deterministic offset; in a periodic box (one bin) both are the same.
 
     Returns ``q``, ``S0``, ``S1`` and ``S2`` as ``measure_wst``, and with ``los`` also ``S1m`` and ``S2m``.
     """
@@ -368,7 +373,8 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
                 continue
             for m1, u in [(None, u1)] + list(enumerate(per_m)):
                 second = np.zeros(nmesh**3, dtype=np.float32)
-                second[index] = u if ell == 0 else u - u.mean(dtype=np.float64)
+                second[index] = u if ell == 0 else subtract_mean(u, None if second_layer_bins is None
+                                                                 else second_layer_bins[j1, ell])
                 fu = _rfft(second.reshape(delta.shape))
                 for _, j2 in (pair for pair in pairs if pair[0] == j1):
                     u2, per_m2 = moduli(fu, config.sigma0 * config.step**j2, resolve_m=m1 is not None)
@@ -512,6 +518,48 @@ def _squared_kernel(lattice, sigma: float, ell: int) -> np.ndarray:
     return sum(_irfft(radial * y, lattice.n) ** 2 for y in lattice.harmonics(ell))
 
 
+def coverage(support: np.ndarray, config: WSTConfig, lattice, j: int, ell: int) -> np.ndarray:
+    """Fraction of the power of the (sigma_j, l) wavelet inside the support, (|psi_l|^2 * M)(x) / sum |psi_l|^2 with
+    |psi_l|^2 = sum_m |psi_l^m|^2, at every support cell (order of ``np.flatnonzero(support)``); float32 in [0, 1]."""
+    n = support.shape[0]
+    kernel2 = _squared_kernel(lattice, config.sigma0 * config.step**j, ell)
+    kernel2 /= kernel2.sum(dtype=np.float64)
+    f = _irfft(_rfft(kernel2) * _rfft(np.asarray(support, dtype=np.float32)), n).ravel()[np.flatnonzero(support)]
+    return np.clip(f, 0.0, 1.0).astype(np.float32)
+
+
+def second_layer_bins(support: np.ndarray, nbar: np.ndarray, config: WSTConfig, lattice=None, ncoverage: int = 10,
+                      nnbar: int = 3, interior: float = 0.999) -> dict:
+    """Bins of the support cells for the mean subtraction of the second layer (``measure_wst_survey``), {(j1, l):
+    labels}, for every first-layer (j1, l) of the second layer: the coverage of the (sigma_j1, l) wavelet, in ``ncoverage``
+    quantile bins of the edge cells (coverage < ``interior``) plus one interior bin, times ``nnbar`` quantile bins of
+    nbar (the noise level of U). They depend on the geometry only."""
+    lattice = lattice or Lattice(support.shape[0])
+    index = np.flatnonzero(support)
+    density = np.asarray(nbar).ravel()[index]
+    edges = np.unique(np.quantile(density, np.linspace(0, 1, nnbar + 1)[1:-1]))
+    nbin = np.digitize(density, edges)
+    out = {}
+    for j1 in sorted({j for j, _ in config.second_layer_pairs()}):
+        for ell in range(1, config.lmax2 + 1):
+            f = coverage(support, config, lattice, j1, ell)
+            edge = f < interior
+            cbin = np.full(len(f), ncoverage)
+            if edge.any():
+                qedges = np.unique(np.quantile(f[edge], np.linspace(0, 1, ncoverage + 1)[1:-1]))
+                cbin[edge] = np.digitize(f[edge], qedges)
+            _, out[j1, ell] = np.unique(cbin * (nnbar + 1) + nbin, return_inverse=True)
+    return out
+
+
+def subtract_mean(u: np.ndarray, labels: np.ndarray | None = None) -> np.ndarray:
+    """``u`` minus its mean (float64 accumulation), or minus its mean in each bin of ``labels``."""
+    if labels is None:
+        return u - u.mean(dtype=np.float64)
+    means = np.bincount(labels, weights=u) / np.bincount(labels)
+    return (u - means[labels]).astype(u.dtype)
+
+
 class LambdaWindow:
     """Window of the first layer at the level of the component variances, which are linear in the spectrum.
 
@@ -531,15 +579,16 @@ class LambdaWindow:
     """
 
     def __init__(self, config: WSTConfig, support: np.ndarray, los, lattice: Lattice | None = None, nbins: int = 40,
-                 second_layer: bool = False):
+                 second_layer: bool = False, second_layer_bins: dict | None = None):
         self.config, self.support = config, np.asarray(support, dtype=bool)
         self.index = np.flatnonzero(self.support)
         self.lattice = lattice or Lattice(support.shape[0])
         los = np.asarray(los)
         self.second_layer = second_layer
+        self.second_layer_bins = second_layer_bins
         if second_layer:
-            if los.ndim != 4 or _on_device(self.lattice):
-                raise ValueError("the second layer needs the line of sight of every mesh cell, and the numpy Lattice")
+            if los.ndim != 4:
+                raise ValueError("the second layer needs the line of sight of every mesh cell")
             # angles of every cell, for the first layer of the periodic reference
             self._angles_full = tuple(a.astype(np.float32) for a in _angles(los.reshape(3, -1).T.astype(np.float64)))
         if los.ndim == 4:
@@ -556,14 +605,10 @@ class LambdaWindow:
         self.blocks = [(j, ell) for j in range(config.J + 1) for ell in range(config.L + 1)]
         self.edges = np.linspace(0.0, 1.0 + 1e-6, nbins + 1)
         self.coverage, self.bins = {}, {}
-        n = support.shape[0]
-        fm = _rfft(self.support.astype(np.float32))
         for ell in range(config.L + 1):
             for j in range(config.J + 1):
-                kernel2 = _squared_kernel(self.lattice, config.sigma0 * config.step**j, ell)
-                kernel2 /= kernel2.sum(dtype=np.float64)
-                f = np.clip(_irfft(_rfft(kernel2) * fm, n).ravel()[self.index], 0.0, 1.0)
-                self.coverage[j, ell] = f.astype(np.float32)
+                f = coverage(self.support, config, self.lattice, j, ell)
+                self.coverage[j, ell] = f
                 self.bins[j, ell] = np.clip(np.digitize(f, self.edges) - 1, 0, nbins - 1)
         self.nbins = nbins
         self.masked = {b: np.zeros((2 * b[1] + 1, nbins)) for b in self.blocks}
@@ -602,7 +647,11 @@ class LambdaWindow:
     def second_layer_squares(self, field: np.ndarray, survey: bool):
         """Squared rotated second-layer components X'_m2(x)^2 (2l + 1, ncells) on the support cells, for every
         (j1, j2, l, |m1|): as ``measure_wst_survey`` for the survey field (first-layer moduli on the support, minus
-        their support mean for l >= 1, zero elsewhere), and as the periodic box for the reference (moduli everywhere)."""
+        their support mean, or their mean in each ``second_layer_bins`` bin, for l >= 1, zero elsewhere), and as the
+        periodic box for the reference (moduli everywhere)."""
+        if _on_device(self.lattice):
+            yield from self._second_layer_squares_device(field, survey)
+            return
         n = self.support.shape[0]
         fk = _rfft(np.asarray(np.where(self.support, field, 0.0) if survey else field, dtype=np.float32))
         cells = self.index if survey else np.arange(n**3)
@@ -618,7 +667,9 @@ class LambdaWindow:
                 for m1, power in enumerate(m_powers(x)):
                     u = np.sqrt(power)
                     second = np.zeros(n**3, dtype=np.float32)
-                    second[cells] = u if ell == 0 else u - u.mean(dtype=np.float64)
+                    bins = (self.second_layer_bins[j1, ell] if survey and ell > 0 and self.second_layer_bins is not None
+                            else None)
+                    second[cells] = u if ell == 0 else subtract_mean(u, bins)
                     fu = _rfft(second.reshape((n,) * 3))
                     for _, j2 in (pair for pair in self.pairs if pair[0] == j1):
                         x2 = _components(fu, self.lattice, harmonics, self.config.sigma0 * self.config.step**j2, ell,
@@ -626,6 +677,40 @@ class LambdaWindow:
                         if ell > 0:
                             x2 = self.rotations[ell].rotate(x2, self.tables[ell])
                         yield (j1, j2, ell, m1), x2 * x2
+                del x
+            del tables
+
+    def _second_layer_squares_device(self, field, survey: bool):
+        """``second_layer_squares`` on the device of a ``TorchLattice``."""
+        import torch
+
+        from .measure_torch import subtract_mean_torch, survey_components
+
+        n, device = self.support.shape[0], self.lattice.device
+        values = np.where(self.support, field, 0.0) if survey else field
+        fk = torch.fft.rfftn(torch.as_tensor(np.asarray(values, dtype=np.float32), device=device))
+        cells = self._index if survey else torch.arange(n**3, device=device)
+        for ell in range(self.config.lmax2 + 1):
+            tables = None
+            if ell > 0:
+                tables = self.tables[ell] if survey else self.rotations[ell].tables(*self._angles_full)
+            for j1 in sorted({j for j, _ in self.pairs}):
+                x = survey_components(fk, self.lattice, self.config.sigma0 * self.config.step**j1, ell, cells)
+                if ell > 0:
+                    x = self.rotations[ell].rotate(x, tables)
+                for m1, power in enumerate(m_powers(x)):
+                    u = torch.sqrt(power)
+                    bins = (self.second_layer_bins[j1, ell] if survey and ell > 0 and self.second_layer_bins is not None
+                            else None)
+                    second = torch.zeros(n**3, dtype=torch.float32, device=device)
+                    second[cells] = u if ell == 0 else subtract_mean_torch(u, bins)
+                    fu = torch.fft.rfftn(second.reshape((n,) * 3))
+                    for _, j2 in (pair for pair in self.pairs if pair[0] == j1):
+                        x2 = survey_components(fu, self.lattice, self.config.sigma0 * self.config.step**j2, ell,
+                                               self._index)
+                        if ell > 0:
+                            x2 = self.rotations[ell].rotate(x2, self.tables[ell])
+                        yield (j1, j2, ell, m1), (x2 * x2).cpu().numpy()
                 del x
             del tables
 

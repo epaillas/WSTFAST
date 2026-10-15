@@ -309,3 +309,39 @@ def test_lambda_window_second_layer_matches_the_estimator():
     window.add(delta, delta)
     for ratio in window.s2m_ratio(np.ones(32**3), 0.8).values():
         np.testing.assert_allclose(ratio, 1.0, rtol=1e-5)
+
+
+def test_binned_second_layer_mean():
+    torch = pytest.importorskip("torch")
+    from wstfast.measure_torch import TorchLattice, measure_wst_survey_torch
+    from wstfast.survey import LambdaWindow, second_layer_bins
+
+    config = WSTConfig(J=2, L=2, L2=2, sigma0=1.2, min_dj=2, cellsize=1.0)
+    delta = anisotropic_field(32, seed=13)
+    lattice, tlattice = Lattice(32), TorchLattice(32, device=torch.device("cpu"))
+    # box limit: one bin per (j1, l), the same as the global mean
+    full = np.ones((32,) * 3, dtype=bool)
+    bins = second_layer_bins(full, np.ones(full.shape), config, lattice)
+    assert all(np.unique(b).size == 1 for b in bins.values())
+    a = measure_wst_survey(delta, config, qs=[0.8], los="z", lattice=lattice)["S2m"]
+    b = measure_wst_survey(delta, config, qs=[0.8], los="z", lattice=lattice, second_layer_bins=bins)["S2m"]
+    np.testing.assert_allclose(b, a, rtol=1e-6, equal_nan=True)
+
+    geometry = _two_region_cone(32)
+    los = geometry.line_of_sight(full=True)
+    bins = second_layer_bins(geometry.support, geometry.nbar, config, lattice, ncoverage=4, nnbar=2)
+    assert max(np.unique(b).size for b in bins.values()) > 2
+    kwargs = dict(support=geometry.support, qs=[2.0], los=los, second_layer_bins=bins)
+    masked = measure_wst_survey(delta, config, lattice=lattice, **kwargs)["S2m"][0]
+    np.testing.assert_allclose(measure_wst_survey_torch(delta, config, lattice=tlattice, **kwargs)["S2m"][0], masked,
+                               rtol=2e-4, equal_nan=True)
+    for lat in (lattice, tlattice):
+        window = LambdaWindow(config, geometry.support, los, lat, nbins=8, second_layer=True, second_layer_bins=bins)
+        for (j1, j2, ell, m1), x2 in window.second_layer_squares(delta, True):
+            powers = [x2[ell]] + [x2[ell - m] + x2[ell + m] for m in range(1, ell + 1)]
+            np.testing.assert_allclose([p.mean() for p in powers], masked[j1, j2, ell, m1, :ell + 1], rtol=5e-4)
+    box = measure_wst_survey(delta, config, moment_support=geometry.support, qs=[2.0], los=los, lattice=lattice)["S2m"][0]
+    window = LambdaWindow(config, geometry.support, los, tlattice, nbins=8, second_layer=True, second_layer_bins=bins)
+    for (j1, j2, ell, m1), x2 in window.second_layer_squares(delta, False):
+        powers = [x2[ell]] + [x2[ell - m] + x2[ell + m] for m in range(1, ell + 1)]
+        np.testing.assert_allclose([p.mean() for p in powers], box[j1, j2, ell, m1, :ell + 1], rtol=5e-4)

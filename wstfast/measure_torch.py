@@ -192,8 +192,19 @@ class TorchLOSRotation:
         return x
 
 
+def subtract_mean_torch(u, labels=None):
+    """``survey.subtract_mean`` for a tensor; ``labels`` a numpy array or a tensor of the same device."""
+    if labels is None:
+        return u - u.to(torch.float64).mean().to(u.dtype)
+    labels = torch.as_tensor(labels, device=u.device)
+    sums = torch.bincount(labels, weights=u.to(torch.float64))
+    counts = torch.bincount(labels).to(torch.float64)
+    return u - (sums / counts)[labels].to(u.dtype)
+
+
 def measure_wst_survey_torch(delta, config: WSTConfig, support=None, weights=None, qs=None, los=None,
-                             erosion: float = 0.0, moment_support=None, lattice: TorchLattice | None = None) -> dict:
+                             erosion: float = 0.0, moment_support=None, lattice: TorchLattice | None = None,
+                             second_layer_bins: dict | None = None) -> dict:
     """Same arguments and outputs as ``wstfast.survey.measure_wst_survey``, computed on ``lattice.device``."""
     from .survey import _angles, _Moments, m_powers
 
@@ -264,7 +275,8 @@ def measure_wst_survey_torch(delta, config: WSTConfig, support=None, weights=Non
                 continue
             for m1, u in [(None, u1)] + list(enumerate(per_m)):
                 second = torch.zeros(nmesh**3, dtype=torch.float32, device=device)
-                second[index] = u if ell == 0 else u - u.to(torch.float64).mean().to(torch.float32)
+                second[index] = u if ell == 0 else subtract_mean_torch(u, None if second_layer_bins is None
+                                                                       else second_layer_bins[j1, ell])
                 fu = torch.fft.rfftn(second.reshape((nmesh,) * 3))
                 for _, j2 in (pair for pair in pairs if pair[0] == j1):
                     u2, per_m2 = moduli(fu, config.sigma0 * config.step**j2, resolve_m=m1 is not None)
