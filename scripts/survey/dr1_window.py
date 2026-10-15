@@ -29,6 +29,11 @@ histograms of the transfer (``--correction``) and noise, delta of every S1m bloc
 (``--paired-mocks``), K of every S21m entry from the S21m test mocks (``--s21m-mocks``), and the per-mock ratios of
 both (the calibration covariance, ``survey.window_correction``).
 
+``--test measure``: the WST of the complete Abacus mocks (``--measure-mocks``, with ``--measure-randoms`` random files
+each) on the frozen geometry and estimator (FKP field, FKP weights, local line of sight, binned second-layer mean), as
+``fit_rsd.py`` survey data: ``<output>/<cap>/wst_r<mock>.npz`` (``data.save_measurement``, with the shot noise
+1 / nbar_eff of the geometry).
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -76,7 +81,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products"), required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -105,6 +110,10 @@ def get_args():
                         help="products: partial_fiducial.npz of --test lambda --paired runs (delta of S1m)")
     parser.add_argument("--s21m-mocks", type=Path, nargs="*", default=[],
                         help="products: results.npz / partial_fiducial.npz of --test s21m runs (K of S21m)")
+    parser.add_argument("--measure-mocks", type=int, nargs="+", default=[0],
+                        help="measure: the complete Abacus mocks to measure (fit_rsd.py survey data)")
+    parser.add_argument("--measure-randoms", type=int, nargs="+", default=list(range(18)),
+                        help="measure: random files of each mock")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -379,6 +388,7 @@ def run_products(args, geometries, setups, pk):
         correction = {blk: f[f"{cap}_{blk[0]}_{blk[1]}"] for blk in window.blocks}
         weights = g.weights.ravel()[window.index]
         product = SurveyWindow.build(window, correction, s["noise"], weights, q=args.q)
+        product.veff = g.veff
         # box variances of the calibration mocks' spectrum (the delta ratio needs them only through T and lambda_N)
         grid = getattr(s["lattice"], "numpy", s["lattice"])
         kphys = grid.kmag / g.cellsize
@@ -419,6 +429,36 @@ def run_products(args, geometries, setups, pk):
                             k_range=[float(min(product.s21m.values())), float(max(product.s21m.values()))]
                             if product.s21m else None)
         print(f"{cap}: {summary[cap]}", flush=True)
+    return summary
+
+
+def run_measure(args, geometries, setups, pk):
+    from wstfast.data import save_measurement
+    from wstfast.survey import desi_catalogue_path, read_desi_catalogue, sky_to_cartesian
+
+    summary = {}
+    for mock in args.measure_mocks:
+        for cap, g in geometries.items():
+            t0 = time.time()
+            s = setups[cap]
+            path = args.output / cap / f"wst_r{mock:04d}.npz"
+            if path.exists():
+                continue
+            data = read_desi_catalogue(desi_catalogue_path(mock, cap, root=args.catalogue_root), args.zrange)
+            randoms = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange)
+                       for i in args.measure_randoms]
+            positions = sky_to_cartesian(data["RA"], data["DEC"], data["Z"])
+            rpositions = np.concatenate([sky_to_cartesian(r["RA"], r["DEC"], r["Z"]) for r in randoms])
+            delta = g.fkp_field(positions, rpositions)
+            out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=[args.q], los=s["los"],
+                               lattice=s["lattice"], second_layer_bins=s["bins2"])
+            metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
+                            nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=g.shotnoise,
+                            tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap)
+            save_measurement(path, out, s["config"], metadata)
+            summary[f"{cap}_{mock}"] = dict(ngal=int(len(positions)), seconds=round(time.time() - t0, 1))
+            print(f"mock {mock} {cap}: {len(positions)} galaxies, {len(rpositions)} randoms, {time.time() - t0:.0f} s",
+                  flush=True)
     return summary
 
 
@@ -510,7 +550,8 @@ def main():
         if args.test in ("lambda", "products"):
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
-    runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, **{"lambda": run_lambda})
+    runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
+                **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
 

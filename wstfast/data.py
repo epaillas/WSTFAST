@@ -111,6 +111,8 @@ def common_metadata(metadatas, files) -> dict:
             raise ValueError(f"{path} was measured with different settings")
     reference["nparticles"] = 1.0 / float(np.mean([1.0 / m["nparticles"] for m in metadatas]))
     reference["tracer"] = metadatas[0].get("tracer", "matter")
+    if all("shotnoise" in m for m in metadatas):  # survey measurements: 1 / nbar_eff of each realization
+        reference["shotnoise"] = float(np.mean([m["shotnoise"] for m in metadatas]))
     return reference
 
 
@@ -130,7 +132,10 @@ class WSTDataset:
 
     @property
     def shotnoise(self) -> float:
-        """Particle shot noise V / N of the measured field, in (Mpc/h)^3."""
+        """Shot noise of the measured field, in (Mpc/h)^3: V / N of a box, or the mean ``shotnoise`` (1 / nbar_eff) of
+        survey measurements."""
+        if "shotnoise" in self.metadata:
+            return self.metadata["shotnoise"]
         return self.metadata["boxsize"] ** 3 / self.metadata["nparticles"]
 
     def covariance(self, kind: str = "sample", of_mean: bool = False) -> np.ndarray:
@@ -169,7 +174,10 @@ class PowerDataset:
 
     @property
     def shotnoise(self) -> float:
-        """Particle shot noise V / N of the measured field, in (Mpc/h)^3."""
+        """Shot noise of the measured field, in (Mpc/h)^3: V / N of a box, or the mean ``shotnoise`` (1 / nbar_eff) of
+        survey measurements."""
+        if "shotnoise" in self.metadata:
+            return self.metadata["shotnoise"]
         return self.metadata["boxsize"] ** 3 / self.metadata["nparticles"]
 
     def covariance(self, kind: str = "sample", of_mean: bool = False) -> np.ndarray:

@@ -871,6 +871,7 @@ class SurveyWindow:
     s1m: dict
     s21m: dict
     q: float = 0.8
+    veff: float | None = None  # FKP effective volume of the cap [(Gpc/h)^3], for the survey covariance
 
     @staticmethod
     def key(sigma: float) -> float:
@@ -917,6 +918,8 @@ class SurveyWindow:
 
     def save(self, path):
         arrays = {"q": self.q}
+        if self.veff is not None:
+            arrays["veff"] = self.veff
         for (sigma, ell, m), b in self.s1m.items():
             for name, value in b.items():
                 arrays[f"s1m_{sigma}_{ell}_{m}_{name}"] = value
@@ -935,7 +938,7 @@ class SurveyWindow:
                 s1m.setdefault(key, {})["_".join(parts[4:])] = (float(f[name]) if f[name].ndim == 0 else f[name])
             elif parts[0] == "s21m":
                 s21m[(float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]))] = float(f[name])
-        return cls(s1m=s1m, s21m=s21m, q=float(f["q"]))
+        return cls(s1m=s1m, s21m=s21m, q=float(f["q"]), veff=float(f["veff"]) if "veff" in f.files else None)
 
     def s1m_arrays(self, keys):
         """(weight, transfer, noise) (B, nbin) and delta (B,) of the blocks ``keys``, zero-padded to one nbin."""
@@ -1039,6 +1042,28 @@ class SurveyGeometry:
             raise ValueError("target nbar above the density of the mock")
         w = self.weights
         return np.where(self.support, inside, np.sum(w * inside) / np.sum(w))
+
+    def fkp_field(self, data, randoms, data_weights=None, random_weights=None) -> np.ndarray:
+        """FKP overdensity of a catalogue on this geometry's mesh: delta = (n_g - alpha n_r) / (nbar V_cell) on the
+        support (0 elsewhere), CIC-painted, alpha = sum w_data / sum w_randoms. With randoms whose redshifts are drawn
+        from the data (DESI clustering catalogues), the radial integral constraint comes with them."""
+        ng = paint_cic_weighted(data, data_weights, self.nmesh, self.boxsize, self.offset)
+        nr = paint_cic_weighted(randoms, random_weights, self.nmesh, self.boxsize, self.offset)
+        alpha = ng.sum() / nr.sum()
+        expected = np.where(self.support, self.nbar * self.cellsize**3, 1.0)
+        return np.where(self.support, (ng - alpha * nr) / expected, 0.0).astype(np.float32)
+
+    @property
+    def veff(self) -> float:
+        """FKP effective volume (sum w)^2 / sum w^2 x V_cell of the support [(Gpc/h)^3]."""
+        w = self.weights[self.support]
+        return float(np.sum(w) ** 2 / np.sum(w**2) * self.cellsize**3 / 1e9)
+
+    @property
+    def shotnoise(self) -> float:
+        """Effective shot noise 1 / nbar of the support, averaged with the FKP weights [(Mpc/h)^3]."""
+        w = self.weights[self.support]
+        return float(np.sum(w / self.nbar[self.support]) / np.sum(w))
 
     @classmethod
     def cone(cls, nmesh: int, boxsize: float, observer, half_angle: float, rmin: float, rmax: float, nbar_of_r,
