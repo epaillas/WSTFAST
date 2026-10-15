@@ -39,6 +39,13 @@ Gaussian mocks' ln S1m and ln S21m, a box covariance with the variance of every 
 on the cap (``SurveyWindow.veff_block``), against the sample covariance of the survey mocks (``--s1m-mocks``,
 ``--s21m-mocks``). For a Gaussian field the modulus has no response (r = 0), only its Gaussian-chaos noise.
 
+``--test halos``: Quijote halo boxes cut to the geometry (``survey.box_to_survey``: tiled, RSD along the local line of
+sight, thinned to nbar(x); ``--nbar-scale`` for a geometry denser than the halos), the RIC on the survey side, paired
+with their periodic parent box (NGC from box 2i, SGC from box 2i + 1 of ``--halo-dir``, i = ``--seed-offset`` +
+0..``--realizations``-1). Per mock and cap: the survey and box S1m and S2m, saved for ``--test products``
+(``partial_halos.npz``: ``<cap>``, ``<cap>_box``; ``<cap>_measured``, ``<cap>_none`` of S21m) and the survey
+measurement as ``fit_rsd.py`` survey data (``<output>/data/<cap>/wst_r<i>.npz``).
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -86,8 +93,8 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance"),
-                        required=True)
+    parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance",
+                                           "halos"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -126,6 +133,10 @@ def get_args():
                         help="measure: the complete Abacus mocks to measure (fit_rsd.py survey data)")
     parser.add_argument("--measure-randoms", type=int, nargs="+", default=list(range(18)),
                         help="measure: random files of each mock")
+    parser.add_argument("--nbar-scale", type=float, default=1.0,
+                        help="multiply the geometry's nbar(x) (e.g. 0.5 for halo mocks sparser than the survey)")
+    parser.add_argument("--halo-dir", type=Path, default=Path("data/quijote/halos_m13_z0.5"),
+                        help="halos: r<i>.npz (positions, displacements [Mpc/h]) of Quijote halo boxes of 1 Gpc/h")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -595,6 +606,43 @@ def run_covariance(args, geometries, setups, pk):
     return summary
 
 
+def run_halos(args, geometries, setups, pk):
+    from wstfast.data import save_measurement
+    from wstfast.survey import box_to_survey
+
+    caps = list(geometries)
+    ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+    keys21 = [(j1, j2, ell, m1, m2) for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
+              for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+    rows = {f"{cap}{suffix}": [] for cap in caps for suffix in ("", "_box", "_measured", "_none")}
+    for r in range(args.realizations):
+        i = args.seed_offset + r
+        t0 = time.time()
+        fields = []
+        for k, (cap, g) in enumerate(geometries.items()):
+            halos = np.load(args.halo_dir / f"r{2 * i + k:04d}.npz")
+            fields.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
+                                        los="local", seed=[i, k]))
+        for cap, survey, field in zip(caps, ric(*fields), fields):
+            s, g = setups[cap], geometries[cap]
+            common = dict(weights=g.weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
+            masked = args.measure(survey, s["config"], support=g.support, second_layer_bins=s["bins2"], **common)
+            box = args.measure(field, s["config"], moment_support=g.support, **common)
+            s1, s2, b1, b2 = masked["S1m"][0], masked["S2m"][0], box["S1m"][0], box["S2m"][0]
+            rows[cap].append(s1)
+            rows[f"{cap}_box"].append(b1)
+            rows[f"{cap}_measured"].append([s2[j1, j2, ell, m1, m2] / s1[j1, ell, m1] for j1, j2, ell, m1, m2 in keys21])
+            rows[f"{cap}_none"].append([b2[j1, j2, ell, m1, m2] / s1[j1, ell, m1] for j1, j2, ell, m1, m2 in keys21])
+            metadata = dict(redshift=0.5, boxsize=g.boxsize, nmesh=g.nmesh, space=cap, nparticles=1,
+                            shotnoise=g.shotnoise, tracer="quijote_halos_m13_cutsky", realization=i, cap=cap,
+                            nbar_scale=args.nbar_scale)
+            save_measurement(args.output / "data" / cap / f"wst_r{i:04d}.npz", masked, s["config"], metadata)
+        print(f"halos {i}: {time.time() - t0:.0f} s", flush=True)
+        np.savez(args.output / "partial_halos.npz", **{k: np.array(v) for k, v in rows.items()},
+                 realizations=np.arange(args.seed_offset, args.seed_offset + r + 1))
+    return dict(nmocks=args.realizations)
+
+
 def data_vector(out) -> np.ndarray:
     """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l >= 1, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
@@ -662,6 +710,9 @@ def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
     geometries = build_geometries(args)
+    if args.nbar_scale != 1.0:  # a sparser tracer in the same geometry (the cache keeps the survey's nbar)
+        for g in geometries.values():
+            g.nbar = g.nbar * args.nbar_scale
     pk = linear_power(np.mean(args.zrange))  # CLASS before torch: their two OpenMP runtimes clash the other way round
     nmesh = next(iter(geometries.values())).nmesh
     if args.device == "numpy":
@@ -684,7 +735,7 @@ def main():
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
-                covariance=run_covariance,
+                covariance=run_covariance, halos=run_halos,
                 **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))
