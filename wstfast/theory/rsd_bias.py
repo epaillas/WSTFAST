@@ -223,16 +223,23 @@ class BiasedRSDS1Basis(RSDS1Basis):
     the Fingers-of-God counterterm of every external leg instead, stored as the undamped columns (order 0) followed by
     the orders 1 and 2 of ``_fog_weights`` (``fog_sizes``); ``collapse_fog`` combines them at a given c_v."""
 
-    def __init__(self, *args, cubic: bool = False, fog: bool = False, **kwargs):
+    def __init__(self, *args, cubic: bool = False, fog: bool = False, ap: int = 0, ap_nodes: int = 5, **kwargs):
         super().__init__(*args, **kwargs)
         self.cubic, self.fog = bool(cubic), bool(fog)
         if self.fog:
             self.damping = None
+        #: Order of the AP polynomial of the observed-frame cumulants (0: none; ``_cumulants_ap``).
+        self.ap = int(ap)
+        if self.ap and not self.fog:
+            raise ValueError("ap needs fog=True")
+        self.ap_nodes = int(ap_nodes)
 
     def cumulants(self, klin, pklin, f):
         """``kappa`` (ncoef, L + 1, sum KAPPA_SIZES [+ sum CUBIC_KAPPA_SIZES]): per block sum_{a,b in M} kappa_aabb in
         the columns [tree | B/n | P/n^2 | 1/n^3 [| b3 | bG3 | bdG2]]; ``skewness`` (ncoef, sum SKEW_SIZES): the m = 0
-        third cumulant (even l) in [tree | P/n | 1/n^2]."""
+        third cumulant (even l) in [tree | P/n | 1/n^2]. With ``ap``, the AP polynomial of these (``_cumulants_ap``)."""
+        if self.ap:
+            return self._cumulants_ap(klin, pklin, f)
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.where(np.asarray(x) > 0, np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp)), 0.0)  # noqa
         self.sigma_v = (0.0 if self.damping is None else float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
@@ -292,6 +299,84 @@ class BiasedRSDS1Basis(RSDS1Basis):
         return kappa, skewness
 
 
+    def _cumulants_ap(self, klin, pklin, f):
+        """Observed-frame cumulants as an AP polynomial (``rsd.APNodes``): kappa (ncoef, L + 1, nalpha * ncol) and
+        skewness (ncoef, nalpha * nskew), the column layout of ``cumulants`` repeated per AP term alpha (alpha-major).
+
+        In true-frame variables the Jacobians of the n-point functions cancel against the measure, so an observed-frame
+        cumulant is the true-frame integral with every leg filtered (and projected on the harmonics) at its observed
+        wavevector (q_perp k_x, q_perp k_y, q_par k_z): the physics (kernels, spectra, Fingers-of-God legs) is computed
+        once, and only the filters and angular factors change with q. They are evaluated at the q = 1 point and the
+        Chebyshev nodes, fitted per sample as a polynomial in x = ln q, and integrated against the physics in one pass.
+        The shot noise of the assembly is the true-frame one, as for the AP projection of the block variances."""
+        from .rsd import APNodes, _block_angles
+
+        logk, logp = np.log(klin), np.log(pklin)
+        pk = lambda x: np.where(np.asarray(x) > 0, np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp)), 0.0)  # noqa
+        self.sigma_v, self.f = 0.0, f
+        nodes = APNodes(self.ap, nodes=self.ap_nodes)
+        nalpha = len(nodes.powers)
+        stretches = [np.array([1.0, 1.0, 1.0])] + [np.exp([b, b, a]) for a, b in nodes.points]  # q=1, then the nodes
+        nb = self.lmax + 1
+        ncol = sum(KAPPA_SIZES) + (sum(CUBIC_KAPPA_SIZES) if self.cubic else 0) + fog_sizes(self.cubic)["kappa"]
+        nskew = sum(SKEW_SIZES) + fog_sizes(self.cubic)["skewness"]
+        kappa = np.zeros((len(self.coefficients), nb, nalpha * ncol))
+        skewness = np.zeros((len(self.coefficients), nalpha * nskew))
+
+        def fit(per_node):  # (1 + npoint, N, ...) -> (N, nalpha * prod(...)): alpha-major along the output axis
+            terms = nodes.fit(per_node[0], per_node[1:])  # (nalpha, N, ...)
+            terms = terms.reshape(nalpha, terms.shape[1], -1)
+            return np.moveaxis(terms, 0, 1).reshape(terms.shape[1], -1)
+
+        for ell in sorted({c.ell for c in self.coefficients}):
+            members = [i for i, c in enumerate(self.coefficients) if c.ell == ell]
+            legs = [np.asarray(x) for x in self.samplers[ell].legs(0.0)]  # true frame
+            terms = _trispectrum_terms(legs, f)
+            cubic = _cubic_trispectrum_terms(legs, f) if self.cubic else None
+            observed = [[x * stretch for x in legs] for stretch in stretches]
+            angles = []
+            for obs in observed:
+                (pair12, pair34), _ = _block_angles(ell, obs) if obs is not observed[0] else self.block_angles[ell]
+                angles.append((pair12 * pair34).T)  # (N, l + 1)
+            for index in members:
+                sigma = self.config.sigma(self.coefficients[index].j)
+                weights = np.array([(self.samplers[ell].weights / sigma**9
+                                     * np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) for x in obs],
+                                               axis=0))[:, None] * angle for obs, angle in zip(observed, angles)])
+                weight = fit(weights)  # (N, nalpha * (l + 1))
+                fog = _fog_weights(weight, [x / sigma for x in legs])
+                split3 = lambda values: [v.reshape(nalpha, ell + 1, -1) for v in np.split(values, 3)]  # noqa: E731
+                tree = split3(terms(4, sigma, pk, fog))
+                poisson = [terms(d, sigma, pk, weight).reshape(nalpha, ell + 1, -1) for d in (3, 2, 0)]
+                cubics = [split3(cubic(name, sigma, pk, fog)) for name in CUBIC_NAMES] if cubic is not None else []
+                blocks = []
+                for a in range(nalpha):
+                    blocks += ([tree[0][a]] + [x[a] for x in poisson] + [c[0][a] for c in cubics]
+                               + [x for order in (1, 2) for x in [tree[order][a]] + [c[order][a] for c in cubics]])
+                kappa[index, :ell + 1] = np.concatenate(blocks, axis=-1)
+            del terms, cubic
+            if ell % 2:
+                continue
+            legs = [np.asarray(x) for x in self.bis_samplers[ell].legs(0.0)]
+            terms = _bispectrum_terms(legs, f)
+            c = np.sqrt(4 * np.pi / (2 * ell + 1))
+            observed = [[x * stretch for x in legs] for stretch in stretches]
+            ys = [[c * np.real(sph_harm_y(ell, 0, np.arccos(np.clip(x[:, 2] / np.sqrt(np.sum(x**2, axis=-1)), -1, 1)), 0.0))
+                   for x in obs] for obs in observed]
+            for index in members:
+                sigma = self.config.sigma(self.coefficients[index].j)
+                weights = np.array([(self.bis_samplers[ell].weights / sigma**6
+                                     * np.prod([self._filter(np.sqrt(np.sum(x**2, axis=-1)), ell, sigma) * y
+                                                for x, y in zip(obs, y_obs)], axis=0))[:, None]
+                                    for obs, y_obs in zip(observed, ys)])
+                weight = fit(weights)  # (N, nalpha)
+                tree = np.split(terms(3, sigma, pk, _fog_weights(weight, [x / sigma for x in legs])), 3)
+                poisson = [terms(d, sigma, pk, weight) for d in (2, 0)]
+                skewness[index] = np.concatenate([x for a in range(nalpha)
+                                                  for x in (tree[0][a], poisson[0][a], poisson[1][a], tree[1][a], tree[2][a])])
+        return kappa, skewness
+
+
 class BiasedModulusSpectraRSD(ModulusSpectraRSD):
     """Monomial-resolved ``ModulusSpectraRSD``: ``__call__`` returns ``grids`` (nfield, nk, nmu, 296) with the
     columns [R0 | R1 | R2 | G0 | G1 | G2] and ``norms`` (nfield, 16) with [n0 | n1] (see the module docstring).
@@ -302,27 +387,45 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
     [... | R0' | R1' | G0' | G1' | R0'' | R1'' | G0'' | G1''], norms [n0 | n1 | n0' | n0'']. R0 = r^2 is expanded to
     second order in c_v consistently: R0' = 2 r rho1, R0'' = rho1^2 + 2 r rho2 with r = r0 - c_v rho1 + c_v^2 rho2."""
 
-    def __call__(self, pk, f: float, sigma_v: float, fog: bool = False):
+    def __call__(self, pk, f: float, sigma_v: float, fog: bool = False, stretches=None):
+        """``grids``, ``norms`` as in the class docstring. With ``stretches`` (a list of (q_perp, q_perp, q_par)), the
+        first-layer filters and harmonics of every short leg are evaluated at its observed wavevector (the true one
+        times the stretch) while the physics stays in the true frame (the Jacobians cancel in true-frame variables), and
+        the outputs gain a leading axis over the stretches: grids (nstretch, nfield, nk, nmu, ncol), norms (nstretch,
+        nfield, nnorm). Needs ``fog`` (no velocity damping)."""
         if fog:
             sigma_v = 0.0
+        if stretches is not None and not fog:
+            raise ValueError("stretches (AP in the first layer) need fog=True")
+        single = stretches is None
+        stretches = [np.ones(3)] if single else [np.asarray(x, "f8") for x in stretches]
         damp = lambda k, mu: np.exp(-0.5 * (f * k * mu * sigma_v) ** 2)  # noqa: E731
         p, w = self.p, self.weights
         dp, pkp = damp(p, self.mup), pk(p)
         sp = (p * self.mup) ** 2 / FOG_KNL**2  # k_z^2 / k_NL^2 of the leg p
         z1p = linear_components(self.pvec, f)
         psp = (pkp * dp**2)[:, None] * product_coefficients(z1p, z1p)  # (np, 15)
-        radial = {s: np.exp(-0.5 * (s * p) ** 2) * self.window(p) for s, _, _ in self.fields}
-        norms, kernels = [], []
-        for s, ell, m in self.fields:
-            c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
-            rp = (s * p) ** ell * radial[s]
-            a = w * rp**2 * c2w * np.abs(self.harmonics[ell, m]) ** 2
-            extra = [a @ (psp * (2 * sp)[:, None]), a @ (psp * (2 * sp**2)[:, None])] if fog else []
-            norms.append(np.concatenate([a @ psp, [np.sum(a)], *extra]))
-            kernels.append((-1) ** ell * c2w * rp)
+        norms, kernels, harmonics = [], [], []  # per stretch
+        for stretch in stretches:
+            pobs = self.pvec * stretch
+            po = np.sqrt(np.sum(pobs**2, axis=-1))
+            harm = self.harmonics if single or np.all(stretch == 1) else {
+                key: _harmonic(key[0], key[1], pobs) for key in self.harmonics}
+            radial = {s: np.exp(-0.5 * (s * po) ** 2) * self.window(po) for s, _, _ in self.fields}
+            nrm, ker = [], []
+            for s, ell, m in self.fields:
+                c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
+                rp = (s * po) ** ell * radial[s]
+                a = w * rp**2 * c2w * np.abs(harm[ell, m]) ** 2
+                extra = [a @ (psp * (2 * sp)[:, None]), a @ (psp * (2 * sp**2)[:, None])] if fog else []
+                nrm.append(np.concatenate([a @ psp, [np.sum(a)], *extra]))
+                ker.append((-1) ** ell * c2w * rp)
+            norms.append(nrm)
+            kernels.append(ker)
+            harmonics.append(harm)
         nk, nmu = self.k.size, self.mu.size
         ncol = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
-        grids = np.zeros((len(self.fields), nk, nmu, ncol))
+        grids = np.zeros((len(stretches), len(self.fields), nk, nmu, ncol))
         for i, kk in enumerate(self.k):
             pkk = pk(np.array([kk]))[0]
             for a, mk in enumerate(self.mu):
@@ -347,24 +450,29 @@ class BiasedModulusSpectraRSD(ModulusSpectraRSD):
                     pair1, pair2 = pair * s2[:, None], pair * (0.5 * s2**2)[:, None]
                     shot1 = w[:, None] * (psp * (2 * sp)[:, None] + psq * (2 * sq)[:, None])
                     shot2 = w[:, None] * (psp * (2 * sp**2)[:, None] + psq * (2 * sq**2)[:, None])
-                cache = {}
-                for index, (s, ell, m) in enumerate(self.fields):
-                    if (ell, m) not in cache:
-                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(_harmonic(ell, m, qvec)))
-                    kernel = (kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * self.window(qn)
-                              * cache[ell, m])
-                    r = kernel @ long / 2
-                    r1 = np.sum(w * kernel) / 2 * z1k
-                    k2 = kernel**2 / 2
-                    columns = [monomial_product(r, 2, r, 2) * pkk, 2 * monomial_product(r, 2, r1, 2) * pkk,
-                               monomial_product(r1, 2, r1, 2) * pkk, k2 @ pair, k2 @ shot, [np.sum(w * k2)]]
-                    if fog:
-                        rho1, rho2 = kernel @ long1 / 2, kernel @ long2 / 2
-                        columns += [2 * monomial_product(r, 2, rho1, 2) * pkk, 2 * monomial_product(rho1, 2, r1, 2) * pkk,
-                                    k2 @ pair1, k2 @ shot1,
-                                    (monomial_product(rho1, 2, rho1, 2) + 2 * monomial_product(r, 2, rho2, 2)) * pkk,
-                                    2 * monomial_product(rho2, 2, r1, 2) * pkk, k2 @ pair2, k2 @ shot2]
-                    grids[index, i, a] = np.concatenate(columns)
+                for n, stretch in enumerate(stretches):
+                    qobs = qvec * stretch
+                    qo = np.sqrt(np.sum(qobs**2, axis=-1))
+                    cache = {}
+                    for index, (s, ell, m) in enumerate(self.fields):
+                        if (ell, m) not in cache:
+                            cache[ell, m] = np.real(harmonics[n][ell, m] * np.conj(_harmonic(ell, m, qobs)))
+                        kernel = (kernels[n][index] * (s * qo) ** ell * np.exp(-0.5 * (s * qo) ** 2) * self.window(qo)
+                                  * cache[ell, m])
+                        r = kernel @ long / 2
+                        r1 = np.sum(w * kernel) / 2 * z1k
+                        k2 = kernel**2 / 2
+                        columns = [monomial_product(r, 2, r, 2) * pkk, 2 * monomial_product(r, 2, r1, 2) * pkk,
+                                   monomial_product(r1, 2, r1, 2) * pkk, k2 @ pair, k2 @ shot, [np.sum(w * k2)]]
+                        if fog:
+                            rho1, rho2 = kernel @ long1 / 2, kernel @ long2 / 2
+                            columns += [2 * monomial_product(r, 2, rho1, 2) * pkk, 2 * monomial_product(rho1, 2, r1, 2) * pkk,
+                                        k2 @ pair1, k2 @ shot1,
+                                        (monomial_product(rho1, 2, rho1, 2) + 2 * monomial_product(r, 2, rho2, 2)) * pkk,
+                                        2 * monomial_product(rho2, 2, r1, 2) * pkk, k2 @ pair2, k2 @ shot2]
+                        grids[n, index, i, a] = np.concatenate(columns)
+        if single:
+            return grids[0], np.array(norms[0])
         return grids, np.array(norms)
 
 
@@ -375,10 +483,16 @@ class BiasedRSDS21mBasis:
 
     def __init__(self, config, coefficients, boxsize: float = 1000.0, nmesh: int = 256,
                  kmax: float = 0.12, nk: int = 24, nmu: int = 6, sigma_v_factor: float = SIGMA_V_FACTOR,
-                 fog: bool = False, **quadrature):
+                 fog: bool = False, ap: int = 0, ap_nodes: int = 5, **quadrature):
         from numpy.polynomial.legendre import leggauss
 
         self.config, self.coefficients, self.fog = config, list(coefficients), bool(fog)
+        #: Order of the AP polynomial (0: none): the first-layer filters of the modulus spectra in the observed frame
+        #: (``BiasedModulusSpectraRSD(stretches=...)``) and the second-layer projection (``rsd.APPolynomial`` of an
+        #: ``S21mAPProjection``), multiplied as polynomials; see ``__call__``.
+        self.ap, self.ap_nodes = int(ap), int(ap_nodes)
+        if self.ap and not self.fog:
+            raise ValueError("ap needs fog=True")
         #: Velocity damping of the modulus spectra in units of the linear sigma_v. The matter value (2) is too strong
         #: for halos: 1 brings the measured response and noise of the halo moduli into agreement (and removes the
         #: S21m amplitude systematic; scripts/feasibility/modulus_response_noise.py --sigma-v-factor).
@@ -389,12 +503,34 @@ class BiasedRSDS21mBasis:
         self.spectra = BiasedModulusSpectraRSD([(config.sigma(j), ell, m) for j, ell, m in self.fields], k, mu,
                                                **quadrature)
         self.projection = S21mProjection(config, self.coefficients, self.fields, k, mu, boxsize=boxsize, nmesh=nmesh)
+        if self.ap:
+            from .rsd import APNodes, APPolynomial
+            from .rsd_moduli import S21mAPProjection
+
+            self.ap_poly = APPolynomial(S21mAPProjection(config, self.coefficients, self.fields, k, mu, boxsize=boxsize,
+                                                         nmesh=nmesh), order=self.ap)
+            self.nodes = APNodes(self.ap, nodes=self.ap_nodes)
 
     def __call__(self, klin, pklin, f):
+        """(nentry, sum S21_SIZES [+ FoG orders]); with ``ap``, (nentry, nalpha * ncol), alpha-major: the AP polynomial
+        of the S21m terms, sum_alpha x^alpha T_alpha, where the lambda_2 columns still need the volume factor
+        1 / (q_par q_perp^2) of the second-layer sum (the norms do not; ``s21m_lambda_mask``). The lambda_2 terms are the
+        product of the polynomials of the second-layer projection (D_beta) and of the first-layer grids (G_alpha),
+        truncated at the order; the norms are the first-layer polynomial."""
         flat, norms = self.field_grids(klin, pklin, f)
         proj = self.projection
-        lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
-        return s21m_assemble(lam, norms[proj.field_index], self.fog)
+        if not self.ap:
+            lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
+            return s21m_assemble(lam, norms[proj.field_index], self.fog)
+        nodes, index = self.nodes, proj.field_index
+        projection = self.ap_poly.terms  # (nalpha, nentry, ngrid), without the volume factor
+        lam = np.zeros((len(nodes.powers), len(index), flat.shape[2]))
+        for i, (p1, r1) in enumerate(nodes.powers):
+            for j, (p2, r2) in enumerate(nodes.powers):
+                if p1 + p2 + r1 + r2 <= nodes.order:
+                    lam[nodes.powers.index((p1 + p2, r1 + r2))] += np.einsum("eg,ecg->ec", projection[i], flat[j][index])
+        return np.concatenate([s21m_assemble(lam[a], norms[a][index], self.fog) for a in range(len(nodes.powers))],
+                              axis=1)
 
     def field_grids(self, klin, pklin, f):
         """The unprojected S21m pieces: modulus-spectrum grids (nfield, ncol, nk * nmu) of every first-layer field
@@ -403,9 +539,23 @@ class BiasedRSDS21mBasis:
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp))  # noqa: E731
         sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+        if self.ap:  # the first-layer filters at q = 1 and the AP nodes, fitted as a polynomial in x = ln q
+            stretches = [np.ones(3)] + [np.exp([b, b, a]) for a, b in self.nodes.points]
+            grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog, stretches=stretches)
+            grids, norms = self.nodes.fit(grids[0], grids[1:]), self.nodes.fit(norms[0], norms[1:])
+            nalpha, nfield, nk, nmu, ncol = grids.shape
+            return np.moveaxis(grids, -1, 2).reshape(nalpha, nfield, ncol, nk * nmu), norms
         grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog)
         nfield, nk, nmu, ncol = grids.shape
         return np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu), norms
+
+
+def s21m_lambda_mask(fog: bool):
+    """Boolean mask of the lambda_2 columns (the second-layer sums, which carry the AP volume factor) in the S21m column
+    layout of ``s21m_assemble``; the others are the first-layer norms."""
+    nlam = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
+    nnorm = sum(S21_SIZES[6:]) + (2 * S21_SIZES[6] if fog else 0)
+    return s21m_assemble(np.ones((1, nlam)), np.zeros((1, nnorm)), fog)[0] > 0.5
 
 
 def s21m_assemble(lam, norms, fog: bool):
@@ -444,7 +594,7 @@ def split(values, sizes):
 
 
 
-def biased_scalings(ratio, cubic: bool = False, fog: bool = False):
+def biased_scalings(ratio, cubic: bool = False, fog: bool = False, ap_terms: int = 1):
     """Powers of A_s / A_s,fid of every biased basis output (grid rows, kappa / skewness / S21m columns), so that a
     Taylor emulator is nearly exact in logA. ``cubic``: the kappa columns include CUBIC_KAPPA_SIZES (P^3, like the
     tree trispectrum). ``fog``: with the counterterm orders of ``fog_sizes`` (the powers of the blocks they expand)."""
@@ -455,19 +605,54 @@ def biased_scalings(ratio, cubic: bool = False, fog: bool = False):
     clustering = [(3, KAPPA_SIZES[0])] + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else [])
     s21 = list(zip((3, 2, 1, 2, 1, 0, 1, 0), S21_SIZES))
     s21_fog = [s21[i] for i in FOG_S21_BLOCKS]
+    # with ``ap_terms`` AP-polynomial terms the columns repeat per term (alpha-major)
     return dict(grid=powers([(1, len(TREE)), (2, len(LOOP)), (1, 3)]),
-                kappa=powers(list(zip((3, 2, 1, 0), KAPPA_SIZES))
-                             + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else []) + (2 * clustering if fog else [])),
-                skewness=powers(list(zip((2, 1, 0), SKEW_SIZES)) + (2 * [(2, SKEW_SIZES[0])] if fog else [])),
-                s21m=powers(s21 + (2 * s21_fog if fog else [])))
+                kappa=powers(ap_terms * (list(zip((3, 2, 1, 0), KAPPA_SIZES))
+                                         + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else []) + (2 * clustering if fog else []))),
+                skewness=powers(ap_terms * (list(zip((2, 1, 0), SKEW_SIZES)) + (2 * [(2, SKEW_SIZES[0])] if fog else []))),
+                s21m=powers(ap_terms * (s21 + (2 * s21_fog if fog else []))))
+
+
+#: Number of terms of an AP polynomial of total degree 0, 1, 2, 3, 4 in (ln q_par, ln q_perp) (``rsd.APNodes``).
+AP_TERMS = (1, 3, 6, 10, 15)
+
+
+def basis_layout(kappa_columns: int):
+    """(cubic, fog, nalpha) of a biased basis from the number of its kappa columns: with the cubic-operator blocks, with
+    the Fingers-of-God orders, and the number of AP-polynomial terms (1 without AP)."""
+    bases = {(c, f): sum(KAPPA_SIZES) + (sum(CUBIC_KAPPA_SIZES) if c else 0) + (fog_sizes(c)["kappa"] if f else 0)
+             for c in (False, True) for f in (False, True)}
+    for nalpha in AP_TERMS:
+        for (cubic, fog), base in bases.items():
+            if base * nalpha == kappa_columns:
+                return cubic, fog, nalpha
+    raise ValueError(f"{kappa_columns} kappa columns match no biased-basis layout")
+
+
+def ap_powers(nalpha: int):
+    """The (p, r) powers of x = (ln q_par, ln q_perp) of an AP polynomial with ``nalpha`` terms (``rsd.APNodes``)."""
+    order = AP_TERMS.index(nalpha)
+    return [(a, b) for a in range(order + 1) for b in range(order + 1 - a)]
+
+
+def ap_evaluate(values, nalpha: int, qpar=1.0, qperp=1.0):
+    """sum_alpha x^alpha values_alpha of alpha-major AP-polynomial columns (last axis nalpha * n) -> (..., n). NumPy or JAX."""
+    import jax.numpy as jnp
+
+    if nalpha == 1:
+        return values
+    x, y = jnp.log(qpar), jnp.log(qperp)
+    weights = jnp.stack([x**p * y**r for p, r in ap_powers(nalpha)])
+    return jnp.tensordot(values.reshape(*values.shape[:-1], nalpha, -1), weights, axes=([-2], [0]))
 
 
 def is_fog(kappa=None, s21m=None) -> bool:
     """Whether basis outputs hold the Fingers-of-God counterterm orders (from their number of columns)."""
-    if s21m is not None and s21m.shape[-1] > 0:
-        return s21m.shape[-1] == sum(S21_SIZES) + fog_sizes()["s21m"]
-    n = kappa.shape[-1]
-    return n in (sum(KAPPA_SIZES) + fog_sizes()["kappa"], sum(KAPPA_SIZES) + sum(CUBIC_KAPPA_SIZES) + fog_sizes(True)["kappa"])
+    if kappa is not None:
+        return basis_layout(kappa.shape[-1])[1]
+    n = s21m.shape[-1]
+    base = sum(S21_SIZES) + fog_sizes()["s21m"]
+    return n % base == 0 and n // base in AP_TERMS
 
 
 def _collapse(values, base, blocks, c, order):

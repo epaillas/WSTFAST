@@ -207,3 +207,27 @@ def test_fog_counterterm_reproduces_damping():
         klin, pklin, f), rtol=1e-12)
     got = collapse_fog(s21m=fog, c_s21=c)[2]
     assert np.max(np.abs(got - damped)) < 1e-3 * np.max(np.abs(damped))
+
+
+def test_ap_polynomial_bases_reduce_at_q1():
+    """The AP-polynomial cumulants and S21m terms (rsd_bias, ap > 0): their alpha = 0 term is the basis without AP
+    (exact at q = 1), and they evaluate through ap_evaluate / s21m_lambda_mask."""
+    from wstfast.theory.rsd_bias import (AP_TERMS, BiasedRSDS1Basis, BiasedRSDS21mBasis, ap_evaluate, basis_layout,
+                                         s21m_lambda_mask)
+
+    klin, pklin = linear_power()
+    f = 0.76
+    s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=25.0) if c.kind == "S1" and c.ell in (1, 2)][:2]
+    kwargs = dict(npoints=2**10, lattice=False, cubic=True, fog=True)
+    k0, s0 = BiasedRSDS1Basis(SUPERSET, s1, **kwargs).cumulants(klin, pklin, f)
+    k3, s3 = BiasedRSDS1Basis(SUPERSET, s1, ap=3, **kwargs).cumulants(klin, pklin, f)
+    assert basis_layout(k3.shape[-1]) == (True, True, AP_TERMS[3])
+    np.testing.assert_allclose(ap_evaluate(k3, AP_TERMS[3]), k0, rtol=1e-12, atol=1e-300)
+    np.testing.assert_allclose(ap_evaluate(s3, AP_TERMS[3]), s0, rtol=1e-12, atol=1e-300)
+    s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
+           if c.kind == "S21"][:1]
+    quad = dict(nk=4, nmu=3, npts=12, nx=6, nphi=4)
+    t0 = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
+    t3 = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, ap=3, **quad)(klin, pklin, f)
+    assert t3.shape[-1] == AP_TERMS[3] * t0.shape[-1] and s21m_lambda_mask(True).size == t0.shape[-1]
+    np.testing.assert_allclose(ap_evaluate(t3, AP_TERMS[3]), t0, rtol=1e-4)  # the AP projection's grouping at q = 1

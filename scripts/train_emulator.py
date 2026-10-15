@@ -143,15 +143,23 @@ def train_rsd(args):
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
                     fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,
-                    s21_projected=not args.s21_unprojected)
+                    s21_projected=not args.s21_unprojected, ap_order=args.ap_order)
     basis = RSDBasis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
                      z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
-                     s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected)
+                     s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected,
+                     ap_order=args.ap_order)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    mpi = {}
+    if args.mpi:  # the training nodes split across the MPI ranks (e.g. srun -n 64 python scripts/train_emulator.py --mpi)
+        from mpi4py import MPI
+
+        mpi = dict(mpicomm=MPI.COMM_WORLD)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
-                   checkpoint=str(args.output.with_suffix(".checkpoint.npz")))
+                   checkpoint=str(args.output.with_suffix(".checkpoint.npz")), **mpi)
+    if mpi and mpi["mpicomm"].rank != 0:
+        return
     emulator.write(str(args.output))
     args.output.with_suffix(".json").write_text(json.dumps(settings, indent=2))
     print(f"wrote {args.output}")
@@ -241,6 +249,10 @@ def main():
                         help="rsd: periodic lattice of the mode sums (S21m terms; S1m and P(k) validation)")
     parser.add_argument("--s21-cellsize", type=float, default=0.0,
                         help="rsd: mass-assignment window of the first-layer legs of the modulus spectra [Mpc/h]")
+    parser.add_argument("--mpi", action="store_true", help="rsd: split the training nodes across the MPI ranks")
+    parser.add_argument("--ap-order", type=int, default=0,
+                        help="rsd, biased, --fog: emulate the observed-frame S1m cumulants and S21m terms as AP polynomials "
+                             "of this order in ln q (the first-layer filters in the observed frame; projected S21m only)")
     parser.add_argument("--s21-unprojected", action="store_true",
                         help="rsd, biased: emulate the S21m modulus-spectrum grids per first-layer field instead of the "
                              "projected lambda_2, so that the projection (and AP) is applied at assembly")

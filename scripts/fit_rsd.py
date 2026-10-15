@@ -228,7 +228,7 @@ def load_correction(args, config, coefficients, settings):
         stored = np.load(cache, allow_pickle=False)
         labels = list(stored["labels"])
         index = [labels.index(c.label) for c in coefficients]
-        return stored["kappa"][index], stored["skewness2"][index]
+        return _tile_ap(settings, stored["kappa"][index], stored["skewness2"][index])
     every = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"]) if c.kind == "S1"]
     fourier = Cosmology(engine="class", m_ncdm=0.0, **QUIJOTE_COSMOLOGY).get_fourier()
     klin = np.geomspace(1e-4, 10.0, 1024)
@@ -242,7 +242,15 @@ def load_correction(args, config, coefficients, settings):
     print(f"wrote {cache}")
     labels = [c.label for c in every]
     index = [labels.index(c.label) for c in coefficients]
-    return kappa[index], skewness2[index]
+    return _tile_ap(settings, kappa[index], skewness2[index])
+
+
+def _tile_ap(settings, kappa, skewness2):
+    """The control-variate correction (computed without AP) for every AP-polynomial term of an --ap-order emulator."""
+    from wstfast.theory.rsd_bias import AP_TERMS
+
+    n = AP_TERMS[settings.get("ap_order", 0)]
+    return np.tile(kappa, n), np.tile(skewness2, n)
 
 
 def connected_correction(args):
@@ -383,8 +391,9 @@ def build_problem(args, basis=None, settings=None):
         from wstfast.theory.rsd_moduli import s21m_entries
 
         unprojected = not settings.get("s21_projected", True)
-        if args.ap and not unprojected:
-            raise SystemExit("--ap for s21m needs an emulator with the unprojected S21m basis (--s21-unprojected)")
+        if args.ap and not unprojected and not settings.get("ap_order"):
+            raise SystemExit("--ap for s21m needs an emulator with the unprojected S21m basis (--s21-unprojected) "
+                             "or with AP-polynomial terms (--ap-order)")
         coefficients = [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
                                                        s21_min_ratio=args.s21_min_ratio,
                                                        s21_min_scale2=args.s21_min_scale2) if c.kind == "S21"]
@@ -412,6 +421,8 @@ def build_problem(args, basis=None, settings=None):
                            noise_calibration=(dict(np.load(args.s21_noise_calibration))
                                               if args.s21_noise_calibration is not None else None),
                            cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog)
+        if settings.get("ap_order") and args.ap:  # AP-polynomial terms of the basis, at the trial AP ratios
+            s21m_kwargs.update(ap=ap, first_ap=APPolynomial(s1m_ap_projection(config, first_layer, grid)))
         if unprojected and settings.get("prepared") is not None:  # emulator contracted at load (contract_s21m)
             s21m_kwargs.update(entry_index=None, noise_correction=None, ap=ap, s21_projection=settings["prepared"])
         elif unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap

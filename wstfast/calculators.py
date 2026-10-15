@@ -250,14 +250,14 @@ class RSDBasis(Calculator):
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                  s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
                  cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0,
-                 s21_projected: bool = True):
+                 s21_projected: bool = True, ap_order: int = 0):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
-                      s21_cellsize: float = 0.0, s21_projected: bool = True):
+                      s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -282,6 +282,16 @@ class RSDBasis(Calculator):
         cubic = dict(cubic=True) if self.cubic_biases else {}
         if self.fog:
             cubic["fog"] = True
+        #: Order of the AP polynomial of the observed-frame cumulants and S21m terms (0: none; ``rsd_bias``): the outputs
+        #: then hold, per AP term, the column layout without AP (alpha-major), evaluated at the trial (q_par, q_perp) by
+        #: S1mTheory / S21mTheory (``rsd_bias.ap_evaluate``), like the AP polynomials of the projections.
+        self.ap_order = int(ap_order)
+        if self.ap_order:
+            if not (biased and self.fog):
+                raise ValueError("ap_order needs tracer='biased' and fog=True")
+            if not s21_projected:
+                raise ValueError("ap_order needs the projected S21m basis")
+            cubic["ap"] = self.ap_order
         self.cumulant_model = ((BiasedRSDS1Basis if biased else RSDS1Basis)(config, self.coefficients, damping=damping,
                                                                              npoints=npoints, lattice=False, **cubic)
                                if self.coefficients else None)
@@ -290,6 +300,8 @@ class RSDBasis(Calculator):
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
         if self.fog:
             s21_kwargs["fog"] = True
+        if self.ap_order:
+            s21_kwargs["ap"] = self.ap_order
         # The lattice of the S21m mode sums (the periodic reference of the measurement) and the mass-assignment window
         # of the first-layer legs of the modulus spectra (0: none, as for the box fits).
         s21_kwargs.update(boxsize=float(s21_lattice[0]), nmesh=int(s21_lattice[1]), cellsize=float(s21_cellsize))
@@ -317,7 +329,9 @@ class RSDBasis(Calculator):
         if self.tracer == "biased":
             from .theory.rsd_bias import biased_scalings
 
-            scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog)
+            from .theory.rsd_bias import AP_TERMS
+
+            scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
             self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
             if self.cumulant_model is not None:
                 kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
@@ -436,13 +450,24 @@ def contract_s21m(emulator, coefficients, basis_coefficients, projection) -> Con
 def biased_rows(basis):
     """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude (with the
     Fingers-of-God counterterm orders of a ``fog`` basis; see ``rsd_bias.collapse_fog``)."""
-    from .theory.rsd_bias import CUBIC_KAPPA_SIZES, KAPPA_SIZES, biased_scalings, fog_sizes, is_fog
+    from .theory.rsd_bias import basis_layout, biased_scalings
 
-    fog = is_fog(basis.kappa, basis.s21m_terms)
-    cubic = basis.kappa.shape[-1] >= sum(KAPPA_SIZES) + sum(CUBIC_KAPPA_SIZES) + (fog_sizes(True)["kappa"] if fog else 0)
-    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog)
+    cubic, fog, nalpha = basis_layout(basis.kappa.shape[-1])
+    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog, ap_terms=nalpha)
     return (basis.grid_terms * scale["grid"][:, None, None], basis.kappa * scale["kappa"],
             basis.skewness2 * scale["skewness"], basis.s21m_terms * scale["s21m"])
+
+
+def ap_cumulants(basis, kappa, skewness, ap, ap_params):
+    """Cumulants of a basis with AP-polynomial terms (RSDBasis(ap_order)) at the AP ratios of the trial cosmology
+    (q = 1 without ``ap``); unchanged for a basis without them."""
+    from .theory.rsd_bias import ap_evaluate, basis_layout
+
+    nalpha = basis_layout(basis.kappa.shape[-1])[2]
+    if nalpha == 1:
+        return kappa, skewness
+    qpar, qperp = ap.ratios(ap_params) if ap is not None else (1.0, 1.0)
+    return ap_evaluate(kappa, nalpha, qpar, qperp), ap_evaluate(skewness, nalpha, qpar, qperp)
 
 
 class BiasParameters:
@@ -746,6 +771,7 @@ class S1mTheory(Calculator):
             rows, kappa, skewness, _ = biased_rows(self.basis)
             beta = bias_beta(self.bias_params)
             kappa, skewness = kappa[self.cumulant_index] * self.kappa_ratio, skewness[self.cumulant_index] * self.skewness_ratio
+            kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
             if _fog_check(self.basis, self.fog_params):
                 from .theory.rsd_bias import collapse_fog
 
@@ -765,7 +791,7 @@ class S1mTheory(Calculator):
         if self.ap is None:
             variances = self.matrix @ grid.ravel() + noise * self.noise
             linear = self.matrix @ linear_grid.ravel() + linear_noise * self.noise
-        else:  # the cumulants (Edgeworth numerators) are left without AP: ~1e-4 of S1m
+        else:  # the cumulants carry AP only with a basis of AP-polynomial terms (RSDBasis(ap_order))
             qpar, qperp = self.ap.ratios(self.ap_params)  # one interpolation for both grids
             variances, linear = self.projection(jnp.stack([grid, linear_grid]), qpar, qperp,
                                                 jnp.stack([noise, linear_noise]) * self.shotnoise)
@@ -809,7 +835,8 @@ class S21mTheory(Calculator):
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                  cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
-                 fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None):
+                 fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
+                 first_ap=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
@@ -884,13 +911,17 @@ class S21mTheory(Calculator):
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                       cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
-                      fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None):
+                      fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
+                 first_ap=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
 
         # Unprojected basis (RSDBasis(s21_projected=False)): lambda_2 is projected here from the field grids, with
         # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
         # of each of its fields is ``s21_field_rows`` (default: the same fields, in the same order).
         self.s21_projection = s21_projection
+        #: AP projection of the first-layer blocks (``rsd.APPolynomial`` of ``s1m_ap_projection`` over ``first_layer``):
+        #: with ``ap``, the linear first-layer variances of the one-point factor are those of the observed frame.
+        self.first_ap = first_ap
         self.s21_contracted = False
         if s21_projection is not None:
             if tracer != "biased":
@@ -981,6 +1012,8 @@ class S21mTheory(Calculator):
             rows, kappa, skewness, s21 = biased_rows(self.basis)
             if self.s21_projection is not None:
                 s21 = self._project_s21()
+            kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
+            s21 = self._ap_s21(s21)
             if _fog_check(self.basis, self.fog_params):
                 from .theory.rsd_bias import collapse_fog
 
@@ -990,7 +1023,10 @@ class S21mTheory(Calculator):
             noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
             m2, m4 = monomials(beta, 2), monomials(beta, 4)
             tree = jnp.tensordot(m2[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
-            linear = self.matrix @ tree.ravel() + noise * self.shot
+            if self.first_ap is not None and self.ap is not None:  # observed-frame first-layer blocks
+                linear = self.first_ap(tree[None], *self.ap.ratios(self.ap_params), noise)[0]
+            else:
+                linear = self.matrix @ tree.ravel() + noise * self.shot
             kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
                                                 self.shotnoise, cubic_values(self.bias_params),
                                                 kappa_shot_values(self.bias_params))
@@ -1053,6 +1089,18 @@ class S21mTheory(Calculator):
             renorm = 1.0 / (1.0 + c * self.ng2_var * scale)
             self.flattheory = self.flattheory * (1 + self.ng2_d0 + renorm * self.ng2_d2 * scale)
         return self.flattheory
+
+    def _ap_s21(self, s21):
+        """S21m terms of a basis with AP-polynomial terms (RSDBasis(ap_order)) at the AP ratios of the trial cosmology
+        (q = 1 without ``ap``), the lambda_2 columns times the volume factor of the second-layer sum."""
+        from .theory.rsd_bias import ap_evaluate, basis_layout, s21m_lambda_mask
+
+        _, fog, nalpha = basis_layout(self.basis.kappa.shape[-1])
+        if nalpha == 1:
+            return s21
+        qpar, qperp = self.ap.ratios(self.ap_params) if self.ap is not None else (1.0, 1.0)
+        mask = jnp.asarray(s21m_lambda_mask(fog))
+        return ap_evaluate(s21, nalpha, qpar, qperp) * jnp.where(mask, 1.0 / (qpar * qperp**2), 1.0)
 
     def _project_s21(self):
         """S21m terms (nentry, ncol) of the coefficients from the unprojected basis: lambda_2 = matrix @ field grid, with

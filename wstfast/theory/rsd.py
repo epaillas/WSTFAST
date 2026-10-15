@@ -631,6 +631,49 @@ def ap_matrix(weights, kmodes, mumodes, logk, nodes2, denominators, qpar, qperp)
     return volume * jnp.transpose(out, (1, 0, 2)).reshape(weights.shape[0], nk * nmu)
 
 
+class APNodes:
+    """Chebyshev nodes in x = (ln q_par, ln q_perp) and the least-squares fit of a quantity known at them as
+    sum_alpha x^alpha D_alpha (total degree <= ``order``), with D_0 the exact value at q = 1: the AP polynomial shared by
+    every AP-dependent piece of the model (``APPolynomial``, and the observed-frame cumulants and first-layer modulus
+    spectra of ``rsd_bias``). ``nodes`` x ``nodes`` points of |x| <= ``xmax`` (by default the emulator boxes:
+    |ln q_par| <= 0.085, |ln q_perp| <= 0.045 around the fiducial)."""
+
+    def __init__(self, order: int = 3, xmax=(0.085, 0.045), nodes: int = 9):
+        self.order = int(order)
+        self.powers = [(a, b) for a in range(order + 1) for b in range(order + 1 - a)]
+        cheb = np.cos(np.pi * (np.arange(nodes) + 0.5) / nodes)
+        #: (ln q_par, ln q_perp) of the nodes
+        self.points = [(a * xmax[0], b * xmax[1]) for a in cheb for b in cheb]
+        design = np.array([[a**p * b**r for p, r in self.powers[1:]] for a, b in self.points])
+        self._solve = np.linalg.pinv(design)  # (nalpha - 1, npoint): least squares of the remainder
+
+    def fit(self, center, values):
+        """D_alpha (nalpha, ...) from the value at q = 1 (``center``, (...)) and at the nodes (``values``, (npoint, ...))."""
+        center = np.asarray(center)
+        rest = np.tensordot(self._solve, np.asarray(values) - center[None], axes=1)
+        return np.concatenate([center[None], rest])
+
+    def monomials(self, qpar, qperp):
+        """(nalpha,) x^alpha at the AP ratios."""
+        x, y = jnp.log(qpar), jnp.log(qperp)
+        return jnp.stack([x**p * y**r for p, r in self.powers])
+
+    def product(self, a, b):
+        """Coefficients of the product of two AP polynomials of the same ``powers`` (leading axes), truncated at
+        ``order``: c_gamma = sum_{alpha + beta = gamma} a_alpha b_beta. ``a`` (nalpha, ...), ``b`` (nalpha, ...)
+        broadcast after the first axis."""
+        out = None
+        for i, (p1, r1) in enumerate(self.powers):
+            for j, (p2, r2) in enumerate(self.powers):
+                if p1 + p2 + r1 + r2 > self.order:
+                    continue
+                term = a[i] * b[j]
+                if out is None:
+                    out = np.zeros((len(self.powers),) + np.shape(term))
+                out[self.powers.index((p1 + p2, r1 + r2))] += term
+        return out
+
+
 class APPolynomial:
     """An AP projection as a polynomial in x = (ln q_par, ln q_perp) with the volume factor exact:
     matrix(q) = (q_par q_perp^2)^-1 sum_alpha x^alpha D_alpha, total degree <= ``order``.
@@ -647,16 +690,12 @@ class APPolynomial:
     """
 
     def __init__(self, projection, order: int = 3, xmax=(0.085, 0.045), nodes: int = 9):
-        self.powers = [(a, b) for a in range(order + 1) for b in range(order + 1 - a)]
-        cheb = np.cos(np.pi * (np.arange(nodes) + 0.5) / nodes)
-        points = [(a * xmax[0], b * xmax[1]) for a in cheb for b in cheb]
+        self.nodes = APNodes(order, xmax, nodes)
+        self.powers = self.nodes.powers
         # D_0 is the exact projection at q = 1 (no AP: no error); the other D_alpha fit the AP-dependent remainder
         center = np.asarray(projection.at(1.0, 1.0))
-        mats = np.array([np.asarray(projection.at(np.exp(a), np.exp(b))) * np.exp(a + 2 * b) - center
-                         for a, b in points])
-        design = np.array([[a**p * b**r for p, r in self.powers[1:]] for a, b in points])
-        coef, *_ = np.linalg.lstsq(design, mats.reshape(len(points), -1), rcond=None)
-        self.terms = np.concatenate([center[None], coef.reshape(len(self.powers) - 1, *center.shape)])
+        mats = np.array([np.asarray(projection.at(np.exp(a), np.exp(b))) * np.exp(a + 2 * b) for a, b in self.nodes.points])
+        self.terms = self.nodes.fit(center, mats)
         self._terms = jnp.asarray(self.terms)
         for name in ("noise", "field_index", "k2mu2", "k2", "entries"):  # passed through for the theories
             setattr(self, name, getattr(projection, name, None))
