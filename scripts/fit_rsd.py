@@ -340,8 +340,9 @@ def build_problem(args, basis=None, settings=None):
     if "s21m" in args.stats:
         from wstfast.theory.rsd_moduli import s21m_entries
 
-        if args.ap:
-            raise SystemExit("--ap is not implemented for s21m")
+        unprojected = not settings.get("s21_projected", True)
+        if args.ap and not unprojected:
+            raise SystemExit("--ap for s21m needs an emulator with the unprojected S21m basis (--s21-unprojected)")
         coefficients = [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
                                                        s21_min_ratio=args.s21_min_ratio,
                                                        s21_min_scale2=args.s21_min_scale2) if c.kind == "S21"]
@@ -369,6 +370,21 @@ def build_problem(args, basis=None, settings=None):
                            noise_calibration=(dict(np.load(args.s21_noise_calibration))
                                               if args.s21_noise_calibration is not None else None),
                            cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog)
+        if unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap
+            from numpy.polynomial.legendre import leggauss
+
+            from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+
+            if s21m_kwargs["noise_correction"] is not None:
+                raise SystemExit("--s21-connected is not implemented for the unprojected S21m basis")
+            fields, basis_fields = first_layer_fields(coefficients), first_layer_fields(emulated21)
+            x, _ = leggauss(12)  # the (K, mu_K) grid of BiasedRSDS21mBasis
+            boxsize, nmesh = settings.get("lattice", [1000.0, 256])
+            s21m_kwargs.update(entry_index=None, noise_correction=None, ap=ap,
+                               s21_projection=(S21mAPProjection if args.ap else S21mProjection)(
+                                   config, coefficients, fields, np.geomspace(4e-3, 0.12, 24), x[6:],
+                                   boxsize=float(boxsize), nmesh=int(nmesh)),
+                               s21_field_rows=[basis_fields.index(field) for field in fields])
         layer2 = (load_layer2(args, S1mProjection(config, first_layer, grid), coefficients, first_layer, q0, s21m_kwargs)
                   if getattr(args, "s21_layer2", None) is not None else None)
         theories.append(S21mTheory(S1mProjection(config, first_layer, grid), coefficients, first_layer, q=q0,

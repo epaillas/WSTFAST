@@ -15,7 +15,8 @@ smaller kmax can use it). Examples:
     # survey (DESI DR1 LRG 0.4 < z < 0.6): settings from the options, AbacusSummit c000 fiducial, survey lattice
     python scripts/train_emulator.py --stat rsd --tracer biased --cubic-biases --fog --ir --fiducial abacus \\
         --config '{"J": 3, "L": 4, "L2": 4, "sigma0": 2.5, "step": 1.4142135623730951, "cellsize": 10.0, "min_dj": 3}' \\
-        --redshift 0.509 --shotnoise 1841 --lattice 3440 344 --s21-cellsize 10 --s1-min-scale 25 --s21-min-scale 25 \\
+        --redshift 0.509 --shotnoise 1841 --lattice 3440 344 --s21-cellsize 10 --s21-unprojected \\
+        --s1-min-scale 25 --s21-min-scale 25 \\
         --vary omega_cdm logA n_s h --output outputs/emulators/survey_lrg_z0.51.h5
 
     # one-loop P(k) with dsc-model's regulator (Lambda = 0.5 h/Mpc); --cutoff none for unregulated SPT
@@ -141,11 +142,12 @@ def train_rsd(args):
     settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
-                    fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize)
+                    fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,
+                    s21_projected=not args.s21_unprojected)
     basis = RSDBasis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
                      z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
-                     s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize)
+                     s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected)
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     emulator.train(engine="taylor", order=args.order, accuracy=args.accuracy, budget=args.budget,
@@ -174,9 +176,18 @@ def train_rsd(args):
                          tracer=args.tracer, **fog),
                RSDPowerTheory(projections["pk"], basis=b, shotnoise=shotnoise, tracer=args.tracer)]
         if s21:
+            unprojected = {}
+            if args.s21_unprojected:
+                from numpy.polynomial.legendre import leggauss
+
+                from wstfast.theory.rsd_moduli import S21mProjection, first_layer_fields
+
+                x, _ = leggauss(12)
+                unprojected = dict(s21_projection=S21mProjection(config, s21, first_layer_fields(s21),
+                                                                 np.geomspace(4e-3, 0.12, 24), x[6:], **lattice))
             out.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), s21, first_layer, q=config.q,
                                   basis=b, cumulant_index=[coefficients.index(c) for c in first_layer],
-                                  shotnoise=shotnoise, tracer=args.tracer, **fog))
+                                  shotnoise=shotnoise, tracer=args.tracer, **fog, **unprojected))
         return out
 
     graphs = {name: build(JointTheory(theories(b))) for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
@@ -230,6 +241,9 @@ def main():
                         help="rsd: periodic lattice of the mode sums (S21m terms; S1m and P(k) validation)")
     parser.add_argument("--s21-cellsize", type=float, default=0.0,
                         help="rsd: mass-assignment window of the first-layer legs of the modulus spectra [Mpc/h]")
+    parser.add_argument("--s21-unprojected", action="store_true",
+                        help="rsd, biased: emulate the S21m modulus-spectrum grids per first-layer field instead of the "
+                             "projected lambda_2, so that the projection (and AP) is applied at assembly")
     parser.add_argument("--fiducial", choices=("quijote", "abacus"), default="quijote",
                         help="fiducial (expansion point and fixed parameters); abacus = AbacusSummit c000")
     parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")

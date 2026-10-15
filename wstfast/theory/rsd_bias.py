@@ -391,23 +391,50 @@ class BiasedRSDS21mBasis:
         self.projection = S21mProjection(config, self.coefficients, self.fields, k, mu, boxsize=boxsize, nmesh=nmesh)
 
     def __call__(self, klin, pklin, f):
+        flat, norms = self.field_grids(klin, pklin, f)
+        proj = self.projection
+        lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
+        return s21m_assemble(lam, norms[proj.field_index], self.fog)
+
+    def field_grids(self, klin, pklin, f):
+        """The unprojected S21m pieces: modulus-spectrum grids (nfield, ncol, nk * nmu) of every first-layer field
+        (``self.fields``) on the (K, mu_K) grid of ``self.spectra``, and their first-layer norms (nfield, nnorm). The
+        projection to lambda_2 (fixed, or with AP) and ``s21m_assemble`` then give the S21m terms."""
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp))  # noqa: E731
         sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
         grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog)
         nfield, nk, nmu, ncol = grids.shape
-        flat = np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu)
-        proj = self.projection
-        lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
-        norms = norms[proj.field_index]
-        if not self.fog:
-            return np.concatenate([lam, norms], axis=1)
-        nbase, norder = sum(S21_SIZES[:6]), sum(S21_SIZES[i] for i in (0, 1, 3, 4))
-        n0 = S21_SIZES[6]
-        base = [lam[:, :nbase], norms[:, :n0 + 1]]
-        orders = [[lam[:, nbase + o * norder:nbase + (o + 1) * norder], norms[:, n0 + 1 + o * n0:n0 + 1 + (o + 1) * n0]]
-                  for o in range(2)]
-        return np.concatenate(base + orders[0] + orders[1], axis=1)
+        return np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu), norms
+
+
+def s21m_assemble(lam, norms, fog: bool):
+    """S21m terms in the column layout of ``BiasedRSDS21mBasis`` from the projected grid columns ``lam`` (..., ncol) and
+    the first-layer norms of each entry (..., nnorm): [lam | norms], or with ``fog`` the base blocks followed by the
+    orders 1 and 2 of both. NumPy or JAX."""
+    import jax.numpy as jnp
+
+    xp = np if isinstance(lam, np.ndarray) and isinstance(norms, np.ndarray) else jnp
+    if not fog:
+        return xp.concatenate([lam, norms], axis=-1)
+    nbase, norder = sum(S21_SIZES[:6]), sum(S21_SIZES[i] for i in (0, 1, 3, 4))
+    n0 = S21_SIZES[6]
+    base = [lam[..., :nbase], norms[..., :n0 + 1]]
+    orders = [[lam[..., nbase + o * norder:nbase + (o + 1) * norder],
+               norms[..., n0 + 1 + o * n0:n0 + 1 + (o + 1) * n0]] for o in range(2)]
+    return xp.concatenate(base + orders[0] + orders[1], axis=-1)
+
+
+def s21m_field_powers(fog: bool):
+    """Powers of A_s / A_s,fid of the grid columns and of the norm columns of ``BiasedRSDS21mBasis.field_grids`` (those of
+    ``biased_scalings``'s s21m columns, mapped back through ``s21m_assemble``)."""
+    final = np.log(np.asarray(biased_scalings(np.e, fog=fog)["s21m"]))
+    nlam, nnorm = (sum(S21_SIZES[:6]), sum(S21_SIZES[6:])) if not fog else (
+        sum(S21_SIZES[:6]) + 2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)), S21_SIZES[6] + S21_SIZES[7] + 2 * S21_SIZES[6])
+    source = s21m_assemble(np.arange(nlam, dtype=float), nlam + np.arange(nnorm, dtype=float), fog).astype(int)
+    powers = np.empty(nlam + nnorm)
+    powers[source] = final
+    return powers[:nlam], powers[nlam:]
 
 
 def split(values, sizes):

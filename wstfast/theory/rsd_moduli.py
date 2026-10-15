@@ -176,6 +176,78 @@ class S21mProjection:
         return np.sum(self.matrix * flat[self.field_index], axis=1)
 
 
+class S21mAPProjection:
+    """``S21mProjection`` with Alcock-Paczynski distortions, for the unprojected S21m basis (field grids on (K, mu_K)).
+
+    The second-layer wavelets act on observed-frame modes; ``at(qpar, qperp)`` (nentry, nk * nmu) interpolates the
+    field grids at the true-frame (K', mu') of every observed mode (linear in ln K, Lagrange in mu^2, as
+    ``rsd.APProjection``) and divides by q_par q_perp^2, so that lambda_2 = sum_g matrix[e, g] grid[field(e), g]. At
+    q = 1 it equals ``S21mProjection.matrix`` up to the grouping of the modes. The first-layer filters inside the
+    modulus spectra stay in the true frame (AP enters the S21m ratio through the second layer only; the first-layer
+    AP mostly cancels in P_UU / <U>^2). Modes are grouped in ``nbins_k`` log-K x ``nbins_mu`` mu^2 bins (summed weights,
+    mean coordinates), far finer than the modulus grid. Jitted.
+    """
+
+    def __init__(self, config: WSTConfig, coefficients, fields, k, mu, boxsize: float = 1000.0, nmesh: int = 256,
+                 nbins_k: int = 512, nbins_mu: int = 64):
+        import jax
+        import jax.numpy as jnp
+
+        from .rsd import angular_weights, lattice_modes
+
+        modes = lattice_modes(boxsize, nmesh, float(k[-1]), window=None)
+        logk = np.log(modes["k"])
+        kbin = np.clip(((logk - logk.min()) / (np.ptp(logk) + 1e-12) * nbins_k).astype(int), 0, nbins_k - 1)
+        mbin = np.clip((modes["mu"] ** 2 * nbins_mu).astype(int), 0, nbins_mu - 1)
+        groups, inverse = np.unique(kbin * nbins_mu + mbin, return_inverse=True)
+        count = np.bincount(inverse, minlength=len(groups))
+        self.kmodes = jnp.asarray(np.bincount(inverse, weights=modes["k"]) / count)
+        self.mumodes = jnp.asarray(np.sqrt(np.bincount(inverse, weights=modes["mu"] ** 2) / count))
+        self.entries = s21m_entries(coefficients)
+        self.field_index = np.array([fields.index((coefficients[i].j, coefficients[i].ell, m1))
+                                     for i, m1, _ in self.entries], dtype=int)
+        weights = []
+        for index, _, m2 in self.entries:
+            c = coefficients[index]
+            sigma2 = config.sigma(c.j2)
+            radial = (sigma2 * modes["k"]) ** (2 * c.ell) * np.exp(-((sigma2 * modes["k"]) ** 2))
+            weights.append(np.bincount(inverse, weights=modes["weight"] * radial * angular_weights(c.ell, modes["mu"])[m2],
+                                       minlength=len(groups)))
+        self.weights = jnp.asarray(np.array(weights))  # (nentry, ngroup)
+        self.nk, self.nmu = len(k), len(mu)
+        self.logk = jnp.asarray(np.log(np.asarray(k, "f8")))
+        nodes = np.asarray(mu, "f8") ** 2
+        self.nodes2 = jnp.asarray(nodes)
+        self.denominators = jnp.asarray([np.prod([nodes[j] - nodes[m] for m in range(nodes.size) if m != j])
+                                         for j in range(nodes.size)])
+        self._matrix = jax.jit(self._build)
+
+    def _build(self, qpar, qperp):
+        import jax
+        import jax.numpy as jnp
+
+        from .ap import observed_to_true
+
+        k, mu, volume = observed_to_true(self.kmodes, self.mumodes, qpar, qperp)
+        logk = jnp.clip(jnp.log(k), self.logk[0], self.logk[-1])
+        i = jnp.clip(jnp.searchsorted(self.logk, logk) - 1, 0, self.nk - 2)
+        t = (logk - self.logk[i]) / (self.logk[i + 1] - self.logk[i])
+        diff = mu[:, None] ** 2 - self.nodes2[None, :]
+        ones = jnp.ones_like(diff[:, :1])
+        left = jnp.cumprod(jnp.concatenate([ones, diff[:, :-1]], axis=1), axis=1)
+        right = jnp.cumprod(jnp.concatenate([ones, diff[:, :0:-1]], axis=1), axis=1)[:, ::-1]
+        lagrange = left * right / self.denominators  # (ngroup, nmu)
+        out = jnp.zeros((self.nk, self.weights.shape[0], self.nmu))
+        for index, factor in ((i, 1 - t), (i + 1, t)):
+            contribution = self.weights.T[:, :, None] * (factor[:, None] * lagrange)[:, None, :]  # (ngroup, nentry, nmu)
+            out = out + jax.ops.segment_sum(contribution, index, num_segments=self.nk)
+        return volume * jnp.transpose(out, (1, 0, 2)).reshape(self.weights.shape[0], self.nk * self.nmu)
+
+    def at(self, qpar=1.0, qperp=1.0):
+        """(nentry, nk * nmu) at the AP ratios."""
+        return self._matrix(qpar, qperp)
+
+
 class RSDS21mBasis:
     """Cosmology-dependent S21m terms (``S21M_TERMS``) of the S21 ``coefficients``: (nentry, 2)."""
 

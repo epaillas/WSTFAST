@@ -249,14 +249,15 @@ class RSDBasis(Calculator):
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                  s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
-                 cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0):
+                 cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0,
+                 s21_projected: bool = True):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
-                      s21_cellsize: float = 0.0):
+                      s21_cellsize: float = 0.0, s21_projected: bool = True):
         from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
         from .theory.rsd_moduli import RSDS21mBasis
@@ -294,6 +295,13 @@ class RSDBasis(Calculator):
         s21_kwargs.update(boxsize=float(s21_lattice[0]), nmesh=int(s21_lattice[1]), cellsize=float(s21_cellsize))
         self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients), **s21_kwargs)
                           if len(s21_coefficients) else None)
+        #: With ``s21_projected=False`` the S21m output is unprojected: the modulus-spectrum grids of every first-layer
+        #: field and their norms (``s21m_grids``, ``s21m_norms``; ``BiasedRSDS21mBasis.field_grids``), projected to lambda_2 at
+        #: assembly by S21mTheory (``s21_projection``, with AP or not); ``s21m_terms`` is then empty, with the column
+        #: layout of the projected terms.
+        self.s21_projected = bool(s21_projected)
+        if not self.s21_projected and not biased:
+            raise ValueError("the unprojected S21m basis is implemented for tracer='biased'")
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         # cb (cold dark matter + baryons) power: the tracers follow it; equal to delta_m without massive neutrinos.
         self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_cb", "z": self.z, "k": self.klin}],
@@ -316,8 +324,17 @@ class RSDBasis(Calculator):
                 self.kappa, self.skewness2 = kappa / scale["kappa"], skewness / scale["skewness"]
             else:
                 self.kappa, self.skewness2 = np.zeros((0, 1, scale["kappa"].size)), np.zeros((0, scale["skewness"].size))
-            self.s21m_terms = (self.s21_model(self.klin, pk, f) / scale["s21m"] if self.s21_model is not None
-                               else np.zeros((0, scale["s21m"].size)))
+            if self.s21_projected:
+                self.s21m_terms = (self.s21_model(self.klin, pk, f) / scale["s21m"] if self.s21_model is not None
+                                   else np.zeros((0, scale["s21m"].size)))
+            else:
+                from .theory.rsd_bias import s21m_field_powers
+
+                grids, norms = self.s21_model.field_grids(self.klin, pk, f)
+                plam, pnorm = s21m_field_powers(self.fog)
+                self.s21m_grids = grids / (ratio**plam)[None, :, None]
+                self.s21m_norms = norms / ratio**pnorm
+                self.s21m_terms = np.zeros((0, scale["s21m"].size))
             self.dlogA = np.log(ratio)
             return self
         self.grid_terms = (self.grid(self.klin, pk, f, h=h, r_bao=r_bao)
@@ -333,14 +350,19 @@ class RSDBasis(Calculator):
         return self
 
     def tree_flatten(self):
-        return [self.grid_terms, self.kappa, self.skewness2, self.s21m_terms, self.dlogA], None
+        children = [self.grid_terms, self.kappa, self.skewness2, self.s21m_terms, self.dlogA]
+        if not getattr(self, "s21_projected", True):
+            children += [self.s21m_grids, self.s21m_norms]
+        return children, None
 
     @classmethod
     def tree_unflatten(cls, aux, children):
         obj = object.__new__(cls)
         if len(children) == 4:  # emulators trained before the S21m terms existed
             children = [*children[:3], jnp.zeros((0, 2)), children[3]]
-        obj.grid_terms, obj.kappa, obj.skewness2, obj.s21m_terms, obj.dlogA = children
+        obj.grid_terms, obj.kappa, obj.skewness2, obj.s21m_terms, obj.dlogA = children[:5]
+        if len(children) == 7:  # unprojected S21m (field grids and norms)
+            obj.s21m_grids, obj.s21m_norms = children[5:]
         return obj
 
 
@@ -354,6 +376,16 @@ def rsd_rows(basis):
 def s21m_rows(basis):
     """S21m terms (nentry, 2) at the basis's amplitude, from a (possibly emulated) RSDBasis output."""
     return basis.s21m_terms * jnp.stack([jnp.exp(basis.dlogA), 1.0])
+
+
+def biased_s21m_fields(basis):
+    """Field grids (nfield, ncol, ngrid) and norms (nfield, nnorm) of an unprojected biased RSDBasis output, at the
+    basis's amplitude (``rsd_bias.s21m_field_powers``)."""
+    from .theory.rsd_bias import is_fog, s21m_field_powers
+
+    plam, pnorm = s21m_field_powers(is_fog(s21m=basis.s21m_terms))
+    a = jnp.exp(basis.dlogA)
+    return basis.s21m_grids * (a ** jnp.asarray(plam))[None, :, None], basis.s21m_norms * a ** jnp.asarray(pnorm)
 
 
 def biased_rows(basis):
@@ -732,10 +764,12 @@ class S21mTheory(Calculator):
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                  cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
-                 fog: str | None = None):
+                 fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None):
         from .theory.rsd_moduli import first_layer_fields
 
         self.basis = basis
+        self.ap = ap
+        self.ap_params = ap.params if ap is not None else {}
         # Fingers-of-God counterterm of a fog basis: c_s1 on the first-layer cumulants, c_s21 on the modulus spectra.
         self.fog_params = _fog_counterterms(fog)
         # Non-Gaussian second layer (``layer2``, see __call__): constants c_l of the beyond-tree suppression, fixed or
@@ -805,8 +839,23 @@ class S21mTheory(Calculator):
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
                       cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
-                      fog: str | None = None):
+                      fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None):
         from .theory.rsd_moduli import first_layer_fields, s21m_entries
+
+        # Unprojected basis (RSDBasis(s21_projected=False)): lambda_2 is projected here from the field grids, with
+        # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
+        # of each of its fields is ``s21_field_rows`` (default: the same fields, in the same order).
+        self.s21_projection = s21_projection
+        if s21_projection is not None:
+            if tracer != "biased":
+                raise ValueError("s21_projection needs tracer='biased'")
+            if noise_correction is not None or entry_index is not None:
+                raise ValueError("s21_projection selects its own entries: no entry_index / noise_correction")
+            if ap is not None and not hasattr(s21_projection, "at"):
+                raise ValueError("ap needs an S21mAPProjection")
+            nfield = len(first_layer_fields(coefficients))
+            self.s21_field_rows = np.arange(nfield) if s21_field_rows is None else np.asarray(s21_field_rows)
+            self.s21_matrix = None if hasattr(s21_projection, "at") else jnp.asarray(s21_projection.matrix)
 
         self.layer2 = layer2 is not None
         if layer2 is not None:
@@ -840,10 +889,14 @@ class S21mTheory(Calculator):
                 raise ValueError("white_noise / k2_noise need the WST config")
             x, _ = np.polynomial.legendre.leggauss(12)
             kgrid = np.geomspace(4e-3, 0.12, 24)
-            proj = S21mProjection(config, list(coefficients), first_layer_fields(coefficients),
-                                  kgrid, x[6:])
-            self.white_column = jnp.asarray(proj.matrix.sum(axis=1))
-            self.k2_column = jnp.asarray(proj.matrix @ np.repeat(kgrid**2, 6))
+            if s21_projection is not None:  # the lattice of the given projection (at q = 1)
+                matrix = np.asarray(s21_projection.at(1.0, 1.0) if hasattr(s21_projection, "at")
+                                    else s21_projection.matrix)
+            else:
+                matrix = S21mProjection(config, list(coefficients), first_layer_fields(coefficients),
+                                        kgrid, x[6:]).matrix
+            self.white_column = jnp.asarray(matrix.sum(axis=1))
+            self.k2_column = jnp.asarray(matrix @ np.repeat(kgrid**2, 6))
         self.entry_j = np.array([coefficients[i].j for i, _, _ in s21m_entries(coefficients)])
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         self.k2 = jnp.asarray(projection.k2)
@@ -877,6 +930,8 @@ class S21mTheory(Calculator):
             from .theory.rsd_bias import S21_SIZES, split
 
             rows, kappa, skewness, s21 = biased_rows(self.basis)
+            if self.s21_projection is not None:
+                s21 = self._project_s21()
             if _fog_check(self.basis, self.fog_params):
                 from .theory.rsd_bias import collapse_fog
 
@@ -949,6 +1004,22 @@ class S21mTheory(Calculator):
             renorm = 1.0 / (1.0 + c * self.ng2_var * scale)
             self.flattheory = self.flattheory * (1 + self.ng2_d0 + renorm * self.ng2_d2 * scale)
         return self.flattheory
+
+    def _project_s21(self):
+        """S21m terms (nentry, ncol) of the coefficients from the unprojected basis: lambda_2 = matrix @ field grid, with
+        the AP ratios of the trial cosmology when ``ap`` is set, then ``rsd_bias.s21m_assemble``."""
+        from .theory.rsd_bias import is_fog, s21m_assemble
+
+        grids, norms = biased_s21m_fields(self.basis)
+        grids, norms = grids[self.s21_field_rows], norms[self.s21_field_rows]
+        if self.s21_matrix is not None:
+            matrix = self.s21_matrix
+        else:
+            qpar, qperp = self.ap.ratios(self.ap_params) if self.ap is not None else (1.0, 1.0)
+            matrix = self.s21_projection.at(qpar, qperp)
+        index = self.s21_projection.field_index
+        lam = jnp.einsum("eg,ecg->ec", matrix, grids[index])
+        return s21m_assemble(lam, norms[index], is_fog(s21m=self.basis.s21m_terms))
 
     def tree_flatten(self):
         return [self.flattheory], None

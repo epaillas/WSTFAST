@@ -64,3 +64,40 @@ def test_third_order_matches_z3(i1, i2, i3):
 def test_first_order_is_kaiser():
     k = wavevector((1, 2, 1))
     assert fields([((1, 2, 1), 1.0)]).s1[1, 2, 1] == pytest.approx(BIASES["b1"] + F * k[2] ** 2 / (k @ k), rel=1e-6)
+
+
+def test_unprojected_s21m_columns_and_powers():
+    from wstfast.theory.rsd_bias import S21_SIZES, biased_scalings, s21m_assemble, s21m_field_powers
+
+    rng = np.random.default_rng(0)
+    for fog in (False, True):
+        plam, pnorm = s21m_field_powers(fog)
+        lam, norms = rng.normal(size=(3, plam.size)), rng.normal(size=(3, pnorm.size))
+        assembled = s21m_assemble(lam, norms, fog)
+        assert assembled.shape[-1] == biased_scalings(2.0, fog=fog)["s21m"].size
+        ratio = 1.37
+        np.testing.assert_allclose(s21m_assemble(lam * ratio**plam, norms * ratio**pnorm, fog),
+                                   assembled * np.asarray(biased_scalings(ratio, fog=fog)["s21m"]), rtol=1e-12)
+    assert sum(S21_SIZES) == s21m_field_powers(False)[0].size + s21m_field_powers(False)[1].size
+
+
+def test_s21m_ap_projection_matches_fixed_projection_and_scales_with_volume():
+    from numpy.polynomial.legendre import leggauss
+
+    from wstfast import WSTConfig
+    from wstfast.config import Coefficient
+    from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+
+    config = WSTConfig(J=3, L=2, L2=2, sigma0=2.5, step=2**0.5, cellsize=10.0, min_dj=3)
+    coefficients = [Coefficient("S21", ell, 0, 3) for ell in (1, 2)]
+    fields = first_layer_fields(coefficients)
+    x, _ = leggauss(12)
+    k, mu = np.geomspace(4e-3, 0.12, 24), x[6:]
+    fixed = S21mProjection(config, coefficients, fields, k, mu, boxsize=2000.0, nmesh=128)
+    ap = S21mAPProjection(config, coefficients, fields, k, mu, boxsize=2000.0, nmesh=128)
+    grid = np.exp(-((k[:, None] / 0.05) ** 2)) * (1 + 0.5 * mu[None, :] ** 2) / (1 + (k[:, None] / 0.01) ** 2)
+    a, b = fixed.matrix @ grid.ravel(), np.asarray(ap.at(1.0, 1.0)) @ grid.ravel()
+    np.testing.assert_allclose(b, a, rtol=5e-3)
+    ones = np.ones(grid.size)
+    np.testing.assert_allclose(np.asarray(ap.at(1.02, 0.99)) @ ones, (np.asarray(ap.at(1.0, 1.0)) @ ones) / (1.02 * 0.99**2),
+                               rtol=1e-10)
