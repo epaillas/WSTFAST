@@ -501,14 +501,24 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
   - c000 fixed: χ² 1406 / 200 (Δχ² = 128; c_v 2.0, b1 1.94).
   - **The caps pull in opposite directions** (diagonal residuals): NGC data below the model (−2 to −7σ of the mean,
     mostly l = 0 and σ ≥ 50), SGC above it (+3 to +5σ at σ = 25–35, l ≥ 1). Fixing c000 helps NGC and worsens SGC.
-    So the problem is cap-dependent (window δ, RIC, FKP normalisation), not the box model. c_v ≈ 2 against 0.96 for halos
-    (HOD satellites) is the other candidate, but it is cap-independent.
+    c_v ≈ 2 against 0.96 for halos (HOD satellites).
+  - **Per cap** (same setup, one window each):
+
+    | | ω_cdm | logA | h | c_v | b1 | α₀ | χ² |
+    |---|---|---|---|---|---|---|---|
+    | NGC | 0.1041 ± 0.0025 | 3.161 | 0.714 | 1.70 | 1.75 | −0.52 ± 0.12 | 724 / 83 |
+    | SGC | 0.1104 ± 0.0038 | 3.093 | 0.724 | 2.36 | 1.81 | −0.11 ± 0.13 | 449 / 83 |
+
+    Each cap alone fails and is biased the same way (low ω_cdm, high h). Sharing the parameters costs only
+    Δχ² = 105 (1278 against 724 + 449). So the cap split is secondary: the main misfit is within each cap. NGC wants a
+    shot noise half the Poisson value (α₀ = −0.5), which is implausible: a sign that the noise or the amplitude of the
+    survey model is off in that cap (the FKP n̄, the noise maps, HOD stochasticity).
 
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
    fiducial offset in mind, or a Quijote-fiducial survey emulator).
-2. Abacus cap split: per-cap profiles on the 25-mock mean; the measured α n_r / (nbar V) at NERSC (18 random files)
-   and an Abacus measurement with that denominator; fit with the new halo δ.
+2. Abacus: the measured α n_r / (nbar V) at NERSC (18 random files) and an Abacus measurement with that denominator;
+   the data's noise level against the model's (the NGC α₀ = −0.5); fit with the new halo δ.
 3. Then the NUTS 25-mock fit, the analytic covariance at its best fit, and a survey emulator with `--ap-order 3`.
 4. The S1m goodness of fit (option 3 for now: the analytic covariance for parameters only) and the EZmock covariance (C1).
 
