@@ -46,6 +46,10 @@ with their periodic parent box (NGC from box 2i, SGC from box 2i + 1 of ``--halo
 (``partial_halos.npz``: ``<cap>``, ``<cap>_box``; ``<cap>_measured``, ``<cap>_none`` of S21m) and the survey
 measurement as ``fit_rsd.py`` survey data (``<output>/data/<cap>/wst_r<i>.npz``).
 
+``--test denominator``: the ``--measure-mocks`` measured as ``--test measure`` with three FKP denominators, nbar(cell) V
+(the geometry), alpha n_r of all ``--measure-randoms`` and of each half (``<output>/<nbar|randoms|half0|half1>/<cap>/``),
+and alpha n_r / (nbar V) per photometric region and distance shell (summary).
+
 ``--test vector``: the baseline data vector (S1m at sigma = 25-71 Mpc/h, l <= 4; S21m = S2m / S1m at (25, 70.7), l >= 1)
 before and after the window, as the forward model defines it: the same fiducial mocks measured unmasked (the box)
 and on the footprint with the RIC. Saves the means and a figure.
@@ -94,7 +98,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance",
-                                           "halos"), required=True)
+                                           "halos", "denominator"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -508,6 +512,57 @@ def run_measure(args, geometries, setups, pk):
     return summary
 
 
+def run_denominator(args, geometries, setups, pk):
+    """Abacus mocks measured with three FKP denominators: nbar(cell) V (the geometry, as --test measure), alpha n_r of
+    all --measure-randoms (the true expected CIC count, up to the randoms' noise) and of each half of them (for the
+    1 / N_randoms extrapolation 2 S_all - S_half). Also alpha n_r / (nbar V) by photometric region and distance."""
+    from wstfast.data import save_measurement
+    from wstfast.survey import desi_catalogue_path, paint_cic_weighted, read_desi_catalogue, sky_to_cartesian
+
+    summary = {}
+    half = len(args.measure_randoms) // 2
+    for mock in args.measure_mocks:
+        for cap, g in geometries.items():
+            t0 = time.time()
+            s = setups[cap]
+            data = read_desi_catalogue(desi_catalogue_path(mock, cap, root=args.catalogue_root), args.zrange)
+            positions = sky_to_cartesian(data["RA"], data["DEC"], data["Z"])
+            rpos = [sky_to_cartesian(r["RA"], r["DEC"], r["Z"]) for r in
+                    (read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange)
+                     for i in args.measure_randoms)]
+            parts = [paint_cic_weighted(np.concatenate(rpos[:half]), None, g.nmesh, g.boxsize, g.offset),
+                     paint_cic_weighted(np.concatenate(rpos[half:]), None, g.nmesh, g.boxsize, g.offset)]
+            ndata, nr = len(positions), parts[0] + parts[1]
+            expected = dict(nbar=None, randoms=ndata / nr.sum() * nr,
+                            half0=ndata / parts[0].sum() * parts[0], half1=ndata / parts[1].sum() * parts[1])
+            rall = np.concatenate(rpos)
+            for name, e in expected.items():
+                delta = g.fkp_field(positions, rall, expected=e)
+                out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=[args.q],
+                                   los=s["los"], lattice=s["lattice"], second_layer_bins=s["bins2"])
+                metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
+                                nmesh=g.nmesh, space=cap, nparticles=int(ndata), shotnoise=g.shotnoise,
+                                tracer="LRG_complete", mock=mock, nrandoms=int(len(rall)), cap=cap, denominator=name)
+                save_measurement(args.output / name / cap / f"wst_r{mock:04d}.npz", out, s["config"], metadata)
+            q = (expected["randoms"] / np.where(g.support, g.nbar * g.cellsize**3, 1.0))[g.support]
+            dq = ((expected["half0"] - expected["half1"]) / np.where(g.support, g.nbar * g.cellsize**3, 1.0))[g.support]
+            w, region, r = g.weights[g.support], g.region[g.support], g.distance()[g.support]
+            mean = lambda m: float(np.sum(w[m] * q[m]) / np.sum(w[m]))
+            row = dict(fkp_mean=mean(np.ones_like(q, dtype=bool)),
+                       fkp_var=float(np.sum(w * (q - mean(np.ones_like(q, dtype=bool)))**2) / np.sum(w)),
+                       randoms_noise_var=float(np.sum(w * dq**2) / np.sum(w) / 4),
+                       regions={int(k): mean(region == k) for k in np.unique(region)},
+                       distance={f"{a:.0f}": mean((r >= a) & (r < a + 50)) for a in np.arange(r.min() // 50 * 50, r.max(), 50)
+                                 if np.any((r >= a) & (r < a + 50))},
+                       seconds=round(time.time() - t0, 1))
+            summary[f"{cap}_{mock}"] = row
+            print(f"mock {mock} {cap}: Q = alpha n_r / (nbar V): FKP mean {row['fkp_mean']:.4f}, var {row['fkp_var']:.4f}"
+                  f" (randoms noise {row['randoms_noise_var']:.4f}), regions {row['regions']}, {row['seconds']:.0f} s",
+                  flush=True)
+            (args.output / "summary_partial.json").write_text(json.dumps(summary, indent=1))
+    return summary
+
+
 def run_covariance(args, geometries, setups, pk):
     from numpy.polynomial.legendre import leggauss
 
@@ -735,7 +790,7 @@ def main():
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
-                covariance=run_covariance, halos=run_halos,
+                covariance=run_covariance, halos=run_halos, denominator=run_denominator,
                 **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))

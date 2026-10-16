@@ -1088,14 +1088,17 @@ class SurveyGeometry:
         w = self.weights
         return np.where(self.support, inside, np.sum(w * inside) / np.sum(w))
 
-    def fkp_field(self, data, randoms, data_weights=None, random_weights=None) -> np.ndarray:
+    def fkp_field(self, data, randoms, data_weights=None, random_weights=None, expected=None) -> np.ndarray:
         """FKP overdensity of a catalogue on this geometry's mesh: delta = (n_g - alpha n_r) / (nbar V_cell) on the
         support (0 elsewhere), CIC-painted, alpha = sum w_data / sum w_randoms. With randoms whose redshifts are drawn
-        from the data (DESI clustering catalogues), the radial integral constraint comes with them."""
+        from the data (DESI clustering catalogues), the radial integral constraint comes with them. ``expected``
+        (mesh, optional): the expected CIC count per cell to divide by instead of nbar V_cell (e.g. alpha n_r)."""
         ng = paint_cic_weighted(data, data_weights, self.nmesh, self.boxsize, self.offset)
         nr = paint_cic_weighted(randoms, random_weights, self.nmesh, self.boxsize, self.offset)
         alpha = ng.sum() / nr.sum()
-        expected = np.where(self.support, self.nbar * self.cellsize**3, 1.0)
+        if expected is None:
+            expected = self.nbar * self.cellsize**3
+        expected = np.where(self.support & (expected > 0), expected, np.inf)
         return np.where(self.support, (ng - alpha * nr) / expected, 0.0).astype(np.float32)
 
     @property
