@@ -424,13 +424,55 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
   ω_cdm from SGC S21m). The analytic covariance is fine for parameter errors, but not for the goodness of fit of S1m.
 - **Per-block vs single V_eff:** makes almost no difference.
 
+**Calibration error and survey fit (2026-10-15).**
+- **Paired S1m calibration.** With each mock also measured unmasked on the same cells (`dr1_window --test lambda
+  --paired`), δ = ⟨S_survey/S_box⟩ F(T=1)/F(T) loses the mocks' cosmic variance: the per-mock scatter is 0.5–0.65%.
+- **Size of the calibration error** (`fisher_rsd.py --window-ratios`). With 827 paired S1m and 734 S21m mocks, the
+  calibration error shifts the parameters of the 25-mock mean by 0.10–0.11σ rms; unpaired S1m would have needed ~2500
+  mocks. It enters the fit as `--extra-covariance` (fractional, per cap): `dr1_window --test products` writes
+  `window_calibration_<z>_<cap>.npz`.
+- **The window in the theory:** `SurveyWindow` (per cap) and `S1mTheory(window=)`, `S21mTheory(window=)`.
+- **Survey fits:** `fit_rsd.py --survey NGC SGC --window …` with `--covariance-file` (analytic,
+  `analytic_covariance_rsd_wst.py --survey`) or `--covariance-data-dir` (boxes scaled to V_eff).
+- **Abacus measurements:** `dr1_window --test measure`. All 25 complete mocks × 18 random files are in
+  `outputs/survey/abacus_lrg_z0.4-0.6/` (NERSC A100, ~6 min per mock).
+- **Survey emulator:** `outputs/emulators/survey_lrg_z0.51.h5`, unprojected S21m. It lacks the AP polynomials of the
+  baseline's `ap3` emulator (cumulant AP, ~1e-4).
+
+**Halo calibration (W3) and the end-to-end halo test (W4), 2026-10-15** (`dr1_window --test halos`).
+- **Mocks:** 300 pairs of Quijote M > 10¹³ halo boxes (z = 0.5) cut to the DR1 geometry with n̄ × 0.5 (`--nbar-scale`;
+  the halos have n̄ = 3.1e-4 against a 6e-4 peak), with the RIC, each paired with its parent box. Compact catalogues:
+  `data/quijote/halos_m13_z0.5/` (local and NERSC).
+- **Halo δ** (pairs 0–274): 0.983–1.042 (NGC), 0.981–1.084 (SGC), against ≤ 1.2% for Gaussian mocks. The non-Gaussian
+  edge effect of halos, larger in SGC. Abacus windows with the halo δ / K:
+  `outputs/survey/dr1_window_products/window_<z>_<cap>_halodelta.npz` (+ `window_calibration_…_halodelta.npz`).
+- **W4** (mean of pairs 275–299, halo windows, halo-box covariance, baseline + AP): **fails**.
+  - Profile: ω_cdm 0.0950 (the emulator's lower edge), logA 3.22, h 0.710, against the truth 0.1209, 3.061, 0.6711;
+    χ² = 2523 / 197.
+  - The Abacus fits fail the same way: 11 mocks, NUTS, Gaussian δ, ω_cdm 0.098 at the lower edge, logA 3.20, h 0.723,
+    against 0.120, 3.036, 0.674.
+- **Diagnosis** (data / model at the Quijote truth, with the halo nuisances of the box baseline fit
+  `outputs/inference/rsd/fast_noap_V60`):
+  - **The window works.** Survey data / windowed model tracks box data / box model block by block within ~0.5%, across
+    a window suppression of 8–22%.
+  - **The box model in the survey configuration does not match the box data on the survey mesh.**
+    - About 5% low everywhere, including σ = 25 Mpc/h and high l.
+    - Up to 11–20% low for l = 0 at σ = 50–71 Mpc/h.
+    - The fit compensates by raising logA and lowering ω_cdm.
+  - **Likely causes:**
+    - For the l = 0 excess: the halo mocks tile a 1 Gpc/h box over a 3440 Mpc/h mesh, so their power sits on the
+      1 Gpc/h lattice while the model assumes the continuum. This is an artefact of the test.
+    - For the ~5% offset: open. Candidates are nuisances taken from the 3.9 Mpc/h box fit, the noise of the thinned
+      halos, the survey emulator's fixed 0.06 eV neutrino and its ω_b against Quijote (≲ 1%), and CIC at 10 Mpc/h.
+
 **Next:**
-1. Propagate the δ_b calibration error to the parameters (Cov_δ in the fit) and size N_cal for the 25-mock mean.
-2. S21m through the same R. The second layer of the masked modulus is measured with the support-mean subtraction
-   (E4).
-2. The parameter-level test: fit the masked halo S1m (+S21m) with R × the box model, using the cubic halo emulator
-   and analytic covariance.
-3. The DR1 geometry from the randoms, once the Abacus LRG HOD boxes are available.
+1. **Box-model diagnostics** (local):
+   - compare the same halos measured at 3.9 Mpc/h (the baseline data, which the model fits) and on the 10 Mpc/h survey
+     mesh (`partial_halos.npz` `<cap>_box`), which isolates CIC, tiling and thinning;
+   - fit the box part alone (window off) on the survey mesh.
+2. Once the offset is understood: the 25-mock Abacus fit with the Gaussian and halo δ (NUTS, baseline + AP).
+3. Recompute the analytic covariance at that best fit. A survey emulator with `--ap-order 3` (the baseline's full AP).
+4. The S1m goodness of fit (option 3 for now: the analytic covariance for parameters only) and the EZmock covariance (C1).
 
 ## 8. End-to-end pipeline (design, 2026-10-14)
 
