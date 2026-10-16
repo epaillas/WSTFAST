@@ -371,3 +371,29 @@ def plot_power_fit(path: Path, likelihood, dataset: PowerDataset, covariance: np
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
+
+
+def plot_triangle(path: Path, runs: dict, params=("omega_cdm", "logA", "h"), truth: dict | None = None,
+                  title: str = ""):
+    """Triangle plot of the posteriors of ``runs`` ({legend: samples.h5 of fit_rsd.py}) in ``params``, with the
+    ``truth`` marked; the chains' first half is dropped as burn-in."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from desilike.samples import Samples
+    from getdist import MCSamples, plots
+
+    latex = {"omega_cdm": r"\omega_{\rm cdm}", "logA": r"\ln(10^{10}A_s)", "h": "h", "n_s": "n_s", "b1": "b_1",
+             "c_v": "c_v"}
+    gd = []
+    for legend, file in runs.items():
+        chains = Samples.read(str(file))
+        chains = chains if isinstance(chains, list) else [chains]
+        values = [np.concatenate([np.asarray(c[name])[len(np.asarray(c[name])) // 2:] for c in chains]) for name in params]
+        gd.append(MCSamples(samples=np.column_stack(values), names=list(params),
+                            labels=[latex.get(n, n) for n in params], label=legend))
+    plotter = plots.get_subplot_plotter(width_inch=6)
+    plotter.triangle_plot(gd, list(params), filled=True, markers=truth or {}, title_limit=1)
+    if title:
+        plotter.fig.suptitle(title, y=1.02)
+    plotter.export(str(path))
