@@ -98,7 +98,7 @@ VARIANTS = {  # bias, growth rate, amplitude, tilt of the linear spectrum
 def get_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance",
-                                           "halos", "denominator"), required=True)
+                                           "halos", "denominator", "exact"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
@@ -152,6 +152,10 @@ def get_args():
     parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
                         help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
                              "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
+    parser.add_argument("--stage", choices=("mocks", "predict", "both"), default="both",
+                        help="exact: generate and measure the paired mocks, predict them with CellWindow, or both")
+    parser.add_argument("--per-bin", type=int, default=16, help="exact: sample cells per (distance, density) bin")
+    parser.add_argument("--processes", type=int, default=1, help="exact: forked workers of CellWindow")
     parser.add_argument("--nbar-from", type=Path, default=None,
                         help="directory with expected_<cap>.npy (--test measure --expected-mocks): the geometry's nbar(x) "
                              "becomes the stacked randoms' CIC count, normalised to the same total, so that the FKP "
@@ -783,6 +787,81 @@ def run_halos(args, geometries, setups, pk):
     return dict(nmocks=args.realizations)
 
 
+def run_exact(args, geometries, setups, pk):
+    """The exact per-cell first-layer window (``survey.CellWindow``) against paired Gaussian mocks: each mock measured on
+    the footprint without and with the RIC, and unmasked on the same cells (its box). ``--stage mocks`` writes
+    partial_exact.npz; ``--stage predict`` computes the kernels at a stratified sample of cells (``--per-bin``) for the
+    fiducial spectrum and the variants, saves them (kernels_<cap>.npz) and compares with the mocks measured so far."""
+    caps = list(geometries)
+    if args.stage in ("mocks", "both"):
+        ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+        mocks = mocks_of(geometries, pk, "fiducial")
+        rows = {f"{cap}{suffix}": [] for cap in caps for suffix in ("", "_ric", "_box")}
+        for r in range(args.realizations):
+            t0 = time.time()
+            fields = [mocks[cap](seed=[300 + args.seed_offset + r, k]) for k, cap in enumerate(caps)]
+            for cap, field, constrained in zip(caps, fields, ric(*fields)):
+                s, g = setups[cap], geometries[cap]
+                common = dict(weights=g.weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
+                rows[cap].append(args.measure(field, s["config"], support=g.support, **common)["S1m"][0])
+                rows[cap + "_ric"].append(args.measure(constrained, s["config"], support=g.support, **common)["S1m"][0])
+                rows[cap + "_box"].append(args.measure(field, s["config"], moment_support=g.support, **common)["S1m"][0])
+            print(f"exact mock {r}: {time.time() - t0:.0f} s", flush=True)
+            np.savez(args.output / "partial_exact.npz", **{k: np.array(v) for k, v in rows.items()})
+    if args.stage == "mocks":
+        return dict(nmocks=args.realizations)
+    from wstfast.survey import CellWindow, sample_cells
+
+    spectra = {name: (lambda k, mu, b=b, f=f, a=a, t=t: (b + f * mu**2) ** 2 * spectrum(pk, a, t)(k))
+               for name, (b, f, a, t) in VARIANTS.items()}
+    summary = {}
+    for cap, g in geometries.items():
+        s = setups[cap]
+        path = args.output / f"kernels_{cap}.npz"
+        if path.exists():
+            k = np.load(path)
+            cells, weights, cov = k["cells"], k["weights"], {n: k[n] for n in ("masked", "unmasked", "noise_masked", "noise_unmasked")}
+        else:
+            cells, weights = sample_cells(g, per_bin=args.per_bin, seed=0)
+            window = CellWindow(g, s["config"], cells, halfwidth=4.0, pad=2.0)
+            t0 = time.time()
+            cov = window.covariances(list(spectra.values()), processes=args.processes)
+            print(f"{cap}: kernels at {len(cells)} cells in {time.time() - t0:.0f} s", flush=True)
+            np.savez(path, cells=cells, weights=weights, names=np.array(list(spectra)), **cov)
+        pred = {name: dict(masked=CellWindow.s1m(cov["masked"][i], cov["noise_masked"], weights, args.q),
+                           box=CellWindow.s1m(cov["unmasked"][i], cov["noise_unmasked"], weights, args.q))
+                for i, name in enumerate(spectra)}
+        mocks_path = args.output / "partial_exact.npz"
+        if not mocks_path.exists():
+            continue
+        m = np.load(mocks_path)
+        masked, masked_ric, box = m[cap], m[cap + "_ric"], m[cap + "_box"]
+        n = len(masked)
+        p = pred["fiducial"]
+        for label, data in (("no RIC", masked), ("RIC", masked_ric)):
+            ratio = data / box
+            mean, err = ratio.mean(0), ratio.std(0, ddof=1) / np.sqrt(n)
+            resid = p["masked"] / p["box"] / mean - 1
+            sigma = data.std(0, ddof=1) / data.mean(0)  # one survey
+            z = resid * mean * box.mean(0) / data.std(0, ddof=1)
+            ok = np.isfinite(resid)
+            absres = p["masked"] / data.mean(0) - 1
+            summary[f"{cap}_{label}"] = dict(nmocks=n, ratio_resid_rms=float(np.sqrt(np.nanmean(resid[ok]**2))),
+                                             ratio_resid_max=float(np.nanmax(np.abs(resid[ok]))),
+                                             ratio_err_rms=float(np.sqrt(np.nanmean((err / mean)[ok]**2))),
+                                             z_max=float(np.nanmax(np.abs(z[ok]))), z_rms=float(np.sqrt(np.nanmean(z[ok]**2))),
+                                             abs_resid_rms=float(np.sqrt(np.nanmean(absres[ok]**2))))
+            print(f"{cap} {label} ({n} mocks): paired ratio pred/meas - 1: rms {100 * summary[f'{cap}_{label}']['ratio_resid_rms']:.3f}%"
+                  f" max {100 * summary[f'{cap}_{label}']['ratio_resid_max']:.3f}% (mock error rms {100 * summary[f'{cap}_{label}']['ratio_err_rms']:.3f}%);"
+                  f" in sigma_survey: rms {summary[f'{cap}_{label}']['z_rms']:.3f} max {summary[f'{cap}_{label}']['z_max']:.3f};"
+                  f" absolute rms {100 * summary[f'{cap}_{label}']['abs_resid_rms']:.3f}%", flush=True)
+            if label == "no RIC":
+                for jj in range(4):
+                    print(f"   j{jj}: " + " ".join(f"l{l}m{mm}:{100 * resid[jj, l, mm]:+.2f}" for l in range(5) for mm in range(l + 1)))
+        np.savez(args.output / f"results_{cap}.npz", **{f"{name}_{k}": v for name, d in pred.items() for k, v in d.items()})
+    return summary
+
+
 def data_vector(out) -> np.ndarray:
     """Baseline S1m (j, l, |m|) followed by S21m = S2m / S1m at (j1, j2) = (0, 3), (l >= 1, |m1|, |m2|)."""
     s1 = [out["S1m"][j, ell, m] for j in range(4) for ell in range(5) for m in range(ell + 1)]
@@ -872,7 +951,7 @@ def main():
               f" (Gpc/h)^3, regions {np.bincount(g.region[g.support])}", flush=True)
         # sigma = 25, 35, 50, 71 Mpc/h; with --test ric, S21m at (25, 71)
         config = WSTConfig(J=3, L=args.L, L2=args.L, sigma0=25.0 / g.cellsize, step=2**0.5, cellsize=g.cellsize,
-                           min_dj=10 if args.test == "lambda" else 3, q=args.q)
+                           min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q)
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
         if args.layer2_mean == "binned" and config.second_layer_pairs():
             setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice)
@@ -887,7 +966,7 @@ def main():
                     sigma2_data = np.where(g.support & (e > 0), 1.0 / np.where(e > 0, e, 1.0), 0.0)
                 setups[cap]["noise_data"] = noise_variance_maps(sigma2_data, config, g.support, lattice, window="cic")
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
-                covariance=run_covariance, halos=run_halos, denominator=run_denominator,
+                covariance=run_covariance, halos=run_halos, denominator=run_denominator, exact=run_exact,
                 **{"lambda": run_lambda})
     summary = runs[args.test](args, geometries, setups, pk)
     (args.output / "summary.json").write_text(json.dumps(summary, indent=1))

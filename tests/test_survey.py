@@ -396,3 +396,35 @@ def test_survey_window_factor_build_and_roundtrip(tmp_path):
     for k, b in window.s1m.items():
         for name, value in b.items():
             np.testing.assert_allclose(loaded.s1m[k][name], value)
+
+
+def test_cell_window_unmasked_kernel_matches_lattice_variances():
+    """The exact per-cell kernels (CellWindow) of a full support reproduce the periodic-lattice block variances
+    (signal_variances), for any line of sight, l = 0 included (the cusp correction), and give the box moment."""
+    from wstfast.survey import CellWindow, SurveyGeometry, s1m_gaussian, signal_variances
+
+    n, cell = 48, 10.0
+    support = np.ones((n,) * 3, dtype=bool)
+    g = SurveyGeometry(support, np.full((n,) * 3, 2e-3), n * cell, np.zeros(3), np.array([-300.0, 200.0, -500.0]))
+    config = WSTConfig(J=1, L=2, sigma0=2.0, cellsize=cell, step=2**0.5, min_dj=10, q=0.8)
+    pk = lambda k, mu: (2.0 + 0.7 * mu**2) ** 2 * 1e4 * (k / 0.05) / (1 + (k / 0.1) ** 3)  # noqa: E731
+    lattice = Lattice(n)
+    kphys = lattice.kmag / cell
+    pcell = np.where(kphys > 0, pk(np.clip(kphys, 1e-4, None), np.abs(lattice.mu)) / cell**3, 0.0)
+    lam = signal_variances(pcell, config, lattice)
+    cells = np.ravel_multi_index(([5, 30], [20, 7], [40, 25]), (n,) * 3)
+    window = CellWindow(g, config, cells, halfwidth=4.0, pad=2.0, periodic=True)
+    out = window.covariances([pk])
+    for j in range(config.J + 1):
+        for ell in range(config.L + 1):
+            for m in range(ell + 1):
+                ref = lam[j, ell][ell] if m == 0 else 0.5 * (lam[j, ell][ell + m] + lam[j, ell][ell - m])
+                assert np.allclose(out["unmasked"][0, :, j, ell, m, 0], ref, rtol=2e-3)
+                assert np.allclose(out["masked"][0, :, j, ell, m, 0], ref, rtol=2e-3)  # full support: no mask
+                if m:
+                    assert np.all(np.abs(out["unmasked"][0, :, j, ell, m, 2]) < 2e-3 * ref)
+    # the moment of the exact covariances equals s1m_gaussian at the lattice variances (box noise included)
+    noise = {k: np.full(2, 1.0 / (2e-3 * cell**3) * np.sum(window._kernels[k[0]][k[1]][0] ** 2)) for k in lam}
+    expected = s1m_gaussian(lam, config, 0.8, np.ones(2), lam_noise=noise)
+    got = CellWindow.s1m(out["unmasked"][0], out["noise_unmasked"], np.ones(2), 0.8)
+    assert np.allclose(got[~np.isnan(got)], expected[~np.isnan(expected)], rtol=5e-3)
