@@ -137,6 +137,11 @@ def get_args():
                         help="measure: the complete Abacus mocks to measure (fit_rsd.py survey data)")
     parser.add_argument("--measure-randoms", type=int, nargs="+", default=list(range(18)),
                         help="measure: random files of each mock")
+    parser.add_argument("--expected-mocks", type=int, nargs="*", default=[],
+                        help="measure: divide the FKP field by the expected CIC count from the stacked randoms of these "
+                             "mocks (alpha n_r, all --measure-randoms each) instead of nbar(cell) V: the cell-level "
+                             "mismatch alpha n_r / (nbar V) has ~20%% rms (sub-cell mask structure) and biases SGC S1m by "
+                             ">= 0.7%%; one mock's randoms are too noisy per cell")
     parser.add_argument("--noise-window", choices=("white", "cic"), default="white",
                         help="products: shot noise of the window's noise maps; cic for CIC-painted catalogues (the data and "
                              "halo mocks; survey.noise_variance_maps), white for the Gaussian mocks")
@@ -506,7 +511,22 @@ def run_measure(args, geometries, setups, pk):
     from wstfast.data import save_measurement
     from wstfast.survey import desi_catalogue_path, read_desi_catalogue, sky_to_cartesian
 
-    summary = {}
+    from wstfast.survey import paint_cic_weighted
+
+    summary, stacks = {}, {}
+    for cap, g in geometries.items():  # stacked randoms of --expected-mocks, painted once per cap
+        if not args.expected_mocks:
+            break
+        t0 = time.time()
+        stack = np.zeros((g.nmesh,) * 3)
+        for mock in args.expected_mocks:
+            for i in args.measure_randoms:
+                r = read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange)
+                stack += paint_cic_weighted(sky_to_cartesian(r["RA"], r["DEC"], r["Z"]), None, g.nmesh, g.boxsize,
+                                            g.offset)
+        stacks[cap] = stack
+        print(f"{cap}: stacked randoms of {len(args.expected_mocks)} mocks, {stack.sum():.3g}, {time.time() - t0:.0f} s",
+              flush=True)
     for mock in args.measure_mocks:
         for cap, g in geometries.items():
             t0 = time.time()
@@ -519,12 +539,14 @@ def run_measure(args, geometries, setups, pk):
                        for i in args.measure_randoms]
             positions = sky_to_cartesian(data["RA"], data["DEC"], data["Z"])
             rpositions = np.concatenate([sky_to_cartesian(r["RA"], r["DEC"], r["Z"]) for r in randoms])
-            delta = g.fkp_field(positions, rpositions)
+            expected = len(positions) / stacks[cap].sum() * stacks[cap] if cap in stacks else None
+            delta = g.fkp_field(positions, rpositions, expected=expected)
             out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=[args.q], los=s["los"],
                                lattice=s["lattice"], second_layer_bins=s["bins2"])
             metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
                             nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=g.shotnoise,
-                            tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap)
+                            tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap,
+                            expected_mocks=list(args.expected_mocks))
             save_measurement(path, out, s["config"], metadata)
             summary[f"{cap}_{mock}"] = dict(ngal=int(len(positions)), seconds=round(time.time() - t0, 1))
             print(f"mock {mock} {cap}: {len(positions)} galaxies, {len(rpositions)} randoms, {time.time() - t0:.0f} s",
