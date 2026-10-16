@@ -514,6 +514,31 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
     shot noise half the Poisson value (α₀ = −0.5), which is implausible: a sign that the noise or the amplitude of the
     survey model is off in that cap (the FKP n̄, the noise maps, HOD stochasticity).
 
+**Abacus bias hunt (2026-10-16, night; in progress).**
+- **CIC shot noise in the window.** The window's noise maps (`noise_variance_maps`) were white, but the data are
+  CIC-painted and the box model (`S1mProjection.shot`) uses the aliased CIC noise. On pure-noise Abacus fields
+  ((n_A − n_B)/(n̄V), random halves), the white maps overpredict S1m by 3.5–8% at σ = 25 Mpc/h (worst at high l). With
+  `noise_variance_maps(window="cic")` the residual is flat at ~0.98, the Jensen effect of noise following the galaxy
+  density. Products: `dr1_window --test products --noise-window cic` (δ calibrated against the noise of the mocks,
+  `--mock-noise`): `outputs/survey/dr1_window_products_cic`. It barely moves the Abacus fit (ω_cdm 0.1045, logA 3.20,
+  h 0.723), so the noise is not the cause; α₀ < 0 absorbs a signal misfit.
+- **No AP:** ω_cdm 0.102, logA 3.19, h 0.703, so AP is not the lever. **Scale cuts (S1m only):** unstable and
+  χ² 142 / 44 even at σ ≥ 50, so the misfit is not only small-scale (FoG). **Covariance diagonal** against the
+  25-mock scatter: median 0.92 (NGC), 1.05 (SGC); 1.4–1.8 at σ 25, high l.
+- **FKP denominator** (`--test denominator`, 25 mocks × 18 randoms, NERSC CPU): with α n_r instead of n̄V, S1m
+  changes by +0.0% (NGC, rms 0.26%) and −0.7% (SGC, rms 0.17%), bounds since the randoms' noise raises S. The
+  1/N_randoms extrapolation is unreliable. This is sub-dominant but cap-dependent, in the direction of the SGC excess.
+- **Halo calibration with the fixed mocks** (300 pairs, `dr1_halos_v2_*`): δ = 0.970–0.994 against 0.988–1.003 for
+  Gaussian mocks. Halo edges suppress S1m by 1–3% more. On Abacus (`*_halodelta`): ω_cdm 0.1076, logA 3.167, h 0.729.
+- **W4 with the fixed mocks** (pairs 275–299, halo windows, CIC noise, halo-box covariance, baseline + AP): ω_cdm
+  0.1172 ± 0.0033, logA 3.026 ± 0.065, **h 0.718 ± 0.0085 (truth 0.6711, +5.5σ)**, α₀ −0.48, χ² 424 / 197 (was
+  2523). This is the same failure as Abacus, in a controlled test. S1m alone gives h 0.7125 and α₀ −0.51; the residuals
+  grow with |m| at every (σ, l), i.e. the data have relatively more m ≥ 1 than m = 0.
+- **Lead: the local line of sight.** On 8 paired halo boxes, the local-LOS parent box against the z-LOS one changes
+  m = 0 by −2.5 ± 1.2% (l 1) and −3.9 ± 1.2% (l 2) at σ = 71, and m ≥ 1 by up to +1%. Neither δ (both sides local) nor
+  the plane-parallel box model contains it. The 8-box correction is too noisy to test (χ² worse). 300 pairs with
+  `--test halos --box-only --box-los-z` are running (NERSC, `dr1_halos_wa_*`).
+
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
    fiducial offset in mind, or a Quijote-fiducial survey emulator).
