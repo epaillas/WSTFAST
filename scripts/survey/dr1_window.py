@@ -152,6 +152,11 @@ def get_args():
     parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
                         help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
                              "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
+    parser.add_argument("--exact", action="store_true",
+                        help="products: add the exact per-cell window (survey.CellWindow at --per-bin cells per bin, "
+                             "CIC noise, the RIC transfer of <output>/ric_transfer_<cap>.npz if present) to the window "
+                             "files; its rows are on RSDGrid(kmax=--grid-kmax), the emulator's")
+    parser.add_argument("--grid-kmax", type=float, default=0.3)
     parser.add_argument("--stage", choices=("mocks", "ric", "predict", "both"), default="both",
                         help="exact: generate and measure the paired mocks, calibrate the RIC transfer on signal-only "
                              "mocks (--calibrate of them), predict the mocks with CellWindow, or all")
@@ -482,11 +487,27 @@ def run_products(args, geometries, setups, pk):
                 product.s21m[key] = float(ratio.mean())
                 ratios["s21m_" + "_".join(str(k) for k in key)] = ratio
         z = "-".join(f"{v:g}" for v in args.zrange)
+        if args.exact:
+            from wstfast.survey import CellWindow, RICTransfer, sample_cells
+            from wstfast.theory.rsd import RSDGrid
+
+            cells, cell_weights, labels = sample_cells(g, per_bin=args.per_bin, seed=0)
+            t0 = time.time()
+            rows = CellWindow(g, s["config"], cells, noise_window="cic").covariances(
+                None, grid=RSDGrid(kmax=args.grid_kmax), processes=args.processes)
+            ric_path = args.output / f"ric_transfer_{cap}.npz"
+            transfer = RICTransfer.load(ric_path) if ric_path.exists() else None
+            data_product.build_exact(s["config"], rows, cell_weights, labels, ric_transfer=transfer)
+            ranks = [b["u"].shape[-1] for b in data_product.exact.values()]
+            print(f"{cap}: exact window at {len(cells)} cells in {time.time() - t0:.0f} s, ranks {min(ranks)}-{max(ranks)},"
+                  f" RIC transfer {'yes' if transfer is not None else 'no'}", flush=True)
         if data_product is not product:  # delta (white-noise mocks against white maps) onto the CIC-noise histograms
             for key, block in product.s1m.items():
                 data_product.s1m[key]["delta"] = block["delta"]
             data_product.s21m = dict(product.s21m)
             product = data_product
+        elif args.exact:
+            product.exact = data_product.exact
         product.save(args.output / f"window_z{z}_{cap}.npz")
         np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
         if ratios:  # calibration error of delta and K for fit_rsd --extra-covariance (one mock set per statistic)
@@ -852,15 +873,24 @@ def run_exact(args, geometries, setups, pk):
             cov = window.covariances(list(spectra.values()), processes=args.processes)
             print(f"{cap}: kernels at {len(cells)} cells in {time.time() - t0:.0f} s", flush=True)
             np.savez(path, cells=cells, weights=weights, labels=labels, names=np.array(list(spectra)), **cov)
-        pred = {name: dict(masked=CellWindow.s1m(cov["masked"][i], cov["noise_masked"], weights, args.q),
+        # the control variate: the coverage model on every cell (lattice variances of each spectrum, white noise maps)
+        grid = getattr(s["lattice"], "numpy", s["lattice"])
+        sigma2 = np.where(g.support, 1.0 / np.where(g.nbar > 0, g.nbar, 1.0) / g.cellsize**3, 0.0)
+        noise_maps = noise_variance_maps(sigma2, s["config"], g.support, s["lattice"])
+        kphys = grid.kmag / g.cellsize
+        lam = {name: signal_variances(np.where(kphys > 0, p(np.clip(kphys, 1e-4, None), np.abs(grid.mu)), 0.0)
+                                      / g.cellsize**3, s["config"], s["lattice"]) for name, p in spectra.items()}
+        cv = lambda masked, name: CellWindow.control_variate(  # noqa: E731
+            g, s["config"], s["lattice"], lam[name], noise_maps, cells, args.q,
+            CellWindow.moment(masked + cov["noise_masked"], args.q), weights)
+        pred = {name: dict(masked=cv(cov["masked"][i], name),
                            box=CellWindow.s1m(cov["unmasked"][i], cov["noise_unmasked"], weights, args.q))
                 for i, name in enumerate(spectra)}
         ric_path = args.output / f"ric_transfer_{cap}.npz"
         if ric_path.exists():
             transfer = RICTransfer.load(ric_path)
             for i, name in enumerate(spectra):
-                pred[name]["ric"] = CellWindow.s1m(RICTransfer.apply(transfer, cov["masked"][i], labels),
-                                                   cov["noise_masked"], weights, args.q)
+                pred[name]["ric"] = cv(RICTransfer.apply(transfer, cov["masked"][i], labels), name)
         mocks_path = args.output / "partial_exact.npz"
         if not mocks_path.exists():
             continue

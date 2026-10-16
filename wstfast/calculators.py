@@ -743,12 +743,14 @@ class S1mTheory(Calculator):
                       sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
                       cubic_biases: str | None = None, kappa_shot: bool = False, fog: str | None = None, window=None):
         self.projection, self.shotnoise = projection, float(shotnoise)
-        self.window = None
+        self.window = self.window_exact = None
         if window is not None:
             if sigmas is None:
                 raise ValueError("window needs sigmas, the filter scale of each coefficient")
             keys = [(window.key(sigma), c.ell, m) for c, sigma in zip(coefficients, sigmas) for m in range(c.ell + 1)]
             self.window = tuple(jnp.asarray(a) for a in window.s1m_arrays(keys))
+            if window.exact:  # the exact per-cell window replaces the histogram factor (delta stays as calibrated)
+                self.window_exact = tuple(jnp.asarray(a) for a in window.s1m_exact_arrays(keys))
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
             raise ValueError(f"ng_amplitude={ng_amplitude!r} needs the filter scales (sigmas)")
@@ -808,14 +810,18 @@ class S1mTheory(Calculator):
         self.flattheory = s1m_from_variances(variances, linear, kappa, skewness2, self.ells, self.q,
                                              edgeworth_amplitude=amplitude, block_scale=block_scale)
         if self.window is not None:  # survey: delta x the window factor at the box signal and noise of every block
-            from .survey import s1m_window_factor
+            from .survey import s1m_exact_factor, s1m_window_factor
 
             if self.ap is None:
                 signal = self.matrix @ grid.ravel()
             else:
                 signal = self.projection(grid[None], qpar, qperp, 0.0)[0]
             weight, transfer, noise_map, delta = self.window
-            factor = s1m_window_factor(weight, transfer, noise_map, signal, variances - signal, noise, self.q)
+            if self.window_exact is not None:  # per-cell covariances of the spectrum (no AP in the factor)
+                factor = s1m_exact_factor(*self.window_exact[:5], grid.ravel(), noise, variances - signal,
+                                          self.window_exact[5], self.q)
+            else:
+                factor = s1m_window_factor(weight, transfer, noise_map, signal, variances - signal, noise, self.q)
             self.flattheory = self.flattheory * delta * factor
         return self.flattheory
 

@@ -567,10 +567,10 @@ def grid_interpolation(grid: RSDGrid, k, mu):
     t = (logk - np.log(grid.k[i])) / (np.log(grid.k[i + 1]) - np.log(grid.k[i]))
     wmu = lagrange_matrix(grid.mu**2, mu**2)  # (nmodes, nmu)
     nmu = grid.mu.size
-    rows = np.repeat(np.arange(k.size), 2 * nmu)
     cols = np.concatenate([(i[:, None] * nmu + np.arange(nmu)), ((i + 1)[:, None] * nmu + np.arange(nmu))], axis=1)
     vals = np.concatenate([(1 - t)[:, None] * wmu, t[:, None] * wmu], axis=1)
-    return sparse.csr_matrix((vals.ravel(), (rows, cols.ravel())), shape=(k.size, grid.k.size * nmu))
+    indptr = np.arange(k.size + 1) * (2 * nmu)  # 2 nmu entries per row, built directly (no duplicate summing)
+    return sparse.csr_matrix((vals.ravel(), cols.ravel().astype(np.int64), indptr), shape=(k.size, grid.k.size * nmu))
 
 
 class S1mProjection:

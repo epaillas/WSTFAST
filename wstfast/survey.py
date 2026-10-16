@@ -877,8 +877,12 @@ class CellWindow:
     """
 
     def __init__(self, geometry: SurveyGeometry, config: WSTConfig, cells, halfwidth: float = 4.0, pad: float = 2.0,
-                 sigma2: np.ndarray | None = None, workers: int = -1, periodic: bool = False):
+                 sigma2: np.ndarray | None = None, workers: int = -1, periodic: bool = False,
+                 noise_window: str | None = None):
         self.g, self.config, self.workers = geometry, config, workers
+        if noise_window not in (None, "cic"):
+            raise ValueError(f"unknown noise window {noise_window!r}")
+        self.noise_window = noise_window  # "cic": the noise of a CIC-painted catalogue (nodes correlated by the kernel)
         self.cells = np.asarray(cells, dtype=np.int64)
         n = geometry.nmesh
         self.sizes = {j: int(np.ceil(halfwidth * pad * config.sigma0 * config.step**j)) * 2
@@ -902,6 +906,7 @@ class CellWindow:
         self.los = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
         self.theta, self.phi = _angles(self.los)
         self._kernels, self._modes, self._rotations = {}, {}, {}
+        self._efull_rows, self._efull_grid = None, None
 
     def _prepare(self, j: int):
         """Centred wavelets psi_l^m (m = -l..l) on the sub-lattice of scale j, and its modes (k [h/Mpc], unit vectors,
@@ -926,7 +931,11 @@ class CellWindow:
         mult[..., 0] = 1.0
         if ns % 2 == 0:
             mult[..., -1] = 1.0
-        self._modes[j] = dict(kmag=kmag.astype(np.float32), unit=unit.astype(np.float32), mult=mult)
+        cic = None
+        if self.noise_window == "cic":
+            cic = np.sqrt(np.prod([1 - 2 / 3 * np.sin(kk * self.g.cellsize / 2) ** 2 for kk in (kx, ky, kz)], axis=0))
+        self._modes[j] = dict(kmag=kmag.astype(np.float32), unit=unit.astype(np.float32), mult=mult,
+                              cic=None if cic is None else cic.astype(np.float32))
         for ell in range(self.config.L + 1):
             if ell not in self._rotations:
                 self._rotations[ell] = LOSRotation(ell)
@@ -942,6 +951,8 @@ class CellWindow:
             return self._covariances(spectra, ells, grid, np.arange(len(self.cells)))
         import multiprocessing as mp
 
+        if grid is not None:
+            self._envelope_rows(grid)
         global _CELLWINDOW_JOB
         _CELLWINDOW_JOB = (self, list(spectra) if spectra is not None else None, ells, grid)
         chunks = np.array_split(np.arange(len(self.cells)), min(processes * 4, len(self.cells)))
@@ -977,11 +988,9 @@ class CellWindow:
         which = np.asarray(which)
         nc, nj, nl = len(which), cfg.J + 1, cfg.L + 1
         if grid is not None:
-            from .theory.rsd import grid_interpolation
-
             nrow = grid.k.size * grid.mu.size
             out = {k: np.zeros((nc, nj, nl, nl, 3, nrow)) for k in ("masked", "unmasked")}
-            tables = None
+            self._envelope_rows(grid)  # the full-lattice rows of the cusp correction, shared by all cells
         else:
             spectra = list(spectra)
             out = {k: np.zeros((len(spectra), nc, nj, nl, nl, 3)) for k in ("masked", "unmasked")}
@@ -996,9 +1005,11 @@ class CellWindow:
             ns = self.sizes[j]
             cell3 = self.g.cellsize**3
             sigma = self.config.sigma0 * self.config.step**j * self.g.cellsize
-            radii = sigma * np.geomspace(0.25, 4.0, 25)  # envelope widths of the cusp correction
+            radii = self._radii(j)  # envelope widths of the cusp correction
             if grid is None:
                 efull = np.array([[float(np.sum(np.exp(-kfull**2 * R**2) * pf)) for R in radii] for pf in pfull])
+            else:
+                efull_rows = self._efull_rows[j]
             offsets = (np.arange(ns) - ns // 2) * self.g.cellsize
             ox, oy, oz = np.meshgrid(offsets, offsets, offsets, indexing="ij", sparse=True)
             r2 = ox**2 + oy**2 + oz**2
@@ -1008,8 +1019,9 @@ class CellWindow:
                 mu = np.abs(np.tensordot(modes["unit"], self.los[ic].astype(np.float32), axes=([3], [0])))
                 kmag = modes["kmag"]
                 if grid is not None:
-                    interp = grid_interpolation(grid, np.clip(kmag.ravel(), 1e-6, None), mu.ravel())
-                    weights = [None]
+                    rows_of = self._grid_rows(grid, kmag.ravel(), mu.ravel())  # exact interpolation of the modes
+                    base = (modes["mult"] / cell3 / ns**3).ravel()
+                    error_rows = efull_rows - rows_of([base * np.exp(-kmag.ravel()**2 * R**2) for R in radii])
                 else:
                     weights, errors = [], []
                     for si, p in enumerate(spectra):
@@ -1025,35 +1037,28 @@ class CellWindow:
                     g = psi_r * W
                     ghat = sfft.rfftn(g, axes=(1, 2, 3), workers=self.workers)
                     phat = sfft.rfftn(psi_r, axes=(1, 2, 3), workers=self.workers)
+                    if modes["cic"] is not None:  # kernels seen by the CIC-correlated noise: g * c
+                        g_n = sfft.irfftn(ghat * modes["cic"], s=(ns,) * 3, axes=(1, 2, 3), workers=self.workers)
+                        psi_n = sfft.irfftn(phat * modes["cic"], s=(ns,) * 3, axes=(1, 2, 3), workers=self.workers)
+                    else:
+                        g_n, psi_n = g, psi_r
                     for m in range(ell + 1):
                         a, b = ell + m, ell - m
                         for name, kern, real, noise in (("masked", ghat, g, s_in), ("unmasked", phat, psi_r, s_all)):
                             prods = [np.abs(kern[a]) ** 2, np.abs(kern[b]) ** 2,
                                      (kern[a] * np.conj(kern[b])).real if m else np.zeros_like(kmag)]
                             if grid is not None:
-                                base = (modes["mult"] / cell3 / ns**3).ravel()
-                                for e, pr in enumerate(prods):
-                                    out[name][io, j, ell, m, e] = interp.T @ (base * pr.ravel())
-                            else:
-                                # cusp correction per pair: dc x E(R), R from the pair's second moment (translation
-                                # invariant: sum_y,y' g_a g_b |y - y'|^2 = dc_a M_b + M_a dc_b - 2 D_a . D_b)
                                 pairs = [(a, a), (b, b), (a, b)] if m else [(a, a), (a, a), None]
-                                scales = []
-                                for pair in pairs:
-                                    if pair is None:
-                                        scales.append(None)
-                                        continue
-                                    ga, gb = real[pair[0]].astype(np.float64), real[pair[1]].astype(np.float64)
-                                    dca, dcb = ga.sum(), gb.sum()
-                                    dc = dca * dcb
-                                    if dc <= 0:
-                                        scales.append((dc, sigma))
-                                        continue
-                                    ma, mb = np.sum(ga * r2), np.sum(gb * r2)
-                                    da = np.array([np.sum(ga * ox), np.sum(ga * oy), np.sum(ga * oz)])
-                                    db = np.array([np.sum(gb * ox), np.sum(gb * oy), np.sum(gb * oz)])
-                                    q = dca * mb + ma * dcb - 2 * da @ db
-                                    scales.append((dc, float(np.sqrt(np.clip(q / (6 * dc), radii[0]**2, radii[-1]**2)))))
+                                for e, pr in enumerate(prods):
+                                    row = rows_of([base * pr.ravel()])[0]
+                                    if pairs[e] is not None:
+                                        dc, R = self._pair_scale(real, pairs[e], r2, ox, oy, oz, sigma, radii)
+                                        row = row + dc * self._interp_rows(R, radii, error_rows)
+                                    out[name][io, j, ell, m, e] = row
+                            else:
+                                pairs = [(a, a), (b, b), (a, b)] if m else [(a, a), (a, a), None]
+                                scales = [None if pair is None else self._pair_scale(real, pair, r2, ox, oy, oz, sigma, radii)
+                                          for pair in pairs]
                                 for si, w in enumerate(weights):
                                     for e, pr in enumerate(prods):
                                         value = float(np.sum(w * pr, dtype=np.float64))
@@ -1062,10 +1067,77 @@ class CellWindow:
                                             value += dc * np.interp(R, radii, errors[si])
                                         out[name][si, io, j, ell, m, e] = value
                             nm = "noise_" + name
-                            out[nm][io, j, ell, m, 0] = float(np.sum(real[a] ** 2 * noise, dtype=np.float64))
-                            out[nm][io, j, ell, m, 1] = float(np.sum(real[b] ** 2 * noise, dtype=np.float64))
-                            out[nm][io, j, ell, m, 2] = float(np.sum(real[a] * real[b] * noise, dtype=np.float64)) if m else 0.0
+                            rn = g_n if name == "masked" else psi_n
+                            out[nm][io, j, ell, m, 0] = float(np.sum(rn[a] ** 2 * noise, dtype=np.float64))
+                            out[nm][io, j, ell, m, 1] = float(np.sum(rn[b] ** 2 * noise, dtype=np.float64))
+                            out[nm][io, j, ell, m, 2] = float(np.sum(rn[a] * rn[b] * noise, dtype=np.float64)) if m else 0.0
         return out
+
+    @staticmethod
+    def _pair_scale(real, pair, r2, ox, oy, oz, sigma, radii):
+        """(ghat_a(0) ghat_b(0), R) of the cusp correction of a kernel pair: R from the pair's second moment
+        sum_y,y' g_a(y) g_b(y') |y - y'|^2 = dc_a M_b + M_a dc_b - 2 D_a . D_b (translation invariant)."""
+        ga, gb = real[pair[0]].astype(np.float64), real[pair[1]].astype(np.float64)
+        dca, dcb = ga.sum(), gb.sum()
+        dc = dca * dcb
+        if dc <= 0:
+            return dc, sigma
+        ma, mb = np.sum(ga * r2), np.sum(gb * r2)
+        da = np.array([np.sum(ga * ox), np.sum(ga * oy), np.sum(ga * oz)])
+        db = np.array([np.sum(gb * ox), np.sum(gb * oy), np.sum(gb * oz)])
+        q = dca * mb + ma * dcb - 2 * da @ db
+        return dc, float(np.sqrt(np.clip(q / (6 * dc), radii[0]**2, radii[-1]**2)))
+
+    @staticmethod
+    def _interp_rows(R, radii, rows):
+        i = int(np.clip(np.searchsorted(radii, R) - 1, 0, len(radii) - 2))
+        t = (R - radii[i]) / (radii[i + 1] - radii[i])
+        return (1 - t) * rows[i] + t * rows[i + 1]
+
+    def _radii(self, j: int) -> np.ndarray:
+        """Envelope widths of the cusp correction at scale j [Mpc/h]."""
+        return self.config.sigma0 * self.config.step**j * self.g.cellsize * np.geomspace(0.25, 4.0, 25)
+
+    def _envelope_rows(self, grid):
+        """Rows on ``grid`` of the full-lattice sums of the envelopes exp(-k^2 R^2), for every scale and R, computed
+        once (one pass over the mesh modes) and cached; the sub-lattice counterparts are per cell."""
+        if getattr(self, "_efull_rows", None) is not None and self._efull_grid is grid:
+            return
+        full = Lattice(self.g.nmesh)
+        kfull, mufull = (full.kmag / self.g.cellsize).ravel(), np.abs(full.mu).ravel()
+        base = (full.multiplicity / self.g.cellsize**3 / full.n**3).ravel()
+        radii = [self._radii(j) for j in range(self.config.J + 1)]
+        rows = self._grid_rows(grid, kfull, mufull, [base * np.exp(-kfull**2 * R**2) for rr in radii for R in rr])
+        self._efull_rows = {j: rows[sum(len(r) for r in radii[:j]):sum(len(r) for r in radii[:j + 1])]
+                            for j in range(self.config.J + 1)}
+        self._efull_grid = grid
+
+    @staticmethod
+    def _grid_rows(grid, k, mu, weights=None, chunk: int = 200_000, tail: float = -2.2):
+        """Rows on ``grid`` (``theory.rsd.RSDGrid``) of weighted sums over lattice modes (k [h/Mpc], |mu|): with
+        ``weights`` (a list of arrays over the modes) the rows (nweights, nrow); without, a function of such a list,
+        reusing the interpolation of these modes (built once, in chunks). Modes at k = 0 are dropped; those below the
+        grid's first k are clipped to it; those beyond its last k (which masked kernels reach through the ringing of
+        the edge) take the power of the last node times (k / kmax)^tail, a fixed slope: still linear in the grid."""
+        from .theory.rsd import grid_interpolation
+
+        keep = k > 0
+        index = np.flatnonzero(keep)
+        kmax = grid.k[-1]
+        factor = np.where(k > kmax, np.clip(k / kmax, 1.0, None) ** tail, 1.0)
+        chunks = []
+        for start in range(0, len(index), chunk):
+            sel = index[start:start + chunk]
+            chunks.append((sel, grid_interpolation(grid, np.clip(k[sel], None, kmax), mu[sel]).T.tocsr()))
+
+        def rows(values):
+            w = np.column_stack([np.asarray(v, dtype=np.float64) * factor for v in values])  # (nmodes, nvalues)
+            out = np.zeros((w.shape[1], grid.k.size * grid.mu.size))
+            for sel, interp_t in chunks:
+                out += (interp_t @ w[sel]).T
+            return out
+
+        return rows if weights is None else rows(weights)
 
     @staticmethod
     def moment(cov, q: float) -> np.ndarray:
@@ -1078,6 +1150,33 @@ class CellWindow:
         two = _chi_moment(lam_p.ravel(), lam_m.ravel(), q).reshape(a.shape)
         one = _chi_moment(np.maximum(a, 1e-30), None, q)
         return np.where(single, one, two)
+
+    @staticmethod
+    def control_variate(geometry: SurveyGeometry, config: WSTConfig, lattice, lam_box: dict, noise: dict, cells,
+                        q: float, exact: np.ndarray, weights: np.ndarray, noise_scale: float = 1.0) -> np.ndarray:
+        """S1m from the per-cell moments ``exact`` [cell, j, l, |m|] of sample ``cells`` with the control variate of
+        the coverage model, lambda = f lambda_box + noise_scale lambda_N with independent components: that model's
+        weighted moment over every support cell (``coverage``, ``noise_variance_maps``, ``signal_variances``) plus the
+        weighted mean over the samples of exact - model. The within-bin spread of the difference is far smaller than
+        that of the moment itself, so the sampling noise of the stratified estimate drops by that ratio."""
+        index = np.flatnonzero(geometry.support)
+        position = {c: i for i, c in enumerate(index)}
+        at = np.array([position[c] for c in cells])
+        wall = geometry.weights.ravel()[index]
+        w = np.asarray(weights, dtype=float)
+        out = np.full((config.J + 1, config.L + 1, config.L + 1), np.nan)
+        for j in range(config.J + 1):
+            for ell in range(config.L + 1):
+                f = coverage(geometry.support, config, lattice, j, ell).astype(np.float64)
+                n = noise_scale * noise[j, ell]
+                for m in range(ell + 1):
+                    if m == 0:
+                        model = _chi_moment(f * lam_box[j, ell][ell] + n, None, q)
+                    else:
+                        model = _chi_moment(f * lam_box[j, ell][ell + m] + n, f * lam_box[j, ell][ell - m] + n, q)
+                    out[j, ell, m] = (np.sum(wall * model) / wall.sum()
+                                      + np.sum(w * (exact[:, j, ell, m] - model[at])) / w.sum())
+        return out
 
     @staticmethod
     def s1m(cov, noise, weights, q: float, noise_scale: float = 1.0) -> np.ndarray:
@@ -1196,6 +1295,41 @@ def s1m_window_factor(weight, transfer, noise, signal, box_noise, noise_scale, q
     return xp.sum(weight * xp.maximum(ratio, 1e-30) ** (q / 2), axis=1) / xp.sum(weight, axis=1)
 
 
+def _chi_moment_xp(lam_a, lam_b, q, xp):
+    """``_chi_moment`` for NumPy or JAX arrays (lam_b None: one component)."""
+    if xp is np:
+        return _chi_moment(lam_a, lam_b, q)
+    from jax.scipy.special import gammaln
+
+    p = q / 2
+    if lam_b is None:
+        return (2 * lam_a) ** p * xp.exp(gammaln((1 + q) / 2)) / xp.sqrt(xp.pi)
+    phi = (xp.arange(64) + 0.5) * xp.pi / 128
+    c2 = xp.cos(phi) ** 2
+    return 2**p * xp.exp(gammaln(1 + p)) * xp.mean((lam_a[..., None] * c2 + lam_b[..., None] * (1 - c2)) ** p, axis=-1)
+
+
+def s1m_exact_factor(weight, u, v, noise, vbox, pgrid, noise_scale, box_noise, two, q: float):
+    """Survey / box ratio of the Gaussian part of S1m for blocks (B,) from the exact per-cell covariances of
+    ``SurveyWindow.exact`` (``s1m_exact_arrays``): weight (B, C), u (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3),
+    the unmasked row vbox (B, N), the spectrum on the grid ``pgrid`` (N,), the shot-noise amplitude ``noise_scale``, the
+    box noise of the theory ``box_noise`` (B,), and ``two`` (B,) whether the block is a |m| > 0 pair. Per cell the
+    covariance of (X_m, X_-m) is (C_mm, C_-m-m, C_m-m) = u (v pgrid) + noise_scale noise, and its moment follows from
+    the eigenvalues; the box moment uses the box variance vbox pgrid + noise_scale box_noise. NumPy or JAX."""
+    import jax.numpy as jnp
+
+    xp = jnp if any(isinstance(x, jnp.ndarray) for x in (pgrid, noise_scale, box_noise)) else np
+    coef = xp.einsum("bern,n->ber", v, pgrid)  # (B, 3, r)
+    cov = xp.einsum("bcer,ber->bce", u, coef) + noise_scale * noise  # (B, C, 3)
+    a, b, c = cov[..., 0], cov[..., 1], cov[..., 2]
+    half, disc = 0.5 * (a + b), xp.sqrt(xp.maximum(0.25 * (a - b) ** 2 + c**2, 0.0))
+    lp, lm = xp.maximum(half + disc, 1e-30), xp.maximum(half - disc, 1e-30)
+    moment = xp.where(two[:, None], _chi_moment_xp(lp, lm, q, xp), _chi_moment_xp(xp.maximum(a, 1e-30), None, q, xp))
+    box = vbox @ pgrid + noise_scale * box_noise
+    box_moment = xp.where(two, _chi_moment_xp(box, box, q, xp), _chi_moment_xp(box, None, q, xp))
+    return xp.sum(weight * moment, axis=1) / xp.sum(weight, axis=1) / box_moment
+
+
 @dataclass
 class SurveyWindow:
     """Window of one survey cap for the likelihood (``S1mTheory(window=)``, ``S21mTheory(window=)``).
@@ -1212,6 +1346,10 @@ class SurveyWindow:
     s21m: dict
     q: float = 0.8
     veff: float | None = None  # FKP effective volume of the cap [(Gpc/h)^3], for the survey covariance
+    #: Exact per-cell window (``build_exact``): per S1m key, weight (C,), u (C, 3, r), v (3, r, N) (the SVD of the
+    #: rows of the masked covariance entries on the spectrum grid, including the RIC transfer), noise (C, 3) (the
+    #: cells' shot noise, absolute) and vbox (N,) (the unmasked row). With it the factor is ``s1m_exact_factor``.
+    exact: dict | None = None
 
     @staticmethod
     def key(sigma: float) -> float:
@@ -1257,6 +1395,44 @@ class SurveyWindow:
         h, h2 = b["weight"], b["weight2"]
         return float(self.veff * (h @ local) ** 2 / (h2 @ local**2) * h2.sum() / h.sum() ** 2)
 
+    def build_exact(self, config: WSTConfig, rows: dict, weights: np.ndarray, labels: np.ndarray | None = None,
+                    ric_transfer: dict | None = None, tol: float = 1e-4):
+        """Add the exact window from ``CellWindow.covariances(None, grid=...)`` rows (``masked`` and ``unmasked``
+        [cell, j, l, |m|, 3, N], ``noise_masked`` [cell, j, l, |m|, 3]) at sample cells of ``weights`` and bin
+        ``labels`` (for ``ric_transfer``, ``RICTransfer.transfer()``). The masked rows of each block are compressed by
+        an SVD across cells, keeping the rank that reproduces them to ``tol`` in the Frobenius norm."""
+        masked = rows["masked"] if ric_transfer is None else RICTransfer.apply(ric_transfer, rows["masked"], labels)
+        self.exact = {}
+        for j in range(config.J + 1):
+            for ell in range(config.L + 1):
+                for m in range(ell + 1):
+                    block = masked[:, j, ell, m]  # (C, 3, N)
+                    c, _, n = block.shape
+                    flat = block.transpose(1, 0, 2).reshape(3 * c, n) if m else block[:, 0]
+                    uu, ss, vt = np.linalg.svd(flat, full_matrices=False)
+                    tail = np.sqrt(np.cumsum(ss[::-1] ** 2)[::-1] / np.sum(ss**2))
+                    r = int(np.searchsorted(-tail, -tol)) if tail[-1] > tol else max(int(np.argmax(tail <= tol)), 1)
+                    r = max(r, 1)
+                    us = uu[:, :r] * ss[:r]
+                    u = np.stack([us[e * c:(e + 1) * c] for e in range(3)], axis=1) if m else \
+                        np.stack([us, us, np.zeros_like(us)], axis=1)
+                    v = np.broadcast_to(vt[:r], (3, r, n)).copy()
+                    if m == 0:
+                        v[2] = 0.0
+                    self.exact[self.key(config.sigma(j)), ell, m] = dict(
+                        weight=np.asarray(weights, dtype=float), u=u, v=v, noise=rows["noise_masked"][:, j, ell, m],
+                        vbox=rows["unmasked"][:, j, ell, m, 0].mean(axis=0))
+
+    def s1m_exact_arrays(self, keys):
+        """Stacked, rank-padded arrays of ``exact`` for ``s1m_exact_factor``: weight (B, C), u (B, C, 3, r), v (B, 3, r, N),
+        noise (B, C, 3), vbox (B, N), two (B,)."""
+        r = max(self.exact[k]["u"].shape[-1] for k in keys)
+        pad_u = lambda a: np.pad(a, ((0, 0), (0, 0), (0, r - a.shape[-1])))  # noqa: E731
+        pad_v = lambda a: np.pad(a, ((0, 0), (0, r - a.shape[1]), (0, 0)))  # noqa: E731
+        return (np.array([self.exact[k]["weight"] for k in keys]), np.array([pad_u(self.exact[k]["u"]) for k in keys]),
+                np.array([pad_v(self.exact[k]["v"]) for k in keys]), np.array([self.exact[k]["noise"] for k in keys]),
+                np.array([self.exact[k]["vbox"] for k in keys]), np.array([k[2] > 0 for k in keys]))
+
     def calibrate_s1m(self, key, survey, box, signal, box_noise):
         """delta of a block from paired mocks (``survey``, ``box`` (nmock,) measured on the support and unmasked on the
         same cells), at the box variances of the mocks' spectrum: delta = <survey / box> x F(T = 1) / F(T), the box
@@ -1277,20 +1453,27 @@ class SurveyWindow:
                 arrays[f"s1m_{sigma}_{ell}_{m}_{name}"] = value
         for key, value in self.s21m.items():
             arrays["s21m_" + "_".join(str(k) for k in key)] = value
+        for (sigma, ell, m), b in (self.exact or {}).items():
+            for name, value in b.items():
+                arrays[f"exact_{sigma}_{ell}_{m}_{name}"] = value
         np.savez(path, **arrays)
 
     @classmethod
     def load(cls, path) -> "SurveyWindow":
         f = np.load(path)
-        s1m, s21m = {}, {}
+        s1m, s21m, exact = {}, {}, {}
         for name in f.files:
             parts = name.split("_")
+            if parts[0] == "exact":
+                exact.setdefault((float(parts[1]), int(parts[2]), int(parts[3])), {})[parts[4]] = f[name]
+                continue
             if parts[0] == "s1m":
                 key = (float(parts[1]), int(parts[2]), int(parts[3]))
                 s1m.setdefault(key, {})["_".join(parts[4:])] = (float(f[name]) if f[name].ndim == 0 else f[name])
             elif parts[0] == "s21m":
                 s21m[(float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]))] = float(f[name])
-        return cls(s1m=s1m, s21m=s21m, q=float(f["q"]), veff=float(f["veff"]) if "veff" in f.files else None)
+        return cls(s1m=s1m, s21m=s21m, q=float(f["q"]), veff=float(f["veff"]) if "veff" in f.files else None,
+                   exact=exact or None)
 
     def s1m_arrays(self, keys):
         """(weight, transfer, noise) (B, nbin) and delta (B,) of the blocks ``keys``, zero-padded to one nbin."""
