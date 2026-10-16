@@ -152,6 +152,11 @@ def get_args():
     parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
                         help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
                              "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
+    parser.add_argument("--nbar-from", type=Path, default=None,
+                        help="directory with expected_<cap>.npy (--test measure --expected-mocks): the geometry's nbar(x) "
+                             "becomes the stacked randoms' CIC count, normalised to the same total, so that the FKP "
+                             "denominator, weights, noise maps and shot noise all follow the randoms (cells the randoms do "
+                             "not reach get nbar = 0 and no weight)")
     parser.add_argument("--nbar-scale", type=float, default=1.0,
                         help="multiply the geometry's nbar(x) (e.g. 0.5 for halo mocks sparser than the survey)")
     parser.add_argument("--halo-dir", type=Path, default=Path("data/quijote/halos_m13_z0.5"),
@@ -845,6 +850,11 @@ def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
     geometries = build_geometries(args)
+    if args.nbar_from is not None:
+        for cap, g in geometries.items():
+            stack = np.load(args.nbar_from / f"expected_{cap}.npy").astype(np.float64)
+            stack = np.where(g.support, stack, 0.0)
+            g.nbar = np.where(g.support, g.nbar, 0.0).sum() / stack.sum() * stack
     if args.nbar_scale != 1.0:  # a sparser tracer in the same geometry (the cache keeps the survey's nbar)
         for g in geometries.values():
             g.nbar = g.nbar * args.nbar_scale

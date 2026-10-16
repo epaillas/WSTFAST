@@ -767,18 +767,36 @@ class LambdaWindow:
         return out
 
 
-def noise_variance_maps(sigma2: np.ndarray, config: WSTConfig, support: np.ndarray, lattice: Lattice | None = None):
+def noise_variance_maps(sigma2: np.ndarray, config: WSTConfig, support: np.ndarray, lattice: Lattice | None = None,
+                        window: str | None = None):
     """Noise variance of a component at each support cell, (|psi_l|^2 * sigma_N^2 M)(x) averaged over m (white noise of
-    variance ``sigma2`` per cell, zero outside the support): {(j, l): (ncells,)}."""
-    lattice = lattice or Lattice(support.shape[0])
+    variance ``sigma2`` per cell, zero outside the support): {(j, l): (ncells,)}.
+
+    ``window="cic"``: the shot noise of a CIC-painted catalogue, whose nodes are correlated (2/3 and 1/6 per axis, the
+    aliased spectrum prod_i (1 - 2/3 sin^2(k_i c / 2)) / nbar, as ``S1mProjection.shot`` and ``GaussianMocks(window="cic")``):
+    |psi_l|^2 becomes sum_m psi_l^m (psi_l^m * C), with sigma2 slowly varying on the cell scale. White noise
+    overestimates the CIC shot noise of the data by 10-20% in lambda at sigma = 25 Mpc/h on 10 Mpc/h cells."""
     index = np.flatnonzero(support)
     n = support.shape[0]
+    if window == "cic":
+        lattice = getattr(lattice, "numpy", None) or (lattice if isinstance(lattice, Lattice) else Lattice(n))
+        k = 2 * np.pi * np.fft.fftfreq(n)
+        a = 1 - 2 / 3 * np.sin(k / 2) ** 2
+        aliased = (a[:, None, None] * a[None, :, None] * a[None, None, :n // 2 + 1]).astype(np.float32)
+    elif window is not None:
+        raise ValueError(f"unknown window {window!r}")
+    lattice = lattice or Lattice(n)
     fs = _rfft(np.where(support, sigma2, 0.0).astype(np.float32))
     out = {}
     for ell in range(config.L + 1):
         for j in range(config.J + 1):
-            kernel2 = _squared_kernel(lattice, config.sigma0 * config.step**j, ell) / (2 * ell + 1)
-            out[j, ell] = _irfft(_rfft(kernel2) * fs, n).ravel()[index]
+            sigma = config.sigma0 * config.step**j
+            if window == "cic":
+                radial = (-1j) ** ell * lattice.radial(sigma, ell)
+                kernel2 = sum(_irfft(radial * y, n) * _irfft(radial * y * aliased, n) for y in lattice.harmonics(ell))
+            else:
+                kernel2 = _squared_kernel(lattice, sigma, ell)
+            out[j, ell] = _irfft(_rfft(kernel2 / (2 * ell + 1)) * fs, n).ravel()[index]
     return out
 
 
@@ -1110,8 +1128,8 @@ class SurveyGeometry:
     @property
     def shotnoise(self) -> float:
         """Effective shot noise 1 / nbar of the support, averaged with the FKP weights [(Mpc/h)^3]."""
-        w = self.weights[self.support]
-        return float(np.sum(w / self.nbar[self.support]) / np.sum(w))
+        w, nbar = self.weights[self.support], self.nbar[self.support]
+        return float(np.sum(np.where(nbar > 0, w / np.where(nbar > 0, nbar, 1.0), 0.0)) / np.sum(w))
 
     @classmethod
     def cone(cls, nmesh: int, boxsize: float, observer, half_angle: float, rmin: float, rmax: float, nbar_of_r,
