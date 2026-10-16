@@ -1186,9 +1186,14 @@ def box_to_survey(positions, boxsize: float, geometry: SurveyGeometry, displacem
     The box (``positions`` (N, 3) in [0, boxsize) Mpc/h, real space) is tiled from the mesh offset to cover the mesh.
     With ``displacements`` (N, 3) [Mpc/h], the redshift-space shift of each object (velocity (1 + z) / H(z)), objects
     move by its projection on the line of sight: from the observer (``los="local"``) or z (``los="z"``). Objects are
-    then kept with the probability ``geometry.sampling`` of their cell, and the counts are normalised by their expected
-    value: delta = counts / (p(x) nbar V_cell) - 1, everywhere (the support is applied by the measurement).
+    then kept with the probability ``geometry.sampling`` of their nearest cell, and the CIC counts are normalised by
+    their expected value, delta = counts / (nbar V_cell (p * K)) - 1, everywhere (the support is applied by the
+    measurement). K = [1/8, 3/4, 1/8] per axis is the CIC response of a node to objects uniform in the nearest cells:
+    nbar(x) jumps from cell to cell with the angular completeness, and p alone would leave a fixed additive pattern
+    (p * K) / p - 1 in delta (36% rms on the DR1 support, 3-19% too high S1m of halo mocks).
     """
+    from scipy.ndimage import convolve1d
+
     positions = np.asarray(positions, dtype=np.float64)
     n, cell = geometry.nmesh, geometry.cellsize
     ntile = int(np.ceil(geometry.boxsize / boxsize))
@@ -1212,7 +1217,10 @@ def box_to_survey(positions, boxsize: float, geometry: SurveyGeometry, displacem
         keep = rng.random(len(x)) < prob[cells[:, 0], cells[:, 1], cells[:, 2]]
         kept.append(x[keep])
     counts = paint_cic_weighted(np.concatenate(kept), None, n, geometry.boxsize, geometry.offset)
-    return (counts / (prob * nbar * cell**3) - 1.0).astype(np.float32)
+    expected = prob
+    for axis in range(3):
+        expected = convolve1d(expected, [0.125, 0.75, 0.125], axis=axis, mode="nearest")
+    return (counts / (expected * nbar * cell**3) - 1.0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

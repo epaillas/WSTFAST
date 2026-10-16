@@ -465,13 +465,51 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
     - For the ~5% offset: open. Candidates are nuisances taken from the 3.9 Mpc/h box fit, the noise of the thinned
       halos, the survey emulator's fixed 0.06 eV neutrino and its ω_b against Quijote (≲ 1%), and CIC at 10 Mpc/h.
 
+**Box-model diagnostics (2026-10-16): the W4 offset is an artefact of the halo mocks, not of the model.**
+- **Data ladder.** The same Quijote halo boxes (NGC pairs, boxes 2i) measured step by step from the 3.9 Mpc/h periodic
+  baseline to the survey-mesh parent box (`NGC_box`), S1m, paired ratios. Values are for l = 0 at σ = 25 → 71 Mpc/h, or
+  the range over entries:
+
+  | Step | Data ratio | Model ratio |
+  |---|---|---|
+  | 3.9 Mpc/h, survey config, re-measured | 1 exactly | |
+  | 10 Mpc/h periodic (CIC) | 0.99–1.00 (0.96 at j0 l4) | 0.98–0.99 (0.95 at j0 l4): 1.1% low, constant |
+  | Tiled onto the survey mesh, los z | ≤ 0.4% (≤ 1% at l2, σ 71) | (not modelled) |
+  | Thinned to nbar(x), **old normalisation** | +4–7%, l0: +4 / 7 / 12 / 21% | |
+  | Thinned to nbar(x), **CIC-consistent normalisation** | +1.1–3.2% | +1.1–3.9% (the larger shot noise) |
+  | Local line of sight | ≤ 0.4%, but l2 m0 at σ 50 / 71: −2 / −4% (8 boxes, to check) | |
+
+- **Cause.** `box_to_survey` kept objects with the probability p of their nearest cell, but painted them with CIC and
+  normalised by p nbar V_cell. nbar(x) jumps from cell to cell with the angular completeness (nside 128). The true
+  expected CIC count is nbar V (p * K), K = [1/8, 3/4, 1/8] per axis, and (p * K)/p − 1 has 36% rms on the DR1
+  support (max ×9). The mocks therefore carried a fixed additive pattern in δ, following the mask and the radial shell
+  edges. It gives the +3–7% everywhere and the large l = 0 excess at σ = 50–71. It is not the 1 Gpc/h tiling (≤ 0.4%).
+- **Fix** (`box_to_survey`): normalise by the CIC-convolved expectation. On 8 boxes the survey-mesh parent box now
+  matches the model to a mean of +0.85% and an rms of 0.85% over the 60 S1m entries (before: +5%, up to +20%).
+- **The remaining +0.85%** is the survey emulator's c000 fiducial against the Quijote truth. The 0.06 eV neutrino and
+  the Abacus ω_b lower P_cb by 2.5% (CLASS, k = 0.05–0.2), which is ≈ 1% in S1m. This is right for Abacus; for W4
+  against Quijote it is a known ~1% offset (a Quijote-fiducial survey emulator would remove it).
+- **Consequences.** The halo δ (0.98–1.08), `halos_calibration_0-274.npz`, the `*_halodelta` windows and W4 all
+  used the old mocks and must be redone (300 pairs at NERSC, ~2 h on 3 A100s). The window validation on halos
+  (survey/model tracks box/model to 0.5%) stands, since both sides had the pattern.
+- **Abacus is not explained by this.** The FKP field (n_g − α n_r)/(nbar V) has no additive term, since α n_r is the
+  true expectation. The nbar(cell) mismatch, α n_r/(nbar V), is ~20% rms after removing the random shot noise (2
+  files) and only multiplies δ. Its estimated effect on S1m is ≲ 0.5% (extra white noise ~var(Q) σ²_cell V_cell); not
+  measured, since a per-cell α n_r denominator needs all 18 random files.
+- **Abacus 25-mock mean, profiles** (Gaussian δ, analytic covariance + calibration covariance, baseline + AP):
+  - free: ω_cdm 0.1032 ± 0.0022, logA 3.213 ± 0.047, h 0.718 ± 0.006, χ² 1278 / 197 (c_v 2.3, b1 1.67);
+  - c000 fixed: χ² 1406 / 200 (Δχ² = 128; c_v 2.0, b1 1.94).
+  - **The caps pull in opposite directions** (diagonal residuals): NGC data below the model (−2 to −7σ of the mean,
+    mostly l = 0 and σ ≥ 50), SGC above it (+3 to +5σ at σ = 25–35, l ≥ 1). Fixing c000 helps NGC and worsens SGC.
+    So the problem is cap-dependent (window δ, RIC, FKP normalisation), not the box model. c_v ≈ 2 against 0.96 for halos
+    (HOD satellites) is the other candidate, but it is cap-independent.
+
 **Next:**
-1. **Box-model diagnostics** (local):
-   - compare the same halos measured at 3.9 Mpc/h (the baseline data, which the model fits) and on the 10 Mpc/h survey
-     mesh (`partial_halos.npz` `<cap>_box`), which isolates CIC, tiling and thinning;
-   - fit the box part alone (window off) on the survey mesh.
-2. Once the offset is understood: the 25-mock Abacus fit with the Gaussian and halo δ (NUTS, baseline + AP).
-3. Recompute the analytic covariance at that best fit. A survey emulator with `--ap-order 3` (the baseline's full AP).
+1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
+   fiducial offset in mind, or a Quijote-fiducial survey emulator).
+2. Abacus cap split: per-cap profiles on the 25-mock mean; the measured α n_r / (nbar V) at NERSC (18 random files)
+   and an Abacus measurement with that denominator; fit with the new halo δ.
+3. Then the NUTS 25-mock fit, the analytic covariance at its best fit, and a survey emulator with `--ap-order 3`.
 4. The S1m goodness of fit (option 3 for now: the analytic covariance for parameters only) and the EZmock covariance (C1).
 
 ## 8. End-to-end pipeline (design, 2026-10-14)
