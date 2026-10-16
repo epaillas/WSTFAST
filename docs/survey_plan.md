@@ -577,6 +577,42 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
   - the density dependence of δ (halo mocks at n̄/2; the transfer by Gaussian δ ratios did not help);
   - the analytic covariance, still at the early, biased best fit.
 
+**Exact first-layer window (2026-10-16/17, `survey.CellWindow`, commits eea3862–16ffa2c): no calibration at the
+variance level.**
+- **Idea.** The rotated components (X_m, X_−m) at a cell are linear in the field, so their covariance is linear in the
+  spectrum: C_mm'(x) = (1/N) Σ_k ĝ_m ĝ_m'^* P(k, μ_x) + Σ_y g_m g_m' σ²_N(y), with g = D(R_x) ψ(x − ·) W the masked,
+  rotated wavelet. A sub-box FFT of g (2 × 8σ_j on a side) gives it exactly, including the correlation of ±m near an
+  edge and the local shot noise (white or CIC); the Gaussian moment of each block follows from the 2 × 2 eigenvalues,
+  cell by cell. It is DESI's P(k) window (from the randoms, linear in P, independent of cosmology and tracer) one
+  level down, at the variances. It replaces the coverage × c(f) transfer and the Gaussian-mock δ; what it does not
+  contain is the non-Gaussian edge effect (the Edgeworth part), left for a cumulant transfer or a mock test.
+- **Cusp correction.** The sub-lattice sum misses the |k| cusp of P at the origin (the periodic images of ξ at the
+  sub-box size: shells converging as Σ n²·n⁻⁴). Per kernel pair: + ĝ_a(0) ĝ_b(0) E(R), E the exact lattice error of a
+  Gaussian envelope e^{−k²R²} (full mesh minus sub-lattice, the latter about the cell's line of sight) with R matched to
+  the pair's second moment. Unmasked kernels then reproduce `signal_variances` to 5e-4 at pad 2 (l = 0 was 1.2% off).
+- **Toy test** (plane edge, 96³, 100 Gaussian mocks): predicted masked / box S1m ratios within ≤ 0.07% of the mocks
+  (inside the mock noise) against a 2–7% suppression, at n̄ = 4e-4 and with negligible noise. Before the cusp
+  correction the masked kernels near the edge were 0.1% off.
+- **DR1 NGC/SGC** (`--test exact`: 38 paired Gaussian mocks with and without the RIC, kernels at 16 cells per
+  (distance, density) bin, 1152 cells): residual 0.31% rms (NGC) / 0.77% (SGC), coherent across blocks. A half-split of
+  the sample shows it is the **sampling noise of the cell sample** (implied 0.34% / 0.48%), not the kernel.
+  - **Control variate** (`CellWindow.control_variate`): the coverage model (f λ_box + λ_N, independent components) on
+    every support cell plus the exact − model mean over the samples: 0.20% / 0.29% rms, with an implied sampling noise
+    of 0.08% / 0.15% and a mock noise of 0.11% / 0.16%. A run with 80 cells per bin is in progress (NERSC CPU).
+  - **RIC**: `survey.RICTransfer`, the per-bin ratio of masked component variances with and without the constraint on
+    32 signal-only Gaussian mocks (`--stage ric`, GPU); it reproduces the measured RIC shift to ≲ 0.1%. Linear, so
+    tracer-independent; its spectrum dependence is second order in a < 1% effect.
+- **Likelihood.** Rows of every covariance entry on the emulator's (k, μ) grid (`covariances(None, grid=RSDGrid)`,
+  with the cusp correction as rows and a (k/k_max)^−2.2 tail for the modes beyond k_max that masked kernels reach:
+  rows match the callable kernels to 2e-4), compressed by an SVD across cells (rank ≤ 18 at 1e-4) in
+  `SurveyWindow.exact`; `s1m_exact_factor` (JAX) evaluates the per-cell eigenvalue moments against the box moment at
+  the theory's effective noise (4e-5 against the direct computation on the toy; AP acts on the box part only).
+  `S1mTheory` uses it when the window file has an exact part (`dr1_window --test products --exact`: CIC noise, RIC
+  transfer). The S21m window stays the calibrated K for now. Costs: ~12 s per cell for the kernels, 13 s for the rows,
+  ~10 min once for the envelope rows; 120 processes on a Perlmutter CPU node.
+- **Next:** the 80-cells-per-bin test; the Abacus fit with the exact window and δ = 1; the cumulant (non-Gaussian
+  edge) transfer; the second layer.
+
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
    fiducial offset in mind, or a Quijote-fiducial survey emulator).
