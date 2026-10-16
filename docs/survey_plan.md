@@ -534,10 +534,29 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
   0.1172 ± 0.0033, logA 3.026 ± 0.065, **h 0.718 ± 0.0085 (truth 0.6711, +5.5σ)**, α₀ −0.48, χ² 424 / 197 (was
   2523). This is the same failure as Abacus, in a controlled test. S1m alone gives h 0.7125 and α₀ −0.51; the residuals
   grow with |m| at every (σ, l), i.e. the data have relatively more m ≥ 1 than m = 0.
-- **Lead: the local line of sight.** On 8 paired halo boxes, the local-LOS parent box against the z-LOS one changes
-  m = 0 by −2.5 ± 1.2% (l 1) and −3.9 ± 1.2% (l 2) at σ = 71, and m ≥ 1 by up to +1%. Neither δ (both sides local) nor
-  the plane-parallel box model contains it. The 8-box correction is too noisy to test (χ² worse). 300 pairs with
-  `--test halos --box-only --box-los-z` are running (NERSC, `dr1_halos_wa_*`).
+- **Not the local line of sight.** 300 paired halo boxes (`--test halos --box-only --box-los-z`, `dr1_halos_wa_*`):
+  the local-LOS parent box against the z-LOS one differs by ≤ 0.3% for S1m (mostly 0.1–0.2%, ≲ 2σ) and ≤ 0.6% for
+  S21m. An 8-box estimate of −4% (l 2, m 0, σ 71) was noise.
+- **The cause on halos: δ was calibrated at the wrong signal.** `SurveyWindow.calibrate_s1m` takes F(T=1)/F(T) at
+  the box variances of the calibration spectrum (`--test products`: the Gaussian fiducial, linear Kaiser b = 2). On
+  the 25 held-out halo pairs at the truth, (survey / window model) / (box / plain model) was up to +1% (mean +0.45%,
+  growing with l and |m|; pair error 0.03–0.3%), which is the W4 residual pattern. The window factor's signal
+  dependence does not carry δ from a linear Gaussian field to halos at the 1% level.
+  - **Recalibration at the tracer's signal**: r = that ratio on pairs 0–274 at the truth (+ box-fit nuisances), δ → δ r
+    (`dr1_window_products_halos_v2_recal`). On pairs 275–299 the residual is then −0.1% mean, 0.12–0.17% rms.
+  - **W4 passes**: ω_cdm 0.1225 ± 0.0037, logA 3.113 ± 0.069, h 0.673 ± 0.011 (truth 0.1209, 3.061, 0.6711),
+    α₀ +0.15, χ² 150 / 197. S1m only: 0.1229, 3.136, 0.668, χ² 119 / 104. The slightly high logA is the direction of
+    the ~1% c000-fiducial offset of the survey emulator.
+- **Abacus with the recalibrated halo δ** (`dr1_window_products_cic_halorecal`): joint ω_cdm 0.1267 ± 0.0029, logA
+  3.110, h 0.695 ± 0.008, χ² 494 / 197 (was 1285). NGC alone: 0.1207 ± 0.0036, 3.075, 0.689 ± 0.012, χ² 168 / 83.
+  SGC alone: 0.1292 ± 0.0051, 3.045, 0.716 ± 0.016, χ² 191 / 83. **SGC carries the remaining bias**, and α₀ ≈ +1 to
+  +1.8 is too high.
+- **Density dependence of δ** (paired Gaussian mocks at n̄/2, `dr1_lambda_paired_half_*`, 156+ pairs):
+  δ_G(n̄)/δ_G(n̄/2) = 1.001–1.008 (mean +0.45%). The halo δ is at n̄/2 and Abacus at n̄, but transferring it with this
+  ratio does not help (joint χ² 525, NGC χ² 218, SGC unchanged), so this stays open.
+- **Next:** Abacus measured with the stacked randoms of 12 mocks as the FKP denominator (`--test measure
+  --expected-mocks`, NERSC; the mocks share the random RA/Dec), refit; the SGC-specific pieces (denominator, RIC
+  region S, edges).
 
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
