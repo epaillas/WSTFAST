@@ -375,8 +375,9 @@ def plot_power_fit(path: Path, likelihood, dataset: PowerDataset, covariance: np
 
 def plot_triangle(path: Path, runs: dict, params=("omega_cdm", "logA", "h"), truth: dict | None = None,
                   title: str = ""):
-    """Triangle plot of the posteriors of ``runs`` ({legend: samples.h5 of fit_rsd.py}) in ``params``, with the
-    ``truth`` marked; the chains' first half is dropped as burn-in."""
+    """Triangle plot of the posteriors of ``runs`` ({legend: samples.h5 of fit_rsd.py, or a list of chain files, e.g.
+    the chains/samples_<i>.h5 of a run in progress}) in ``params``, with the ``truth`` marked; the chains' first half
+    is dropped as burn-in."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -387,8 +388,10 @@ def plot_triangle(path: Path, runs: dict, params=("omega_cdm", "logA", "h"), tru
              "c_v": "c_v"}
     gd = []
     for legend, file in runs.items():
-        chains = Samples.read(str(file))
-        chains = chains if isinstance(chains, list) else [chains]
+        chains = []
+        for f in (file if isinstance(file, (list, tuple)) else [file]):
+            read = Samples.read(str(f))
+            chains += read if isinstance(read, list) else [read]
         values = [np.concatenate([np.asarray(c[name])[len(np.asarray(c[name])) // 2:] for c in chains]) for name in params]
         gd.append(MCSamples(samples=np.column_stack(values), names=list(params),
                             labels=[latex.get(n, n) for n in params], label=legend))
