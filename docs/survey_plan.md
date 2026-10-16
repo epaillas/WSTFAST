@@ -4,8 +4,9 @@ Status: planning draft, 2026-10-12. Nothing here is implemented yet.
 
 Goal: fit the halo/galaxy WST baseline to mock catalogues with a realistic footprint and radial selection n(z). The
 baseline is S1m (σ ≥ 25 Mpc/h, q = 0.8) + S21m (σ1 ≥ 25, σ2 ≥ 70 Mpc/h), with cubic biases, the shared Fingers-of-God
-counterterm c_v of both layers, the non-Gaussian second-layer template and a free white term W (now consistent with zero):
-`scripts/fit_halo_baseline.sh` (since 2026-10-14).
+counterterm c_v of both layers, the non-Gaussian second-layer template, a free white term W (now consistent with zero)
+and Alcock-Paczynski distortions in every piece of the data vector (AP-polynomial emulator, since 2026-10-15):
+`scripts/fit_halo_baseline.sh` (`--no-ap` for the box fits without AP).
 After the mocks, the same pipeline should run on data. This note lists what assumes a periodic box today, how to
 remove each assumption, and the validation ladder that has to pass before data.
 
