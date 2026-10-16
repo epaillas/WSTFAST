@@ -1099,26 +1099,82 @@ def _cellwindow_chunk(which):
     return window._covariances(spectra, ells, grid, which)
 
 
-def sample_cells(geometry: SurveyGeometry, per_bin: int = 64, ndistance: int = 24, ndensity: int = 3, seed: int = 0):
-    """Stratified sample of support cells for ``CellWindow``: ``per_bin`` cells per bin of distance to the edge
-    (quantiles, ``ndistance`` bins) and density (``ndensity``), drawn with probability proportional to the FKP weight
-    within the bin. Returns (flat cell indices, weights) with weights summing to the bins' FKP weight sums, so that a
-    weighted mean over the sample estimates the weighted mean over the support."""
-    rng = np.random.default_rng(seed)
+def cell_bins(geometry: SurveyGeometry, ndistance: int = 24, ndensity: int = 3) -> np.ndarray:
+    """Bin label of every support cell (order of ``np.flatnonzero(support)``): quantile bins of the distance to the
+    edge (``ndistance``) times quantile bins of the density (``ndensity``)."""
     index = np.flatnonzero(geometry.support)
     distance = distance_to_edge(geometry.support).ravel()[index]
     nbar = geometry.nbar.ravel()[index]
-    w = geometry.weights.ravel()[index]
     db = np.digitize(distance, np.unique(np.quantile(distance, np.linspace(0, 1, ndistance + 1)[1:-1])))
     nb = np.digitize(nbar, np.unique(np.quantile(nbar, np.linspace(0, 1, ndensity + 1)[1:-1])))
-    _, label = np.unique(db * (ndensity + 1) + nb, return_inverse=True)
-    cells, weights = [], []
+    return np.unique(db * (ndensity + 1) + nb, return_inverse=True)[1].ravel()
+
+
+def sample_cells(geometry: SurveyGeometry, per_bin: int = 64, ndistance: int = 24, ndensity: int = 3, seed: int = 0):
+    """Stratified sample of support cells for ``CellWindow``: ``per_bin`` cells per bin of ``cell_bins``, drawn with
+    probability proportional to the FKP weight within the bin. Returns (flat cell indices, weights, bin labels) with
+    weights summing to the bins' FKP weight sums, so that a weighted mean over the sample estimates the weighted mean
+    over the support."""
+    rng = np.random.default_rng(seed)
+    index = np.flatnonzero(geometry.support)
+    w = geometry.weights.ravel()[index]
+    label = cell_bins(geometry, ndistance, ndensity)
+    cells, weights, labels = [], [], []
     for b in range(label.max() + 1):
         members = np.flatnonzero(label == b)
         pick = rng.choice(members, size=min(per_bin, len(members)), replace=False, p=w[members] / w[members].sum())
         cells.append(index[pick])
         weights.append(np.full(len(pick), w[members].sum() / len(pick)))
-    return np.concatenate(cells), np.concatenate(weights)
+        labels.append(np.full(len(pick), b))
+    return np.concatenate(cells), np.concatenate(weights), np.concatenate(labels)
+
+
+class RICTransfer:
+    """Effect of the radial integral constraint on the first-layer component variances, per bin of ``cell_bins``, from
+    paired signal-only Gaussian mocks: T_m = sum |X'_m|^2 / sum |X_m|^2 over the cells of a bin and the mocks, with X'
+    the masked components of the constrained field and X those of the unconstrained one (``LambdaWindow.squares``).
+    The constraint is linear, so T is independent of the tracer; its dependence on the spectrum is second order in a
+    shift of < 1%. ``apply`` scales the exact masked covariances of ``CellWindow`` (signal part) by it."""
+
+    def __init__(self, window: "LambdaWindow", labels: np.ndarray, nbins: int | None = None):
+        self.window, self.labels = window, np.asarray(labels)
+        self.nbins = int(self.labels.max()) + 1 if nbins is None else nbins
+        self.constrained = {b: np.zeros((2 * b[1] + 1, self.nbins)) for b in window.blocks}
+        self.plain = {b: np.zeros((2 * b[1] + 1, self.nbins)) for b in window.blocks}
+        self.count = 0
+
+    def add(self, constrained: np.ndarray, field: np.ndarray):
+        support = self.window.support
+        for store, values in ((self.constrained, constrained), (self.plain, field)):
+            for block, x2 in self.window.squares(np.where(support, values, 0.0)):
+                for i in range(x2.shape[0]):
+                    store[block][i] += np.bincount(self.labels, weights=x2[i], minlength=self.nbins)
+        self.count += 1
+
+    def transfer(self) -> dict:
+        return {b: self.constrained[b] / np.where(self.plain[b] > 0, self.plain[b], 1.0) for b in self.window.blocks}
+
+    @staticmethod
+    def apply(transfer: dict, masked: np.ndarray, labels: np.ndarray) -> np.ndarray:
+        """Masked signal covariances [..., cell, j, l, |m|, 3] of sample cells with bin ``labels``, scaled by the
+        transfer of their components (C_mm by T_m, C_-m-m by T_-m, C_m-m by sqrt(T_m T_-m))."""
+        out = np.array(masked, dtype=float)
+        for (j, ell), t in transfer.items():
+            for m in range(ell + 1):
+                tp, tm = t[ell + m][labels], t[ell - m][labels]
+                out[..., j, ell, m, 0] *= tp
+                out[..., j, ell, m, 1] *= tm
+                out[..., j, ell, m, 2] *= np.sqrt(tp * tm)
+        return out
+
+    def save(self, path):
+        np.savez(path, labels=self.labels, count=self.count,
+                 **{f"t_{j}_{ell}": v for (j, ell), v in self.transfer().items()})
+
+    @staticmethod
+    def load(path) -> dict:
+        f = np.load(path)
+        return {tuple(int(x) for x in k.split("_")[1:]): f[k] for k in f.files if k.startswith("t_")}
 
 
 def window_ratio(mocks: GaussianMocks, config: WSTConfig, support: np.ndarray, realizations: int = 4, seed: int = 0,

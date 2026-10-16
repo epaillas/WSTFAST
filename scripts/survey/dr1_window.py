@@ -152,8 +152,9 @@ def get_args():
     parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
                         help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
                              "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
-    parser.add_argument("--stage", choices=("mocks", "predict", "both"), default="both",
-                        help="exact: generate and measure the paired mocks, predict them with CellWindow, or both")
+    parser.add_argument("--stage", choices=("mocks", "ric", "predict", "both"), default="both",
+                        help="exact: generate and measure the paired mocks, calibrate the RIC transfer on signal-only "
+                             "mocks (--calibrate of them), predict the mocks with CellWindow, or all")
     parser.add_argument("--per-bin", type=int, default=16, help="exact: sample cells per (distance, density) bin")
     parser.add_argument("--processes", type=int, default=1, help="exact: forked workers of CellWindow")
     parser.add_argument("--nbar-from", type=Path, default=None,
@@ -808,9 +809,24 @@ def run_exact(args, geometries, setups, pk):
                 rows[cap + "_box"].append(args.measure(field, s["config"], moment_support=g.support, **common)["S1m"][0])
             print(f"exact mock {r}: {time.time() - t0:.0f} s", flush=True)
             np.savez(args.output / "partial_exact.npz", **{k: np.array(v) for k, v in rows.items()})
-    if args.stage == "mocks":
+    if args.stage in ("ric", "both"):
+        from wstfast.survey import RICTransfer, cell_bins
+
+        ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+        signal = mocks_of(geometries, pk, "fiducial", signal_only=True)
+        transfers = {cap: RICTransfer(LambdaWindow(s["config"], s["g"].support, s["los"], s["lattice"]), cell_bins(s["g"]))
+                     for cap, s in setups.items()}
+        for r in range(args.calibrate):
+            t0 = time.time()
+            fields = [signal[cap](seed=[400 + r, k]) for k, cap in enumerate(caps)]
+            for cap, field, constrained in zip(caps, fields, ric(*fields)):
+                transfers[cap].add(constrained, field)
+            print(f"ric transfer {r}: {time.time() - t0:.0f} s", flush=True)
+            for cap, t in transfers.items():
+                t.save(args.output / f"ric_transfer_{cap}.npz")
+    if args.stage in ("mocks", "ric"):
         return dict(nmocks=args.realizations)
-    from wstfast.survey import CellWindow, sample_cells
+    from wstfast.survey import CellWindow, RICTransfer, sample_cells
 
     spectra = {name: (lambda k, mu, b=b, f=f, a=a, t=t: (b + f * mu**2) ** 2 * spectrum(pk, a, t)(k))
                for name, (b, f, a, t) in VARIANTS.items()}
@@ -820,17 +836,31 @@ def run_exact(args, geometries, setups, pk):
         path = args.output / f"kernels_{cap}.npz"
         if path.exists():
             k = np.load(path)
-            cells, weights, cov = k["cells"], k["weights"], {n: k[n] for n in ("masked", "unmasked", "noise_masked", "noise_unmasked")}
+            cells, weights = k["cells"], k["weights"]
+            if "labels" in k.files:
+                labels = k["labels"]
+            else:  # kernels written before the bin labels were saved: the labels of the sample cells
+                from wstfast.survey import cell_bins
+
+                position = {c: i for i, c in enumerate(np.flatnonzero(g.support))}
+                labels = cell_bins(g)[[position[c] for c in cells]]
+            cov = {n: k[n] for n in ("masked", "unmasked", "noise_masked", "noise_unmasked")}
         else:
-            cells, weights = sample_cells(g, per_bin=args.per_bin, seed=0)
+            cells, weights, labels = sample_cells(g, per_bin=args.per_bin, seed=0)
             window = CellWindow(g, s["config"], cells, halfwidth=4.0, pad=2.0)
             t0 = time.time()
             cov = window.covariances(list(spectra.values()), processes=args.processes)
             print(f"{cap}: kernels at {len(cells)} cells in {time.time() - t0:.0f} s", flush=True)
-            np.savez(path, cells=cells, weights=weights, names=np.array(list(spectra)), **cov)
+            np.savez(path, cells=cells, weights=weights, labels=labels, names=np.array(list(spectra)), **cov)
         pred = {name: dict(masked=CellWindow.s1m(cov["masked"][i], cov["noise_masked"], weights, args.q),
                            box=CellWindow.s1m(cov["unmasked"][i], cov["noise_unmasked"], weights, args.q))
                 for i, name in enumerate(spectra)}
+        ric_path = args.output / f"ric_transfer_{cap}.npz"
+        if ric_path.exists():
+            transfer = RICTransfer.load(ric_path)
+            for i, name in enumerate(spectra):
+                pred[name]["ric"] = CellWindow.s1m(RICTransfer.apply(transfer, cov["masked"][i], labels),
+                                                   cov["noise_masked"], weights, args.q)
         mocks_path = args.output / "partial_exact.npz"
         if not mocks_path.exists():
             continue
@@ -839,13 +869,14 @@ def run_exact(args, geometries, setups, pk):
         n = len(masked)
         p = pred["fiducial"]
         for label, data in (("no RIC", masked), ("RIC", masked_ric)):
+            model = p["ric"] if label == "RIC" and "ric" in p else p["masked"]
             ratio = data / box
             mean, err = ratio.mean(0), ratio.std(0, ddof=1) / np.sqrt(n)
-            resid = p["masked"] / p["box"] / mean - 1
+            resid = model / p["box"] / mean - 1
             sigma = data.std(0, ddof=1) / data.mean(0)  # one survey
             z = resid * mean * box.mean(0) / data.std(0, ddof=1)
             ok = np.isfinite(resid)
-            absres = p["masked"] / data.mean(0) - 1
+            absres = model / data.mean(0) - 1
             summary[f"{cap}_{label}"] = dict(nmocks=n, ratio_resid_rms=float(np.sqrt(np.nanmean(resid[ok]**2))),
                                              ratio_resid_max=float(np.nanmax(np.abs(resid[ok]))),
                                              ratio_err_rms=float(np.sqrt(np.nanmean((err / mean)[ok]**2))),
@@ -855,7 +886,7 @@ def run_exact(args, geometries, setups, pk):
                   f" max {100 * summary[f'{cap}_{label}']['ratio_resid_max']:.3f}% (mock error rms {100 * summary[f'{cap}_{label}']['ratio_err_rms']:.3f}%);"
                   f" in sigma_survey: rms {summary[f'{cap}_{label}']['z_rms']:.3f} max {summary[f'{cap}_{label}']['z_max']:.3f};"
                   f" absolute rms {100 * summary[f'{cap}_{label}']['abs_resid_rms']:.3f}%", flush=True)
-            if label == "no RIC":
+            if label == "no RIC" or "ric" in p:
                 for jj in range(4):
                     print(f"   j{jj}: " + " ".join(f"l{l}m{mm}:{100 * resid[jj, l, mm]:+.2f}" for l in range(5) for mm in range(l + 1)))
         np.savez(args.output / f"results_{cap}.npz", **{f"{name}_{k}": v for name, d in pred.items() for k, v in d.items()})
