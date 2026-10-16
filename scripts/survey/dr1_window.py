@@ -137,10 +137,20 @@ def get_args():
                         help="measure: the complete Abacus mocks to measure (fit_rsd.py survey data)")
     parser.add_argument("--measure-randoms", type=int, nargs="+", default=list(range(18)),
                         help="measure: random files of each mock")
+    parser.add_argument("--noise-window", choices=("white", "cic"), default="white",
+                        help="products: shot noise of the window's noise maps; cic for CIC-painted catalogues (the data and "
+                             "halo mocks; survey.noise_variance_maps), white for the Gaussian mocks")
+    parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
+                        help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
+                             "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
     parser.add_argument("--nbar-scale", type=float, default=1.0,
                         help="multiply the geometry's nbar(x) (e.g. 0.5 for halo mocks sparser than the survey)")
     parser.add_argument("--halo-dir", type=Path, default=Path("data/quijote/halos_m13_z0.5"),
                         help="halos: r<i>.npz (positions, displacements [Mpc/h]) of Quijote halo boxes of 1 Gpc/h")
+    parser.add_argument("--box-los-z", action="store_true",
+                        help="halos: also measure each parent box with RSD and line of sight along z (<cap>_boxz, "
+                             "<cap>_nonez): the plane-parallel reference of the box model, for the wide-angle factor")
+    parser.add_argument("--box-only", action="store_true", help="halos: skip the survey measurement")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -416,6 +426,11 @@ def run_products(args, geometries, setups, pk):
         weights = g.weights.ravel()[window.index]
         product = SurveyWindow.build(window, correction, s["noise"], weights, q=args.q)
         product.veff = g.veff
+        cic = SurveyWindow.build(window, correction, s["noise_data"], weights, q=args.q) if "noise_data" in s else None
+        data_product = cic if args.noise_window == "cic" else product
+        if args.mock_noise == "cic":
+            product = cic
+        data_product.veff = product.veff = g.veff
         # box variances of the calibration mocks' spectrum (the delta ratio needs them only through T and lambda_N)
         grid = getattr(s["lattice"], "numpy", s["lattice"])
         kphys = grid.kmag / g.cellsize
@@ -448,6 +463,11 @@ def run_products(args, geometries, setups, pk):
                 product.s21m[key] = float(ratio.mean())
                 ratios["s21m_" + "_".join(str(k) for k in key)] = ratio
         z = "-".join(f"{v:g}" for v in args.zrange)
+        if data_product is not product:  # delta (white-noise mocks against white maps) onto the CIC-noise histograms
+            for key, block in product.s1m.items():
+                data_product.s1m[key]["delta"] = block["delta"]
+            data_product.s21m = dict(product.s21m)
+            product = data_product
         product.save(args.output / f"window_z{z}_{cap}.npz")
         np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
         if ratios:  # calibration error of delta and K for fit_rsd --extra-covariance (one mock set per statistic)
@@ -669,25 +689,44 @@ def run_halos(args, geometries, setups, pk):
     ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
     keys21 = [(j1, j2, ell, m1, m2) for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
               for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
-    rows = {f"{cap}{suffix}": [] for cap in caps for suffix in ("", "_box", "_measured", "_none")}
+    suffixes = ("_box", "_none") + (("_boxz", "_nonez") if args.box_los_z else ()) + (() if args.box_only else ("", "_measured"))
+    rows = {f"{cap}{suffix}": [] for cap in caps for suffix in suffixes}
     for r in range(args.realizations):
         i = args.seed_offset + r
         t0 = time.time()
-        fields = []
+        fields, fields_z = [], []
         for k, (cap, g) in enumerate(geometries.items()):
             halos = np.load(args.halo_dir / f"r{2 * i + k:04d}.npz")
             fields.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
                                         los="local", seed=[i, k]))
-        for cap, survey, field in zip(caps, ric(*fields), fields):
+            if args.box_los_z:  # same thinning draws (same seed), RSD along z
+                fields_z.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
+                                              los="z", seed=[i, k]))
+        surveys = [None] * len(caps) if args.box_only else ric(*fields)
+        for n, (cap, survey, field) in enumerate(zip(caps, surveys, fields)):
             s, g = setups[cap], geometries[cap]
             common = dict(weights=g.weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
-            masked = args.measure(survey, s["config"], support=g.support, second_layer_bins=s["bins2"], **common)
             box = args.measure(field, s["config"], moment_support=g.support, **common)
-            s1, s2, b1, b2 = masked["S1m"][0], masked["S2m"][0], box["S1m"][0], box["S2m"][0]
-            rows[cap].append(s1)
+            b1, b2 = box["S1m"][0], box["S2m"][0]
+            if args.box_only:
+                s1 = b1  # S21m ratios of the box against its own S1m
+            else:
+                masked = args.measure(survey, s["config"], support=g.support, second_layer_bins=s["bins2"], **common)
+                s1, s2 = masked["S1m"][0], masked["S2m"][0]
+                rows[cap].append(s1)
+                rows[f"{cap}_measured"].append([s2[j1, j2, ell, m1, m2] / s1[j1, ell, m1]
+                                                for j1, j2, ell, m1, m2 in keys21])
             rows[f"{cap}_box"].append(b1)
-            rows[f"{cap}_measured"].append([s2[j1, j2, ell, m1, m2] / s1[j1, ell, m1] for j1, j2, ell, m1, m2 in keys21])
             rows[f"{cap}_none"].append([b2[j1, j2, ell, m1, m2] / s1[j1, ell, m1] for j1, j2, ell, m1, m2 in keys21])
+            if args.box_los_z:
+                bz = args.measure(fields_z[n], s["config"], moment_support=g.support, **dict(common, los="z"))
+                z1, z2 = bz["S1m"][0], bz["S2m"][0]
+                rows[f"{cap}_boxz"].append(z1)
+                rows[f"{cap}_nonez"].append([z2[j1, j2, ell, m1, m2] / z1[j1, ell, m1] if args.box_only
+                                             else z2[j1, j2, ell, m1, m2] / s1[j1, ell, m1]
+                                             for j1, j2, ell, m1, m2 in keys21])
+            if args.box_only:
+                continue
             metadata = dict(redshift=0.5, boxsize=g.boxsize, nmesh=g.nmesh, space=cap, nparticles=1,
                             shotnoise=g.shotnoise, tracer="quijote_halos_m13_cutsky", realization=i, cap=cap,
                             nbar_scale=args.nbar_scale)
@@ -789,6 +828,8 @@ def main():
         if args.test in ("lambda", "products"):
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
+            if args.test == "products" and "cic" in (args.noise_window, args.mock_noise):
+                setups[cap]["noise_data"] = noise_variance_maps(sigma2, config, g.support, lattice, window="cic")
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
                 covariance=run_covariance, halos=run_halos, denominator=run_denominator,
                 **{"lambda": run_lambda})
