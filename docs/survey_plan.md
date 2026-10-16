@@ -554,9 +554,28 @@ window error of 0.1σ of one survey is 0.5σ of the mean, so the criterion has t
 - **Density dependence of δ** (paired Gaussian mocks at n̄/2, `dr1_lambda_paired_half_*`, 156+ pairs):
   δ_G(n̄)/δ_G(n̄/2) = 1.001–1.008 (mean +0.45%). The halo δ is at n̄/2 and Abacus at n̄, but transferring it with this
   ratio does not help (joint χ² 525, NGC χ² 218, SGC unchanged), so this stays open.
-- **Next:** Abacus measured with the stacked randoms of 12 mocks as the FKP denominator (`--test measure
-  --expected-mocks`, NERSC; the mocks share the random RA/Dec), refit; the SGC-specific pieces (denominator, RIC
-  region S, edges).
+- **FKP denominator from stacked randoms** (`--test measure --expected-mocks 0..11`; the mocks share the random RA/Dec
+  and differ in Z, so the stack has ~1% angular noise per cell). It lowers S1m by 1.0% (NGC) and 1.6% (SGC).
+  With the recalibrated halo δ: joint **ω_cdm 0.1201 ± 0.0028, logA 3.066 ± 0.045**, h 0.708 ± 0.009 (+3.8σ),
+  χ² 431; without AP, h 0.701. Data `abacus_fit_N25_expected`, windows `dr1_window_products_cic_halorecal`. This is
+  the **current best setup**.
+- **The stack as the whole geometry** (`--nbar-from`: nbar, FKP weights, noise maps and shot noise from the stack;
+  data `abacus_lrg_z0.4-0.6_stacknbar`, halo mocks `dr1_halos_v3_*`, windows `dr1_window_products_stacknbar*`).
+  - W4 passes there too: 0.1226 ± 0.0040, 3.089 ± 0.074, 0.677 ± 0.013, χ² 156.
+  - But the NGC halo recalibration needs r = 0.83–0.93 (SGC 0.985–1.002), so the NGC window products in this
+    geometry are inconsistent. **To find.**
+  - Abacus: joint 0.1261, 2.997, 0.702, χ² 632; the errors are 3× smaller than elsewhere, so the profile is suspect.
+    NGC: 0.1178, 3.031, h 0.703; SGC: 0.1251, 3.034, h 0.715. Not better than the best setup.
+  - Dividing by the stacked expectation but keeping the cell-centre weights gave near-zero-expectation cells huge
+    noise (NGC shot noise 2667 → 14684), which is why the geometry has to change as a whole.
+- **One-survey covariance** (NUTS, mean of 25 mocks, no `--covariance-of-mean`, `abacus_N25_single_*`): best setup
+  ω_cdm 0.1153 ± 0.0088 (−0.5σ), logA 2.907 ± 0.120 (−1.1σ), h 0.687 ± 0.027 (+0.5σ); original setup −1.9σ,
+  −0.9σ, +1.3σ. So, at the precision of one survey, the best setup is unbiased in ω_cdm and h.
+- **Open:**
+  - h is +2–4σ high at 25× the volume in every variant, with α₀ ≈ +0.6–1.5;
+  - the NGC window in the stack geometry;
+  - the density dependence of δ (halo mocks at n̄/2; the transfer by Gaussian δ ratios did not help);
+  - the analytic covariance, still at the early, biased best fit.
 
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
