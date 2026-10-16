@@ -145,6 +145,10 @@ def get_args():
     parser.add_argument("--noise-window", choices=("white", "cic"), default="white",
                         help="products: shot noise of the window's noise maps; cic for CIC-painted catalogues (the data and "
                              "halo mocks; survey.noise_variance_maps), white for the Gaussian mocks")
+    parser.add_argument("--expected-file", type=Path, nargs="*", default=[],
+                        help="products: expected_<cap>.npy of a --test measure --expected-mocks run (one per cap, in the "
+                             "order NGC, SGC): the noise maps get the shot noise 1 / (expected count) of the data, as the "
+                             "FKP field divided by that expectation has")
     parser.add_argument("--mock-noise", choices=("white", "cic"), default="white",
                         help="products: shot noise of the --paired-mocks, against which delta is calibrated (white: the "
                              "Gaussian mocks; cic: catalogue mocks, e.g. the halo mocks of --test halos)")
@@ -507,6 +511,14 @@ def run_products(args, geometries, setups, pk):
     return summary
 
 
+def expected_shotnoise(g, expected) -> float:
+    """FKP-weighted mean of 1 / nbar_true [(Mpc/h)^3] over the support, nbar_true = expected count / V_cell (as
+    SurveyGeometry.shotnoise for nbar)."""
+    w, e = g.weights[g.support], expected[g.support]
+    inv = np.where(e > 0, g.cellsize**3 / np.where(e > 0, e, 1.0), 0.0)
+    return float(np.sum(w * inv) / np.sum(w))
+
+
 def run_measure(args, geometries, setups, pk):
     from wstfast.data import save_measurement
     from wstfast.survey import desi_catalogue_path, read_desi_catalogue, sky_to_cartesian
@@ -518,6 +530,10 @@ def run_measure(args, geometries, setups, pk):
         if not args.expected_mocks:
             break
         t0 = time.time()
+        saved = args.output / f"expected_{cap}.npy"
+        if saved.exists():
+            stacks[cap] = np.load(saved)
+            continue
         stack = np.zeros((g.nmesh,) * 3)
         for mock in args.expected_mocks:
             for i in args.measure_randoms:
@@ -525,6 +541,8 @@ def run_measure(args, geometries, setups, pk):
                 stack += paint_cic_weighted(sky_to_cartesian(r["RA"], r["DEC"], r["Z"]), None, g.nmesh, g.boxsize,
                                             g.offset)
         stacks[cap] = stack
+        args.output.mkdir(parents=True, exist_ok=True)
+        np.save(saved, stack.astype(np.float32))
         print(f"{cap}: stacked randoms of {len(args.expected_mocks)} mocks, {stack.sum():.3g}, {time.time() - t0:.0f} s",
               flush=True)
     for mock in args.measure_mocks:
@@ -540,11 +558,12 @@ def run_measure(args, geometries, setups, pk):
             positions = sky_to_cartesian(data["RA"], data["DEC"], data["Z"])
             rpositions = np.concatenate([sky_to_cartesian(r["RA"], r["DEC"], r["Z"]) for r in randoms])
             expected = len(positions) / stacks[cap].sum() * stacks[cap] if cap in stacks else None
+            shotnoise = g.shotnoise if expected is None else expected_shotnoise(g, expected)
             delta = g.fkp_field(positions, rpositions, expected=expected)
             out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=[args.q], los=s["los"],
                                lattice=s["lattice"], second_layer_bins=s["bins2"])
             metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
-                            nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=g.shotnoise,
+                            nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=shotnoise,
                             tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap,
                             expected_mocks=list(args.expected_mocks))
             save_measurement(path, out, s["config"], metadata)
@@ -851,7 +870,12 @@ def main():
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)
             if args.test == "products" and "cic" in (args.noise_window, args.mock_noise):
-                setups[cap]["noise_data"] = noise_variance_maps(sigma2, config, g.support, lattice, window="cic")
+                sigma2_data = sigma2
+                if args.expected_file:  # the data's own expectation (normalised to the geometry's total nbar V)
+                    e = np.load(args.expected_file[list(geometries).index(cap)]).astype(np.float64)
+                    e *= np.sum(np.where(g.support, g.nbar, 0.0)) * g.cellsize**3 / np.sum(np.where(g.support, e, 0.0))
+                    sigma2_data = np.where(g.support & (e > 0), 1.0 / np.where(e > 0, e, 1.0), 0.0)
+                setups[cap]["noise_data"] = noise_variance_maps(sigma2_data, config, g.support, lattice, window="cic")
     runs = dict(ric=run_ric, s21m=run_s21m, vector=run_vector, products=run_products, measure=run_measure,
                 covariance=run_covariance, halos=run_halos, denominator=run_denominator,
                 **{"lambda": run_lambda})
