@@ -660,6 +660,20 @@ variance level.**
   up to 1.7% at σ = 25) on top of the Gaussian residual: the non-Gaussian edge effect is still a calibrated factor.
   The profiles also showed that the exact factor is cheap once `_chi_moment` uses 16 nodes (22 ms with gradient per
   cap; 64 nodes were 10x slower for nothing: the integrand is periodic and analytic).
+- **Abacus fits with the exact window (2026-10-17, profiles, stacked-randoms data, analytic covariance of the
+  25-mock mean).** Histogram window with the halo δ (reference): ω_cdm 0.1201, logA 3.066, h 0.708, χ² 413.
+  Exact window, δ = 1: 0.1111 / 3.230 / 0.688, χ² 884 (at the reference best fit its S1m vector is 0.3–1.5% above
+  the reference's: the exact window is the Gaussian edge effect only, and the halo correction, 0.5–1.7% per block, is
+  4–13σ of the 25-mock mean). Exact window × δ_halo/δ_Gauss ("halo" mode, the exact window's own δ, e2eeced): the
+  profiles run to the h and α₀ bounds (0.6136, 2.0), χ² 982, also when started from the reference best fit, and at
+  the reference point the model has χ² 3118 although its S1m entries differ from the reference's by only ±0.5%: the
+  difference is an m-pattern (m = l blocks +0.2–0.7%, m < l −0.1–0.5%) that the covariance strongly penalises.
+  Rescaling the cells' noise to the data's maps makes it worse (χ² 3269 at the point), so the 5% noise-level
+  difference is not the cause. Reading: δ_halo/δ_Gauss does not transfer the non-Gaussian edge effect onto the exact
+  window (δ_halo was calibrated at the halo mocks' spectrum and noise, δ_Gauss at the Gaussian mocks'; the histogram's
+  own spectrum dependence does not cancel in the ratio). The clean step is to recalibrate the halo δ against the exact
+  window itself: exact factor at the halo mocks' spectrum (halo emulator at the Quijote fiducial, box best-fit biases)
+  and noise (n̄ × 0.5), δ_halo,exact = ⟨halo survey / box⟩ / exact. Pending, with the stack-geometry fits.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
