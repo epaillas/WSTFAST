@@ -1582,7 +1582,8 @@ class SurveyWindow:
         """An exact block in the per-block SVD form (``u`` (C, 3, r), ``v`` (3, r, N)) projected on the spectrum
         ``basis`` (nb, N): ``u`` (C, 3, nb), no ``v`` (the other arrays unchanged)."""
         out = {name: value for name, value in block.items() if name != "v"}
-        out["u"] = np.einsum("cer,ern->cen", block["u"], block["v"]) @ np.asarray(basis, dtype=float).T
+        bt = np.asarray(basis, dtype=float).T
+        out["u"] = np.stack([(block["u"][:, e] @ block["v"][e]) @ bt for e in range(3)], axis=1)  # BLAS, not einsum
         return out
 
     def s1m_exact_arrays(self, keys):
