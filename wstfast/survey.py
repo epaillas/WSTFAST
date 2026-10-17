@@ -1395,16 +1395,36 @@ def _chi_moment_xp(lam_a, lam_b, q, xp):
     return 2**p * xp.exp(gammaln(1 + p)) * xp.mean((lam_a[..., None] * c2 + lam_b[..., None] * (1 - c2)) ** p, axis=-1)
 
 
+def spectrum_basis(spectra: np.ndarray, tol: float = 1e-5, nmax: int | None = None) -> np.ndarray:
+    """Orthonormal basis (nb, N) of the spectra a fit can produce on the grid, from a sample of them (n, N)
+    (``calculators.sample_biased_grids``): the principal components of the first half, kept up to the smallest number
+    that reconstructs every spectrum of the second half to ``tol`` of its norm (at most ``nmax``). The exact window
+    stores its rows projected on it (``SurveyWindow.build_exact(basis=)``): a spectrum in the span gives the exact
+    per-cell variances, one outside gives them to the part of it in the span."""
+    spectra = np.asarray(spectra, dtype=float)
+    train, test = spectra[: len(spectra) // 2], spectra[len(spectra) // 2:]
+    _, _, vt = np.linalg.svd(train, full_matrices=False)
+    nmax = len(vt) if nmax is None else min(nmax, len(vt))
+    norm = np.linalg.norm(test, axis=1)
+    for nb in range(1, nmax + 1):
+        rec = (test @ vt[:nb].T) @ vt[:nb]
+        if np.all(np.linalg.norm(test - rec, axis=1) <= tol * norm):
+            break
+    return np.ascontiguousarray(vt[:nb])
+
+
 def s1m_exact_factor(hist, sample, pgrid, noise_scale, box_noise, two, q: float):
     """Survey / box ratio of the Gaussian part of S1m for blocks (B,) from ``SurveyWindow.exact``
     (``s1m_exact_arrays``), as a control variate: the coverage model lambda = f lambda_box + noise_scale lambda_N,
     with independent components, summed over every support cell through its histogram ``hist`` = (weight (B, nbin),
     transfer f (B, nbin), noise (B, nbin)), plus, over the ``sample`` cells = (weight (B, C), coverage (B, C), u
-    (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3), vbox (B, N), noise_model (B, C)), the exact moment minus the
+    (B, C, 3, r), v, noise (B, C, 3), vbox (B, N), noise_model (B, C)), the exact moment minus the
     coverage model's (at the model's own noise, noise_model): the
     exact covariance of (X_m, X_-m) is (C_mm, C_-m-m, C_m-m) = f lambda_box (1, 1, 0) + u (v pgrid) + noise_scale
-    noise, with u v the SVD of the rows minus the coverage model. ``pgrid`` (N,) is the spectrum on the grid,
-    ``box_noise`` (B,) the theory's box noise and ``two`` (B,) whether the block is an |m| > 0 pair. NumPy or JAX."""
+    noise, with u v the rows minus the coverage model: either their SVD per block, v (B, 3, r, N), or the rows
+    projected on a spectrum basis v (r, N) shared by every block (``spectrum_basis``). ``pgrid`` (N,) is the spectrum
+    on the grid, ``box_noise`` (B,) the theory's box noise and ``two`` (B,) whether the block is an |m| > 0 pair.
+    NumPy or JAX."""
     import jax.numpy as jnp
 
     xp = jnp if any(isinstance(x, jnp.ndarray) for x in (pgrid, noise_scale, box_noise)) else np
@@ -1416,9 +1436,12 @@ def s1m_exact_factor(hist, sample, pgrid, noise_scale, box_noise, two, q: float)
     lam_h = xp.maximum(hf * lam_box[:, None] + noise_scale * hn, 1e-30)  # coverage model, every cell (bins)
     model_h = xp.where(two[:, None], _chi_moment_xp(lam_h, lam_h, q, xp), _chi_moment_xp(lam_h, None, q, xp))
     total_h = xp.sum(hw * model_h, axis=1) / xp.sum(hw, axis=1)
-    coef = xp.einsum("bern,n->ber", v, pgrid)  # (B, 3, r)
+    if v.ndim == 2:  # shared spectrum basis: coefficients of the spectrum on it
+        rows = xp.einsum("bcer,r->bce", u, v @ pgrid)
+    else:  # per-block SVD
+        rows = xp.einsum("bcer,ber->bce", u, xp.einsum("bern,n->ber", v, pgrid))
     base = sf[:, :, None] * lam_box[:, None, None] * xp.asarray([1.0, 1.0, 0.0])
-    cov = base + xp.einsum("bcer,ber->bce", u, coef) + noise_scale * sn  # (B, C, 3), exact
+    cov = base + rows + noise_scale * sn  # (B, C, 3), exact
     a, b, c = cov[..., 0], cov[..., 1], cov[..., 2]
     half, disc = 0.5 * (a + b), xp.sqrt(xp.maximum(0.25 * (a - b) ** 2 + c**2, 0.0))
     lp, lm = xp.maximum(half + disc, 1e-30), xp.maximum(half - disc, 1e-30)
@@ -1449,6 +1472,9 @@ class SurveyWindow:
     #: rows of the masked covariance entries on the spectrum grid, including the RIC transfer), noise (C, 3) (the
     #: cells' shot noise, absolute) and vbox (N,) (the unmasked row). With it the factor is ``s1m_exact_factor``.
     exact: dict | None = None
+    #: With a spectrum basis (nb, N) (``spectrum_basis``), the blocks hold ``u`` (C, 3, nb) = the rows projected on it
+    #: and no ``v``: the basis is shared by every block (and the rows are exact for spectra in its span).
+    exact_basis: np.ndarray | None = None
 
     @staticmethod
     def key(sigma: float) -> float:
@@ -1496,20 +1522,24 @@ class SurveyWindow:
 
     def build_exact(self, config: WSTConfig, rows: dict, weights: np.ndarray, labels: np.ndarray | None = None,
                     ric_transfer: dict | None = None, tol: float = 1e-4, coverage_hist: "SurveyWindow | None" = None,
-                    noise_model: np.ndarray | None = None):
+                    noise_model: np.ndarray | None = None, basis: np.ndarray | None = None):
         """Add the exact window from ``CellWindow.covariances(None, grid=...)`` rows (``masked`` and ``unmasked``
         [cell, j, l, |m|, 3, N], ``noise_masked`` [cell, j, l, |m|, 3], ``coverage`` [cell, j, l]) at sample cells of
         ``weights`` and bin ``labels`` (for ``ric_transfer``, ``RICTransfer.transfer()``). The rows of each block, minus
-        the coverage model f x the unmasked row, are compressed by an SVD across cells keeping the rank that reproduces
-        them to ``tol`` of the full rows' norm. ``coverage_hist``: a ``SurveyWindow`` built with the coverage only
-        (correction 1), whose histograms carry the coverage model over every support cell (``s1m_exact_factor``);
-        by default this window's own ``s1m`` blocks. ``noise_model`` [cell, j, l]: the noise of the coverage model
-        at the sample cells, the same m-averaged maps as the histograms (``noise_variance_maps``), so that the model
-        subtracted on the samples is the one summed over every cell (an unbiased control variate); by default the
-        sample cells' exact noise averaged over the two components."""
+        the coverage model f x the unmasked row, are either projected on the spectrum ``basis`` (nb, N)
+        (``spectrum_basis``; exact for the spectra in its span, ~80 components for a fit's prior) or, without one,
+        compressed by an SVD across cells keeping the rank that reproduces them to ``tol`` of the full rows' norm (on
+        a survey footprint that rank is the number of cells: the masked kernels' shapes are all different).
+        ``coverage_hist``: a ``SurveyWindow`` built with the coverage only (correction 1), whose histograms carry the
+        coverage model over every support cell (``s1m_exact_factor``); by default this window's own ``s1m`` blocks.
+        ``noise_model`` [cell, j, l]: the noise of the coverage model at the sample cells, the same m-averaged maps as
+        the histograms (``noise_variance_maps``), so that the model subtracted on the samples is the one summed over
+        every cell (an unbiased control variate); by default the sample cells' exact noise averaged over the two
+        components."""
         masked = rows["masked"] if ric_transfer is None else RICTransfer.apply(ric_transfer, rows["masked"], labels)
         hist = (coverage_hist or self).s1m
         self.exact = {}
+        self.exact_basis = None if basis is None else np.asarray(basis, dtype=float)
         for j in range(config.J + 1):
             for ell in range(config.L + 1):
                 f = rows["coverage"][:, j, ell]
@@ -1519,6 +1549,20 @@ class SurveyWindow:
                     block = np.array(masked[:, j, ell, m])  # (C, 3, N)
                     block[:, 0] -= f[:, None] * vbox[None, :]
                     block[:, 1] -= f[:, None] * vbox[None, :]
+                    if m == 0:
+                        block[:, 2] = 0.0
+                    h = hist[key]
+                    nm = (noise_model[:, j, ell] if noise_model is not None
+                          else 0.5 * (rows["noise_masked"][:, j, ell, m, 0] + rows["noise_masked"][:, j, ell, m, 1]))
+                    self.exact[key] = dict(weight=np.asarray(weights, dtype=float), coverage=f.copy(),
+                                           noise=rows["noise_masked"][:, j, ell, m], noise_model=np.asarray(nm, dtype=float),
+                                           vbox=vbox,
+                                           hist_weight=np.asarray(h["weight"], dtype=float),
+                                           hist_transfer=np.asarray(h["transfer"], dtype=float),
+                                           hist_noise=np.asarray(h["noise"], dtype=float))
+                    if basis is not None:
+                        self.exact[key]["u"] = block @ self.exact_basis.T
+                        continue
                     c, _, n = block.shape
                     flat = block.transpose(1, 0, 2).reshape(3 * c, n) if m else block[:, 0]
                     scale = np.linalg.norm(masked[:, j, ell, m, 0])
@@ -1531,20 +1575,20 @@ class SurveyWindow:
                     v = np.broadcast_to(vt[:r], (3, r, n)).copy()
                     if m == 0:
                         v[2] = 0.0
-                    h = hist[key]
-                    nm = (noise_model[:, j, ell] if noise_model is not None
-                          else 0.5 * (rows["noise_masked"][:, j, ell, m, 0] + rows["noise_masked"][:, j, ell, m, 1]))
-                    self.exact[key] = dict(weight=np.asarray(weights, dtype=float), coverage=f.copy(), u=u, v=v,
-                                           noise=rows["noise_masked"][:, j, ell, m], noise_model=np.asarray(nm, dtype=float),
-                                           vbox=vbox,
-                                           hist_weight=np.asarray(h["weight"], dtype=float),
-                                           hist_transfer=np.asarray(h["transfer"], dtype=float),
-                                           hist_noise=np.asarray(h["noise"], dtype=float))
+                    self.exact[key].update(u=u, v=v)
+
+    @staticmethod
+    def project_block(block: dict, basis: np.ndarray) -> dict:
+        """An exact block in the per-block SVD form (``u`` (C, 3, r), ``v`` (3, r, N)) projected on the spectrum
+        ``basis`` (nb, N): ``u`` (C, 3, nb), no ``v`` (the other arrays unchanged)."""
+        out = {name: value for name, value in block.items() if name != "v"}
+        out["u"] = np.einsum("cer,ern->cen", block["u"], block["v"]) @ np.asarray(basis, dtype=float).T
+        return out
 
     def s1m_exact_arrays(self, keys):
         """(hist, sample) stacked and padded arrays of ``exact`` for ``s1m_exact_factor``: hist = (weight, transfer,
-        noise) (B, nbin); sample = (weight (B, C), coverage (B, C), u (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3),
-        vbox (B, N), noise_model (B, C))."""
+        noise) (B, nbin); sample = (weight (B, C), coverage (B, C), u (B, C, 3, r), v (B, 3, r, N) or the shared
+        spectrum basis (nb, N), noise (B, C, 3), vbox (B, N), noise_model (B, C))."""
         r = max(self.exact[k]["u"].shape[-1] for k in keys)
         nbin = max(len(self.exact[k]["hist_weight"]) for k in keys)
         pad_u = lambda a: np.pad(a, ((0, 0), (0, 0), (0, r - a.shape[-1])))  # noqa: E731
@@ -1552,8 +1596,10 @@ class SurveyWindow:
         pad_h = lambda a: np.pad(a, (0, nbin - len(a)))  # noqa: E731
         hist = tuple(np.array([pad_h(self.exact[k][name]) for k in keys])
                      for name in ("hist_weight", "hist_transfer", "hist_noise"))
+        v = (np.asarray(self.exact_basis, dtype=float) if self.exact_basis is not None
+             else np.array([pad_v(self.exact[k]["v"]) for k in keys]))
         sample = (np.array([self.exact[k]["weight"] for k in keys]), np.array([self.exact[k]["coverage"] for k in keys]),
-                  np.array([pad_u(self.exact[k]["u"]) for k in keys]), np.array([pad_v(self.exact[k]["v"]) for k in keys]),
+                  np.array([pad_u(self.exact[k]["u"]) for k in keys]), v,
                   np.array([self.exact[k]["noise"] for k in keys]), np.array([self.exact[k]["vbox"] for k in keys]),
                   np.array([self.exact[k]["noise_model"] for k in keys]))
         return hist, sample
@@ -1578,27 +1624,46 @@ class SurveyWindow:
                 arrays[f"s1m_{sigma}_{ell}_{m}_{name}"] = value
         for key, value in self.s21m.items():
             arrays["s21m_" + "_".join(str(k) for k in key)] = value
+        if self.exact_basis is not None:
+            arrays["exactbasis"] = self.exact_basis
         for (sigma, ell, m), b in (self.exact or {}).items():
             for name, value in b.items():
+                if name == "u" and self.exact_basis is not None:
+                    value = np.asarray(value, dtype=np.float32)  # projected rows: 1e-7 of the rows is plenty
                 arrays[f"exact_{sigma}_{ell}_{m}_{name}"] = value
         np.savez(path, **arrays)
 
     @classmethod
-    def load(cls, path) -> "SurveyWindow":
+    def load(cls, path, basis: np.ndarray | None = None) -> "SurveyWindow":
+        """``basis`` (nb, N): project an exact window stored in the per-block SVD form on this spectrum basis as it
+        is read (``project_block``; the SVD factors of a survey cap are ~10 GB, the projection ~100 MB)."""
         f = np.load(path)
         s1m, s21m, exact = {}, {}, {}
+        names = {}
         for name in f.files:
             parts = name.split("_")
             if parts[0] == "exact":
-                exact.setdefault((float(parts[1]), int(parts[2]), int(parts[3])), {})[parts[4]] = f[name]
+                names.setdefault((float(parts[1]), int(parts[2]), int(parts[3])), []).append(("_".join(parts[4:]), name))
                 continue
             if parts[0] == "s1m":
                 key = (float(parts[1]), int(parts[2]), int(parts[3]))
                 s1m.setdefault(key, {})["_".join(parts[4:])] = (float(f[name]) if f[name].ndim == 0 else f[name])
             elif parts[0] == "s21m":
                 s21m[(float(parts[1]), float(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]))] = float(f[name])
+        exact_basis = f["exactbasis"] if "exactbasis" in f.files else None
+        for key, items in names.items():
+            block = {field: f[name] for field, name in items}
+            if block["u"].dtype != np.float64:
+                block["u"] = np.asarray(block["u"], dtype=np.float64)
+            if basis is not None and "v" in block:
+                block = cls.project_block(block, basis)
+            exact[key] = block
+        if basis is not None and exact:
+            if exact_basis is not None and not np.allclose(exact_basis, basis):
+                raise ValueError("the window is already projected on another spectrum basis")
+            exact_basis = np.asarray(basis, dtype=float)
         return cls(s1m=s1m, s21m=s21m, q=float(f["q"]), veff=float(f["veff"]) if "veff" in f.files else None,
-                   exact=exact or None)
+                   exact=exact or None, exact_basis=exact_basis)
 
     def s1m_arrays(self, keys):
         """(weight, transfer, noise) (B, nbin) and delta (B,) of the blocks ``keys``, zero-padded to one nbin."""

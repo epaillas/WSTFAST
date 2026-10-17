@@ -578,6 +578,34 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2
     return grid, tree
 
 
+def sample_biased_grids(basis, settings: dict, n: int = 2000, seed: int = 1, shotnoise: float = 2000.0) -> np.ndarray:
+    """``n`` biased P_s grids (n, nk x nmu) a fit with the emulated ``basis`` (``settings`` its .json: bounds, kmax)
+    can produce, for ``survey.spectrum_basis``: cosmologies uniform in the emulated box, b1 uniform in [0.5, 3.5], the
+    other biases N(0, 2) (prior widths 1), counterterms uniform in their limits, the k^2 mu^2 and k^2 stochastic
+    terms (``shotnoise`` x N(0, 20) and N(0, 2)) and the k^4 mu^4 counterterm (N(0, 20) (Mpc/h)^4), wider than any
+    posterior, so that the span of the sample covers the fit's spectra."""
+    from .theory.rsd import RSDGrid
+
+    grid = RSDGrid(kmax=settings["kmax"])
+    k2 = grid.k[:, None] ** 2 * np.ones_like(grid.mu)[None, :]
+    k2mu2 = k2 * grid.mu[None, :] ** 2
+    params = get_params(basis)
+    bounds = {name: settings["bounds"][name] for name in settings["vary"]}
+    limits = _rsd_counterterms("", "")["c0"].prior.limits
+    rng = np.random.default_rng(seed)
+    spectra = []
+    for _ in range(n):
+        for name, (low, high) in bounds.items():
+            params[name].value = rng.uniform(low, high)
+        basis()
+        rows = biased_rows(basis)[0]
+        beta = jnp.asarray([1.0, rng.uniform(0.5, 3.5), *rng.normal(0.0, 2.0, 3)])
+        out, _ = biased_grid(rows, beta, rng.uniform(*limits, 3), k2mu2, shotnoise, rng.normal(0.0, 20.0),
+                             rng.normal(0.0, 20.0), k2, rng.normal(0.0, 2.0))
+        spectra.append(np.asarray(out).ravel())
+    return np.array(spectra)
+
+
 def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None, shot=None):
     """Per-block kappa (ncoef, L + 1) and 15 skewness^2 (ncoef,) of a tracer of Poisson shot noise ``shotnoise``.
     ``cubic`` = (b3, bG3, bdG2) adds the cubic-operator trispectrum (needs the basis columns CUBIC_KAPPA_SIZES);

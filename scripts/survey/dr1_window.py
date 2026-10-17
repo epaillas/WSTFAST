@@ -157,6 +157,14 @@ def get_args():
                              "CIC noise, the RIC transfer of <output>/ric_transfer_<cap>.npz if present) to the window "
                              "files; its rows are on RSDGrid(kmax=--grid-kmax), the emulator's")
     parser.add_argument("--grid-kmax", type=float, default=0.3)
+    parser.add_argument("--exact-basis", type=Path, default=None,
+                        help="products --exact: project the exact rows on a spectrum basis (survey.spectrum_basis) instead "
+                             "of the per-block SVD (full rank on a survey footprint, ~10 GB per cap): an RSDBasis emulator "
+                             ".h5 (the fit's; 2000 of its biased P_s grids over the prior are sampled, and the basis is "
+                             "saved as <output>/spectrum_basis.npy) or a saved basis .npy")
+    parser.add_argument("--exact-from", type=Path, default=None,
+                        help="products --exact: take the exact rows from the window files of this directory (the per-block "
+                             "SVD form), projected on --exact-basis, instead of computing the kernels again")
     parser.add_argument("--stage", choices=("mocks", "ric", "predict", "both"), default="both",
                         help="exact: generate and measure the paired mocks, calibrate the RIC transfer on signal-only "
                              "mocks (--calibrate of them), predict the mocks with CellWindow, or all")
@@ -487,10 +495,18 @@ def run_products(args, geometries, setups, pk):
                 product.s21m[key] = float(ratio.mean())
                 ratios["s21m_" + "_".join(str(k) for k in key)] = ratio
         z = "-".join(f"{v:g}" for v in args.zrange)
-        if args.exact:
+        if args.exact and args.exact_from is not None:  # the rows of an earlier run, projected on the spectrum basis
+            basis = exact_spectrum_basis(args)
+            t0 = time.time()
+            previous = SurveyWindow.load(args.exact_from / f"window_z{z}_{cap}.npz", basis=basis)
+            data_product.exact, data_product.exact_basis = previous.exact, previous.exact_basis
+            print(f"{cap}: exact window of {args.exact_from} projected on {len(basis)} spectrum components in "
+                  f"{time.time() - t0:.0f} s", flush=True)
+        elif args.exact:
             from wstfast.survey import CellWindow, RICTransfer, sample_cells
             from wstfast.theory.rsd import RSDGrid
 
+            basis = exact_spectrum_basis(args) if args.exact_basis is not None else None
             cells, cell_weights, labels = sample_cells(g, per_bin=args.per_bin, seed=0)
             t0 = time.time()
             rows = CellWindow(g, s["config"], cells, noise_window="cic").covariances(
@@ -505,7 +521,7 @@ def run_products(args, geometries, setups, pk):
             noise_model = np.array([[maps[j, ell][at] for ell in range(s["config"].L + 1)]
                                     for j in range(s["config"].J + 1)]).transpose(2, 0, 1)
             data_product.build_exact(s["config"], rows, cell_weights, labels, ric_transfer=transfer,
-                                     coverage_hist=coverage_only, noise_model=noise_model)
+                                     coverage_hist=coverage_only, noise_model=noise_model, basis=basis)
             ranks = [b["u"].shape[-1] for b in data_product.exact.values()]
             print(f"{cap}: exact window at {len(cells)} cells in {time.time() - t0:.0f} s, ranks {min(ranks)}-{max(ranks)},"
                   f" RIC transfer {'yes' if transfer is not None else 'no'}", flush=True)
@@ -515,7 +531,7 @@ def run_products(args, geometries, setups, pk):
             data_product.s21m = dict(product.s21m)
             product = data_product
         elif args.exact:
-            product.exact = data_product.exact
+            product.exact, product.exact_basis = data_product.exact, data_product.exact_basis
         product.save(args.output / f"window_z{z}_{cap}.npz")
         np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
         if ratios:  # calibration error of delta and K for fit_rsd --extra-covariance (one mock set per statistic)
@@ -815,6 +831,34 @@ def run_halos(args, geometries, setups, pk):
         np.savez(args.output / "partial_halos.npz", **{k: np.array(v) for k, v in rows.items()},
                  realizations=np.arange(args.seed_offset, args.seed_offset + r + 1))
     return dict(nmocks=args.realizations)
+
+
+def exact_spectrum_basis(args) -> np.ndarray:
+    """The spectrum basis of ``--exact-basis``: a saved .npy, or sampled from an RSDBasis emulator (.h5) with the
+    fit's priors (``calculators.sample_biased_grids``, ``survey.spectrum_basis``) and saved as
+    <output>/spectrum_basis.npy (read back by a later run)."""
+    if args.exact_basis is None:
+        raise SystemExit("--exact-from needs --exact-basis")
+    if args.exact_basis.suffix == ".npy":
+        return np.load(args.exact_basis)
+    cache = args.output / "spectrum_basis.npy"
+    if cache.exists():
+        return np.load(cache)
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from fit_rsd import load_basis
+
+    from wstfast.calculators import sample_biased_grids
+    from wstfast.survey import spectrum_basis
+
+    settings = json.loads(args.exact_basis.with_suffix(".json").read_text())
+    emulated, _ = load_basis(args.exact_basis, settings["vary"])
+    t0 = time.time()
+    basis = spectrum_basis(sample_biased_grids(emulated, settings, n=2000, seed=1))
+    np.save(cache, basis)
+    print(f"spectrum basis of {args.exact_basis.name}: {len(basis)} components in {time.time() - t0:.0f} s", flush=True)
+    return basis
 
 
 def run_exact(args, geometries, setups, pk):

@@ -428,3 +428,45 @@ def test_cell_window_unmasked_kernel_matches_lattice_variances():
     expected = s1m_gaussian(lam, config, 0.8, np.ones(2), lam_noise=noise)
     got = CellWindow.s1m(out["unmasked"][0], out["noise_unmasked"], np.ones(2), 0.8)
     assert np.allclose(got[~np.isnan(got)], expected[~np.isnan(expected)], rtol=5e-3)
+
+
+def test_exact_window_spectrum_basis_matches_svd_form(tmp_path):
+    """An exact window projected on a spectrum basis (SurveyWindow.project_block / build_exact(basis=)) gives the
+    factor of the per-block SVD form for spectra in the span of the basis, through save and load."""
+    import jax.numpy as jnp
+
+    from wstfast.survey import SurveyWindow, s1m_exact_factor, spectrum_basis
+
+    rng = np.random.default_rng(3)
+    nc, n, r = 5, 40, 4
+    keys = [(25.0, 0, 0), (25.0, 1, 0), (25.0, 1, 1)]
+    # the spectra of a fit: linear combinations of 6 shapes; the basis must find that span
+    shapes = rng.uniform(1.0, 2.0, size=(6, n))
+    spectra = rng.uniform(0.5, 1.5, size=(400, 6)) @ shapes  # positive: positive variances
+    basis = spectrum_basis(spectra, tol=1e-10)
+    assert basis.shape == (6, n)
+    exact = {}
+    for key in keys:
+        m = key[2]
+        u = rng.normal(size=(nc, 3, r))
+        v = np.broadcast_to(rng.normal(size=(r, n)), (3, r, n)).copy()
+        if m == 0:
+            u[:, 2], v[2] = 0.0, 0.0
+        exact[key] = dict(weight=rng.uniform(1, 2, nc), coverage=rng.uniform(0.5, 1, nc), u=u, v=v,
+                          noise=rng.uniform(0.1, 0.2, (nc, 3)), noise_model=rng.uniform(0.1, 0.2, nc),
+                          vbox=rng.uniform(1, 2, n), hist_weight=rng.uniform(1, 2, 7), hist_transfer=rng.uniform(0.5, 1, 7),
+                          hist_noise=rng.uniform(0.1, 0.2, 7))
+    svd = SurveyWindow(s1m={}, s21m={}, exact=exact)
+    svd.save(tmp_path / "svd.npz")
+    projected = SurveyWindow.load(tmp_path / "svd.npz", basis=basis)
+    assert projected.exact_basis.shape == (6, n) and projected.exact[keys[0]]["u"].shape == (nc, 3, 6)
+    projected.save(tmp_path / "projected.npz")
+    loaded = SurveyWindow.load(tmp_path / "projected.npz")
+    assert loaded.exact_basis.shape == (6, n) and "v" not in loaded.exact[keys[0]]
+    two = np.array([k[2] > 0 for k in keys])
+    box_noise = np.full(len(keys), 0.15)
+    for pgrid in (spectra[0], spectra[1] * 3 + 10 * shapes[2]):
+        pgrid = jnp.asarray(pgrid)  # the JAX path of the factor
+        reference = s1m_exact_factor(*svd.s1m_exact_arrays(keys), pgrid, 1.0, box_noise, two, 0.8)
+        got = s1m_exact_factor(*loaded.s1m_exact_arrays(keys), pgrid, 1.0, box_noise, two, 0.8)
+        np.testing.assert_allclose(got, reference, rtol=1e-5)
