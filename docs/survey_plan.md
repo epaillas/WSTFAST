@@ -610,8 +610,17 @@ variance level.**
   `S1mTheory` uses it when the window file has an exact part (`dr1_window --test products --exact`: CIC noise, RIC
   transfer). The S21m window stays the calibrated K for now. Costs: ~12 s per cell for the kernels, 13 s for the rows,
   ~10 min once for the envelope rows; 120 processes on a Perlmutter CPU node.
-- **Next:** the 80-cells-per-bin test; the Abacus fit with the exact window and δ = 1; the cumulant (non-Gaussian
-  edge) transfer; the second layer.
+- **80 cells per bin (4320 cells, NGC):** 0.157% rms / 0.44% max against the 38 mocks (mock noise 0.114%, implied
+  sampling noise 0.061%); against the **827 paired RIC mocks** (noise 0.027%): **0.108% rms, 0.21% max = 0.10σ rms,
+  0.25σ max of one survey**, χ² 2857 / 60. A genuine residual remains: m = 0 blocks +0.1%, m = l blocks −0.15%,
+  nearly independent of scale.
+- **Not the wide angle:** a toy with the observer 1.4 Gpc/h away (the line of sight tilting by ±18° across the box)
+  and local-line-of-sight mocks: the plane-parallel kernels agree to 0.04% rms (inside the mock noise) and the exact
+  Kaiser wide-angle kernels (`CellWindow.wide_angle`: six more transforms per component, g n_i n_j) change nothing
+  (≤ 0.05% per block). A 192³ toy with J = 3 confirms the σ = 71 Mpc/h kernels to ≤ 0.07%.
+- **Suspect for the ±0.15%:** the cusp correction's isotropic envelope against the anisotropic low-k shape of masked
+  kernels at tilted edges (pad 2 vs pad 3 test in progress).
+- **Next:** the Abacus fit with the exact window and δ = 1; the cumulant (non-Gaussian edge) transfer; the second layer.
 
 **Next:**
 1. Redo the halo cut-sky run with the fixed `box_to_survey` (NERSC), then the halo δ / K and W4 (with the ~1% c000
