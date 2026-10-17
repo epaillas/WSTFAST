@@ -634,6 +634,20 @@ variance level.**
   the per-component noise), else the estimator is biased by 0.2%; with that, the JAX factor matches
   `CellWindow.control_variate` to 3e-6 on the toy for four spectra. The sampling noise is then that of the
   correction term only, so 40 cells per bin suffice (~0.085%).
+- **Spectrum basis instead of the cell SVD (2026-10-17, 97332a2).** On DR1 the SVD of the rows minus the coverage
+  model does not compress at all (rank = number of cells, 72 of 72 at tol 1e-4..1e-3, with or without the cusp rows:
+  the masked kernels' (k, μ) shapes are all different), so the window files were 10 GB per cap. The compression is
+  now along the spectrum axis: `survey.spectrum_basis` takes the principal components of 2000 biased P_s grids the
+  fit's emulator can produce over the prior (`calculators.sample_biased_grids`: cosmology uniform in the emulated
+  box, wide bias, counterterm and stochastic ranges; emulator `survey_lrg_z0.51`) up to a 1e-5 reconstruction of a
+  held-out half: 100 components. The rows projected on it (`build_exact(basis=)`, `SurveyWindow.exact_basis`, shared
+  by every block; `u` (C, 3, 100) in float32) reproduce the per-cell variances of the 72 DR1 cells to 1.3e-6 for an
+  independent prior sample (the error is the part of the spectrum outside the span, nothing else). Files: 170 MB
+  (NGC) / 143 MB (SGC); `dr1_window --test products --exact --exact-basis <emulator.h5|basis.npy>` builds them, and
+  `--exact-from <dir>` or `SurveyWindow.load(path, basis=)` reprojects an SVD-form file in a minute (used for the
+  Abacus- and stack-geometry windows, `dr1_window_products_exact_pca`, `..._exact_stack_pca`; the 10 GB files are
+  deleted). Also fixed: the loader truncated field names with underscores (`hist_weight` → `hist`), which is what
+  had crashed the first exact-window fits.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
