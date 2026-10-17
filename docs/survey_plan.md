@@ -674,6 +674,28 @@ variance level.**
   own spectrum dependence does not cancel in the ratio). The clean step is to recalibrate the halo δ against the exact
   window itself: exact factor at the halo mocks' spectrum (halo emulator at the Quijote fiducial, box best-fit biases)
   and noise (n̄ × 0.5), δ_halo,exact = ⟨halo survey / box⟩ / exact. Pending, with the stack-geometry fits.
+- **Halo δ recalibrated against the exact window (2026-10-17 evening).** δ_exact(block) = ⟨halo survey / box⟩ of the
+  275 calibration pairs over the exact factor at the Quijote truth with the box-fit nuisances (`fast_noap_V60`), the
+  survey-side noise doubled for the mocks' n̄ × 0.5 (scratchpad `halo_recal_exact.py`; the factor is captured from
+  the W4 likelihood itself, from its evaluation at the point, not the build's). The exact window predicts the halo
+  mocks to 0.1–0.9% (NGC δ_exact 0.991–1.001, SGC 0.985–1.000, the deviations at σ = 25 and high |m|), against
+  0.3–1.7% for the histogram: most of what the halo δ carried was the histogram's own spectrum dependence. Products:
+  `dr1_window_products_exact_pca_hrecal` (exact δ = δ_exact, histogram δ untouched for the second layer). At the
+  reference best fit the S1m entries differ from the reference's by ≤ 0.17% (≤ 1.4σ). Abacus profiles (stacked-randoms
+  data, started also from the reference best fit):
+
+  | fit | ω_cdm | logA | h | χ² |
+  |---|---|---|---|---|
+  | reference (histogram + halo δ) joint | 0.1201 ± 0.0028 | 3.066 ± 0.045 | 0.708 ± 0.009 | 413 |
+  | exact + δ_exact joint | 0.1240 ± 0.0034 | 3.089 ± 0.047 | 0.678 ± 0.012 | 468 |
+  | exact + δ_exact NGC | 0.1194 ± 0.0040 | 3.051 ± 0.061 | 0.669 ± 0.015 | 240 |
+  | exact + δ_exact SGC | 0.1338 ± 0.0057 | 3.013 ± 0.074 | 0.675 ± 0.019 | 185 |
+  | truth | 0.1200 | 3.036 | 0.6736 | |
+
+  **The h pull was the window**: with the exact window h is unbiased in every fit (+0.4σ, −0.3σ, +0.1σ) where the
+  histogram gave +3.8σ. What remains is SGC's ω_cdm (+2.4σ; NGC is fine), which the histogram setup also showed
+  (SGC 0.1267 ± 0.0051), and a joint χ² of 468 against 413. The profiles are Minuit profiles; the covariance is the
+  analytic one of the 25-mock mean.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
