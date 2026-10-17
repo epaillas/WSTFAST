@@ -622,9 +622,13 @@ variance level.**
   0.033%), i.e. at the target. Its small residual has the opposite sign pattern to NGC's (m = l blocks +0.1% at σ = 25),
   so the ±0.15% is geometry-dependent.
 - **Not the cusp correction:** pad 3 against pad 2 on 162 NGC cells changes the predicted ratios by < 0.005%.
-- **Suspect for NGC's ±0.15%:** the wide-angle coupling of the m components of masked kernels at edges tilted with
-  respect to the line of sight, which a plane edge normal to the line of sight (the toy) cannot show; per-cell factors
-  of ±0.5–2% were seen on DR1 cells (test of the net shift over the sample in progress).
+- **Wide angle on the DR1 sample** (exact Kaiser factors on 216 of the 4320 NGC cells): per cell ±1% for the m ≤ l − 2
+  blocks of masked kernels at tilted edges, but the weighted net shift of the predicted ratios is only +0.05–0.09%
+  (σ = 50–71, m ≤ l − 2) and ~0 at m = l: part of NGC's positive m = 0 residual, not its negative m = l one. Left as a
+  refinement; the exact window is used plane-parallel.
+- **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
+  (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
+  δ = 1 and with it.
 - **Next:** the Abacus fit with the exact window and δ = 1; the cumulant (non-Gaussian edge) transfer; the second layer.
 
 **Next:**
