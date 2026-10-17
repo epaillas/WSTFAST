@@ -902,6 +902,7 @@ class CellWindow:
                                 **(mode if periodic else dict(mode="constant", constant_values=effective)))
         ijk = np.stack(np.unravel_index(self.cells, (n, n, n)), axis=1)
         self.ijk = ijk
+        self._los_mesh = None  # unit line of sight of every padded mesh cell (3, ...), built by ``wide_angle``
         vectors = ijk * geometry.cellsize + geometry.offset - geometry.observer
         self.los = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
         self.theta, self.phi = _angles(self.los)
@@ -1073,6 +1074,83 @@ class CellWindow:
                             out[nm][io, j, ell, m, 2] = float(np.sum(rn[a] * rn[b] * noise, dtype=np.float64)) if m else 0.0
         return out
 
+    def wide_angle(self, bias: float, f: float, pk, processes: int | None = None) -> dict:
+        """Wide-angle factors of the masked and unmasked signal covariances for a linear Kaiser field with the line of
+        sight of every field point (``GaussianMocks`` with an observer), [cell, j, l, |m|, 3]: the exact variance
+        over the plane-parallel one (the line of sight of the cell for the whole wavelet). The field is
+        delta_s = b delta + f (n(y).k)^2 delta, so the component is X' = sum_k delta(k) G_m(k) with
+        G_m = b ghat_m + f sum_ij k_i k_j FT[g_m n_i n_j], six more transforms per component, and the variance
+        (1/N) sum_k |G_m|^2 P(k) with the isotropic P. Second order in sigma_j / r; the factors at a fiducial spectrum
+        transfer to other spectra (``CellWindow.covariances`` rows times them)."""
+        if processes and processes > 1 and len(self.cells) > 1:
+            import multiprocessing as mp
+
+            global _CELLWINDOW_JOB
+            self._los_field()
+            _CELLWINDOW_JOB = (self, bias, f, pk)
+            chunks = np.array_split(np.arange(len(self.cells)), min(processes * 4, len(self.cells)))
+            workers = self.workers
+            self.workers = 1
+            try:
+                with mp.get_context("fork").Pool(processes) as pool:
+                    parts = pool.map(_cellwindow_wide_angle_chunk, chunks)
+            finally:
+                self.workers = workers
+                _CELLWINDOW_JOB = None
+            return {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+        return self._wide_angle(bias, f, pk, np.arange(len(self.cells)))
+
+    def _los_field(self):
+        if self._los_mesh is None:
+            n, m = self.g.nmesh, self.margin
+            axes = [np.arange(-m, n + m) * self.g.cellsize + self.g.offset[i] - self.g.observer[i] for i in range(3)]
+            grid = np.meshgrid(*axes, indexing="ij")
+            norm = np.sqrt(sum(a**2 for a in grid))
+            self._los_mesh = np.stack([(a / norm).astype(np.float32) for a in grid])
+
+    def _wide_angle(self, bias, f, pk, which):
+        from scipy import fft as sfft
+
+        self._los_field()
+        cfg = self.config
+        nc, nj, nl = len(which), cfg.J + 1, cfg.L + 1
+        out = {k: np.ones((nc, nj, nl, nl, 3)) for k in ("masked", "unmasked")}
+        pairs_ij = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)]
+        for j in range(nj):
+            self._prepare(j)
+            modes, ns = self._modes[j], self.sizes[j]
+            kmag, unit = modes["kmag"], modes["unit"]
+            piso = (modes["mult"] * np.where(kmag > 0, pk(np.where(kmag > 0, kmag, 1e-4)), 0.0)
+                    / self.g.cellsize**3 / ns**3).astype(np.float32)
+            for io, ic in enumerate(which):
+                W = self._subbox(self.mask, ic, j)
+                los = np.stack([self._subbox(self._los_mesh[i], ic, j) for i in range(3)])  # (3, ns, ns, ns)
+                nn = {(a, b): los[a] * los[b] for a, b in pairs_ij}
+                mu = np.abs(np.tensordot(unit, self.los[ic].astype(np.float32), axes=([3], [0])))
+                kaiser_pp = (bias + f * mu**2) ** 2
+                for ell in range(nl):
+                    psi = self._kernels[j][ell]
+                    psi_r = self._rotations[ell](psi.reshape(2 * ell + 1, -1), self.theta[ic], self.phi[ic]).reshape(psi.shape)
+                    for name, real in (("masked", psi_r * W), ("unmasked", psi_r)):
+                        ghat = sfft.rfftn(real, axes=(1, 2, 3), workers=self.workers)
+                        total = bias * ghat
+                        for (a, b) in pairs_ij:
+                            factor = (1 if a == b else 2) * f * unit[..., a] * unit[..., b]
+                            total = total + factor * sfft.rfftn(real * nn[a, b], axes=(1, 2, 3), workers=self.workers)
+                        for m in range(ell + 1):
+                            a_, b_ = ell + m, ell - m
+                            prods_exact = [np.abs(total[a_]) ** 2, np.abs(total[b_]) ** 2,
+                                           (total[a_] * np.conj(total[b_])).real if m else None]
+                            prods_pp = [np.abs(ghat[a_]) ** 2, np.abs(ghat[b_]) ** 2,
+                                        (ghat[a_] * np.conj(ghat[b_])).real if m else None]
+                            for e in range(3):
+                                if prods_exact[e] is None:
+                                    continue
+                                exact = float(np.sum(piso * prods_exact[e], dtype=np.float64))
+                                pp = float(np.sum(piso * kaiser_pp * prods_pp[e], dtype=np.float64))
+                                out[name][io, j, ell, m, e] = exact / pp if abs(pp) > 0 else 1.0
+        return out
+
     @staticmethod
     def _pair_scale(real, pair, r2, ox, oy, oz, sigma, radii):
         """(ghat_a(0) ghat_b(0), R) of the cusp correction of a kernel pair: R from the pair's second moment
@@ -1198,6 +1276,11 @@ def _cellwindow_chunk(which):
     return window._covariances(spectra, ells, grid, which)
 
 
+def _cellwindow_wide_angle_chunk(which):
+    window, bias, f, pk = _CELLWINDOW_JOB
+    return window._wide_angle(bias, f, pk, which)
+
+
 def cell_bins(geometry: SurveyGeometry, ndistance: int = 24, ndensity: int = 3) -> np.ndarray:
     """Bin label of every support cell (order of ``np.flatnonzero(support)``): quantile bins of the distance to the
     edge (``ndistance``) times quantile bins of the density (``ndensity``)."""
@@ -1258,12 +1341,15 @@ class RICTransfer:
         """Masked signal covariances [..., cell, j, l, |m|, 3] of sample cells with bin ``labels``, scaled by the
         transfer of their components (C_mm by T_m, C_-m-m by T_-m, C_m-m by sqrt(T_m T_-m))."""
         out = np.array(masked, dtype=float)
+        axis = out.ndim - 5  # position of the cell axis: [cell, j, l, |m|, 3] or [cell, j, l, |m|, 3, N]
+        lead = (slice(None),) * axis
         for (j, ell), t in transfer.items():
             for m in range(ell + 1):
                 tp, tm = t[ell + m][labels], t[ell - m][labels]
-                out[..., j, ell, m, 0] *= tp
-                out[..., j, ell, m, 1] *= tm
-                out[..., j, ell, m, 2] *= np.sqrt(tp * tm)
+                tail = (None,) * (out.ndim - axis - 5)
+                out[lead + (slice(None), j, ell, m, 0)] *= tp[(slice(None),) + tail]
+                out[lead + (slice(None), j, ell, m, 1)] *= tm[(slice(None),) + tail]
+                out[lead + (slice(None), j, ell, m, 2)] *= np.sqrt(tp * tm)[(slice(None),) + tail]
         return out
 
     def save(self, path):
