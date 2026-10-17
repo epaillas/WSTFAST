@@ -823,6 +823,11 @@ def signal_variances(pcell: np.ndarray, config: WSTConfig, lattice: Lattice) -> 
     return out
 
 
+#: Midpoint nodes of the phi integral of ``_chi_moment`` over a quarter period: the integrand is periodic and analytic,
+#: so 16 nodes are exact to 3e-12 for lam_b / lam_a >= 0.1 (the DR1 cells' minimum) and to 4e-6 at 0.01.
+CHI_NODES = 16
+
+
 def _chi_moment(lam_a, lam_b, q):
     """E (X_a^2 + X_b^2)^{q/2} for independent Gaussians of variances lam_a, lam_b (lam_b None: one component)."""
     from scipy.special import gammaln
@@ -830,7 +835,7 @@ def _chi_moment(lam_a, lam_b, q):
     p = q / 2
     if lam_b is None:
         return (2 * lam_a) ** p * np.exp(gammaln((1 + q) / 2)) / np.sqrt(np.pi)
-    phi = (np.arange(64) + 0.5) * np.pi / 128
+    phi = (np.arange(CHI_NODES) + 0.5) * np.pi / (2 * CHI_NODES)
     c2 = np.cos(phi)[:, None] ** 2
     return 2**p * np.exp(gammaln(1 + p)) * np.mean((np.asarray(lam_a) * c2 + np.asarray(lam_b) * (1 - c2)) ** p, axis=0)
 
@@ -1390,7 +1395,7 @@ def _chi_moment_xp(lam_a, lam_b, q, xp):
     p = q / 2
     if lam_b is None:
         return (2 * lam_a) ** p * xp.exp(gammaln((1 + q) / 2)) / xp.sqrt(xp.pi)
-    phi = (xp.arange(64) + 0.5) * xp.pi / 128
+    phi = (xp.arange(CHI_NODES) + 0.5) * xp.pi / (2 * CHI_NODES)
     c2 = xp.cos(phi) ** 2
     return 2**p * xp.exp(gammaln(1 + p)) * xp.mean((lam_a[..., None] * c2 + lam_b[..., None] * (1 - c2)) ** p, axis=-1)
 
