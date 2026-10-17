@@ -982,6 +982,11 @@ class S21mTheory(Calculator):
             k21 = [window.s21m[(window.key(config.sigma(coefficients[i].j)), window.key(config.sigma(coefficients[i].j2)),
                                 coefficients[i].ell, m1, m2)] for i, m1, m2 in s21m_entries(coefficients)]
             self.window = tuple(jnp.asarray(a) for a in (weight, transfer, noise_map, delta, k21))
+            self.window_exact = None
+            if window.exact:  # the first-layer W from the exact per-cell window and its own delta (as S1mTheory)
+                hist, sample, delta_exact = window.s1m_exact_arrays(keys1)
+                self.window_exact = (tuple(jnp.asarray(a) for a in hist), tuple(jnp.asarray(a) for a in sample),
+                                     jnp.asarray(np.array([k[2] > 0 for k in keys1])), jnp.asarray(delta_exact))
 
         # Unprojected basis (RSDBasis(s21_projected=False)): lambda_2 is projected here from the field grids, with
         # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
@@ -1164,8 +1169,15 @@ class S21mTheory(Calculator):
             else:
                 signal = self.matrix @ tree.ravel()
             weight, transfer, noise_map, delta, k21 = self.window
-            factor = s1m_window_factor(weight, transfer, noise_map, signal, linear - signal,
-                                       1 + self.bias_params["alpha0"].value, self.q)
+            if self.window_exact is not None:  # the exact window at the tree grid (no AP in the factor)
+                from .survey import s1m_exact_factor
+
+                hist, sample, two, delta = self.window_exact
+                factor = s1m_exact_factor(hist, sample, tree.ravel(), 1 + self.bias_params["alpha0"].value,
+                                          linear - signal, two, self.q)
+            else:
+                factor = s1m_window_factor(weight, transfer, noise_map, signal, linear - signal,
+                                           1 + self.bias_params["alpha0"].value, self.q)
             self.flattheory = self.flattheory * k21 / (delta * factor)[self.block_index]
         return self.flattheory
 
