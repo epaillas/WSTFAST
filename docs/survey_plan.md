@@ -618,8 +618,13 @@ variance level.**
   and local-line-of-sight mocks: the plane-parallel kernels agree to 0.04% rms (inside the mock noise) and the exact
   Kaiser wide-angle kernels (`CellWindow.wide_angle`: six more transforms per component, g n_i n_j) change nothing
   (≤ 0.05% per block). A 192³ toy with J = 3 confirms the σ = 71 Mpc/h kernels to ≤ 0.07%.
-- **Suspect for the ±0.15%:** the cusp correction's isotropic envelope against the anisotropic low-k shape of masked
-  kernels at tilted edges (pad 2 vs pad 3 test in progress).
+- **SGC (3600 cells) against the 827 paired RIC mocks: 0.059% rms, 0.14% max = 0.054σ rms, 0.16σ max** (mock noise
+  0.033%), i.e. at the target. Its small residual has the opposite sign pattern to NGC's (m = l blocks +0.1% at σ = 25),
+  so the ±0.15% is geometry-dependent.
+- **Not the cusp correction:** pad 3 against pad 2 on 162 NGC cells changes the predicted ratios by < 0.005%.
+- **Suspect for NGC's ±0.15%:** the wide-angle coupling of the m components of masked kernels at edges tilted with
+  respect to the line of sight, which a plane edge normal to the line of sight (the toy) cannot show; per-cell factors
+  of ±0.5–2% were seen on DR1 cells (test of the net shift over the sample in progress).
 - **Next:** the Abacus fit with the exact window and δ = 1; the cumulant (non-Gaussian edge) transfer; the second layer.
 
 **Next:**
