@@ -836,8 +836,9 @@ def _chi_moment(lam_a, lam_b, q):
     if lam_b is None:
         return (2 * lam_a) ** p * np.exp(gammaln((1 + q) / 2)) / np.sqrt(np.pi)
     phi = (np.arange(CHI_NODES) + 0.5) * np.pi / (2 * CHI_NODES)
-    c2 = np.cos(phi)[:, None] ** 2
-    return 2**p * np.exp(gammaln(1 + p)) * np.mean((np.asarray(lam_a) * c2 + np.asarray(lam_b) * (1 - c2)) ** p, axis=0)
+    c2 = np.cos(phi) ** 2
+    lam_a, lam_b = np.asarray(lam_a)[..., None], np.asarray(lam_b)[..., None]  # any shape (as the JAX version)
+    return 2**p * np.exp(gammaln(1 + p)) * np.mean((lam_a * c2 + lam_b * (1 - c2)) ** p, axis=-1)
 
 
 def s1m_gaussian(lam_signal: dict, config: WSTConfig, q: float, weights: np.ndarray, transfer: dict | None = None,
@@ -1428,15 +1429,16 @@ def s1m_exact_factor(hist, sample, pgrid, noise_scale, box_noise, two, q: float)
     exact covariance of (X_m, X_-m) is (C_mm, C_-m-m, C_m-m) = f lambda_box (1, 1, 0) + u (v pgrid) + noise_scale
     noise, with u v the rows minus the coverage model: either their SVD per block, v (B, 3, r, N), or the rows
     projected on a spectrum basis v (r, N) shared by every block (``spectrum_basis``). ``pgrid`` (N,) is the spectrum
-    on the grid, ``box_noise`` (B,) the theory's box noise and ``two`` (B,) whether the block is an |m| > 0 pair.
-    NumPy or JAX."""
+    on the grid, ``noise_scale`` the shot-noise amplitude (1 + alpha0) of the survey cells' unit noise, ``box_noise``
+    (B,) the theory's box noise variance (its amplitude included, as ``s1m_window_factor``'s) and ``two`` (B,)
+    whether the block is an |m| > 0 pair. NumPy or JAX."""
     import jax.numpy as jnp
 
     xp = jnp if any(isinstance(x, jnp.ndarray) for x in (pgrid, noise_scale, box_noise)) else np
     hw, hf, hn = hist
     sw, sf, u, v, sn, vbox, snm = sample
     lam_box = vbox @ pgrid  # (B,)
-    box = lam_box + noise_scale * box_noise
+    box = lam_box + box_noise  # the theory's box noise carries its amplitude already (as in s1m_window_factor)
     box_moment = xp.where(two, _chi_moment_xp(box, box, q, xp), _chi_moment_xp(box, None, q, xp))
     lam_h = xp.maximum(hf * lam_box[:, None] + noise_scale * hn, 1e-30)  # coverage model, every cell (bins)
     model_h = xp.where(two[:, None], _chi_moment_xp(lam_h, lam_h, q, xp), _chi_moment_xp(lam_h, None, q, xp))
