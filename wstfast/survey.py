@@ -1450,7 +1450,10 @@ def s1m_exact_factor(hist, sample, pgrid, noise_scale, box_noise, two, q: float)
     base = sf[:, :, None] * lam_box[:, None, None] * xp.asarray([1.0, 1.0, 0.0])
     cov = base + rows + noise_scale * sn  # (B, C, 3), exact
     a, b, c = cov[..., 0], cov[..., 1], cov[..., 2]
-    half, disc = 0.5 * (a + b), xp.sqrt(xp.maximum(0.25 * (a - b) ** 2 + c**2, 0.0))
+    half = 0.5 * (a + b)
+    # the |m| = 0 blocks have a = b and c = 0 exactly: keep the discriminant away from sqrt(0), whose derivative is
+    # infinite and would poison the gradient through xp.where (the one-component branch is taken for them)
+    disc = xp.sqrt(0.25 * (a - b) ** 2 + c**2 + (1e-12 * half) ** 2)
     lp, lm = xp.maximum(half + disc, 1e-30), xp.maximum(half - disc, 1e-30)
     exact = xp.where(two[:, None], _chi_moment_xp(lp, lm, q, xp), _chi_moment_xp(xp.maximum(a, 1e-30), None, q, xp))
     lam_s = xp.maximum(sf * lam_box[:, None] + noise_scale * snm, 1e-30)  # the same model, at the sample cells
