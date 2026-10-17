@@ -1340,16 +1340,14 @@ class RICTransfer:
     def apply(transfer: dict, masked: np.ndarray, labels: np.ndarray) -> np.ndarray:
         """Masked signal covariances [..., cell, j, l, |m|, 3] of sample cells with bin ``labels``, scaled by the
         transfer of their components (C_mm by T_m, C_-m-m by T_-m, C_m-m by sqrt(T_m T_-m))."""
-        out = np.array(masked, dtype=float)
-        axis = out.ndim - 5  # position of the cell axis: [cell, j, l, |m|, 3] or [cell, j, l, |m|, 3, N]
-        lead = (slice(None),) * axis
+        out = np.array(masked, dtype=float)  # [cell, j, l, |m|, 3] or, for the grid rows, [cell, j, l, |m|, 3, N]
+        tail = (slice(None),) + (None,) * (out.ndim - 5)
         for (j, ell), t in transfer.items():
             for m in range(ell + 1):
                 tp, tm = t[ell + m][labels], t[ell - m][labels]
-                tail = (None,) * (out.ndim - axis - 5)
-                out[lead + (slice(None), j, ell, m, 0)] *= tp[(slice(None),) + tail]
-                out[lead + (slice(None), j, ell, m, 1)] *= tm[(slice(None),) + tail]
-                out[lead + (slice(None), j, ell, m, 2)] *= np.sqrt(tp * tm)[(slice(None),) + tail]
+                out[:, j, ell, m, 0] *= tp[tail]
+                out[:, j, ell, m, 1] *= tm[tail]
+                out[:, j, ell, m, 2] *= np.sqrt(tp * tm)[tail]
         return out
 
     def save(self, path):
