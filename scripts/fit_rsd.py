@@ -159,6 +159,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-steps", type=int, default=None,
                         help="largest number of steps per chain (default 20000 for NUTS, 200000 for MH)")
     parser.add_argument("--proposal-from", type=Path, default=None)
+    parser.add_argument("--start-from", type=Path, default=None, metavar="SUMMARY",
+                        help="summary.json of another fit: its best fit is one more starting point of the profile")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args(argv)
@@ -665,7 +667,8 @@ def main():
     likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance * m1)
     fix_parameters(likelihood, fixed)
     posterior = Posterior(likelihood)
-    profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed)
+    start = json.loads(args.start_from.read_text())["bestfit"] if args.start_from is not None else None
+    profiles = profile(posterior, args.output_dir / "profiles.h5", seed=args.seed, start=start)
     print(profiles.to_stats(tablefmt="pretty"))
     samples = None
     if args.method == "sample":

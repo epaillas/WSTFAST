@@ -169,14 +169,23 @@ def parse_fixed(items) -> dict[str, float]:
     return out
 
 
-def profile(posterior, output: Path, seed: int = 42, nstarts: int = 4):
-    """Minuit maximisation from several starting points; the best is refined and saved."""
+def profile(posterior, output: Path, seed: int = 42, nstarts: int = 4, start: dict | None = None):
+    """Minuit maximisation from several starting points; the best is refined and saved. ``start``: values of (some
+    of) the varied parameters, e.g. another fit's best fit, added as one more starting point (the others at the
+    reference)."""
     from desilike.profilers import Minuit, Profiler
 
     graph = build(posterior)
+    names = graph.params.select(varied=True, derived=False).names()
     candidates = Profiler(graph, kernel=Minuit(), rng=seed).maximize(niterations=nstarts)
     best = candidates.choice(index=int(np.argmax(np.asarray(candidates.logpdf))), squeeze=True)
-    names = graph.params.select(varied=True, derived=False).names()
+    logbest = float(np.max(np.asarray(candidates.logpdf)))
+    if start is not None:
+        given = {name: float(start[name]) for name in names if name in start}
+        point = np.array([given.get(name, float(np.asarray(best.best[name]).reshape(-1)[-1])) for name in names])
+        given_run = Profiler(graph, kernel=Minuit(), rng=seed).maximize(niterations=1, start=point)
+        if float(np.max(np.asarray(given_run.logpdf))) > logbest:
+            best = given_run.choice(index=0, squeeze=True)
     start = np.concatenate([np.asarray(best.best[name], dtype="f8").reshape(-1) for name in names])
     profiles = Profiler(graph, kernel=Minuit(), rng=seed).maximize(niterations=1, start=start)
     profiles.write(str(output))

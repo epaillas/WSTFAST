@@ -777,10 +777,10 @@ class S1mTheory(Calculator):
                 raise ValueError("window needs sigmas, the filter scale of each coefficient")
             keys = [(window.key(sigma), c.ell, m) for c, sigma in zip(coefficients, sigmas) for m in range(c.ell + 1)]
             self.window = tuple(jnp.asarray(a) for a in window.s1m_arrays(keys))
-            if window.exact:  # the exact per-cell window replaces the histogram factor (delta stays as calibrated)
-                hist, sample = window.s1m_exact_arrays(keys)
+            if window.exact:  # the exact per-cell window replaces the histogram factor and its delta (its own delta)
+                hist, sample, delta = window.s1m_exact_arrays(keys)
                 self.window_exact = (tuple(jnp.asarray(a) for a in hist), tuple(jnp.asarray(a) for a in sample),
-                                     jnp.asarray(np.array([k[2] > 0 for k in keys])))
+                                     jnp.asarray(np.array([k[2] > 0 for k in keys])), jnp.asarray(delta))
         self.ng_mode = "constant" if ng_amplitude is True else ng_amplitude
         if self.ng_mode in ("slope", "per-scale") and sigmas is None:
             raise ValueError(f"ng_amplitude={ng_amplitude!r} needs the filter scales (sigmas)")
@@ -848,7 +848,7 @@ class S1mTheory(Calculator):
                 signal = self.projection(grid[None], qpar, qperp, 0.0)[0]
             weight, transfer, noise_map, delta = self.window
             if self.window_exact is not None:  # per-cell covariances of the spectrum (no AP in the factor)
-                hist, sample, two = self.window_exact
+                hist, sample, two, delta = self.window_exact
                 factor = s1m_exact_factor(hist, sample, grid.ravel(), noise, variances - signal, two, self.q)
             else:
                 factor = s1m_window_factor(weight, transfer, noise_map, signal, variances - signal, noise, self.q)

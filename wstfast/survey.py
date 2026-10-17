@@ -1594,9 +1594,12 @@ class SurveyWindow:
         return out
 
     def s1m_exact_arrays(self, keys):
-        """(hist, sample) stacked and padded arrays of ``exact`` for ``s1m_exact_factor``: hist = (weight, transfer,
-        noise) (B, nbin); sample = (weight (B, C), coverage (B, C), u (B, C, 3, r), v (B, 3, r, N) or the shared
-        spectrum basis (nb, N), noise (B, C, 3), vbox (B, N), noise_model (B, C))."""
+        """(hist, sample, delta) stacked and padded arrays of ``exact`` for ``s1m_exact_factor``: hist = (weight,
+        transfer, noise) (B, nbin); sample = (weight (B, C), coverage (B, C), u (B, C, 3, r), v (B, 3, r, N) or the
+        shared spectrum basis (nb, N), noise (B, C, 3), vbox (B, N), noise_model (B, C)); delta (B,) the blocks'
+        own S-level factor on top of the exact window (``exact[key]["delta"]``, 1 by default: e.g. the residual of
+        the Gaussian mocks or the halo edge correction), separate from the histogram window's ``delta`` that the
+        second layer's K was calibrated against."""
         r = max(self.exact[k]["u"].shape[-1] for k in keys)
         nbin = max(len(self.exact[k]["hist_weight"]) for k in keys)
         pad_u = lambda a: np.pad(a, ((0, 0), (0, 0), (0, r - a.shape[-1])))  # noqa: E731
@@ -1610,7 +1613,8 @@ class SurveyWindow:
                   np.array([pad_u(self.exact[k]["u"]) for k in keys]), v,
                   np.array([self.exact[k]["noise"] for k in keys]), np.array([self.exact[k]["vbox"] for k in keys]),
                   np.array([self.exact[k]["noise_model"] for k in keys]))
-        return hist, sample
+        delta = np.array([float(self.exact[k].get("delta", 1.0)) for k in keys])
+        return hist, sample, delta
 
     def calibrate_s1m(self, key, survey, box, signal, box_noise):
         """delta of a block from paired mocks (``survey``, ``box`` (nmock,) measured on the support and unmasked on the

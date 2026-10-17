@@ -463,10 +463,11 @@ def test_exact_window_spectrum_basis_matches_svd_form(tmp_path):
     projected.save(tmp_path / "projected.npz")
     loaded = SurveyWindow.load(tmp_path / "projected.npz")
     assert loaded.exact_basis.shape == (6, n) and "v" not in loaded.exact[keys[0]]
+    np.testing.assert_allclose(loaded.s1m_exact_arrays(keys)[2], 1.0)  # no own delta: 1
     two = np.array([k[2] > 0 for k in keys])
     box_noise = np.full(len(keys), 0.15)
     for pgrid in (spectra[0], spectra[1] * 3 + 10 * shapes[2]):
         pgrid = jnp.asarray(pgrid)  # the JAX path of the factor
-        reference = s1m_exact_factor(*svd.s1m_exact_arrays(keys), pgrid, 1.0, box_noise, two, 0.8)
-        got = s1m_exact_factor(*loaded.s1m_exact_arrays(keys), pgrid, 1.0, box_noise, two, 0.8)
+        reference = s1m_exact_factor(*svd.s1m_exact_arrays(keys)[:2], pgrid, 1.0, box_noise, two, 0.8)
+        got = s1m_exact_factor(*loaded.s1m_exact_arrays(keys)[:2], pgrid, 1.0, box_noise, two, 0.8)
         np.testing.assert_allclose(got, reference, rtol=1e-5)
