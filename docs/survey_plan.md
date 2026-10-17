@@ -648,6 +648,18 @@ variance level.**
   Abacus- and stack-geometry windows, `dr1_window_products_exact_pca`, `..._exact_stack_pca`; the 10 GB files are
   deleted). Also fixed: the loader truncated field names with underscores (`hist_weight` → `hist`), which is what
   had crashed the first exact-window fits.
+- **Likelihood bug found by the first Abacus fits (2026-10-17, de44acb).** With the exact window at δ = 1 the joint
+  profile gave χ² 875 against 413 for the calibrated histogram window, and at the histogram fit's best point the exact
+  theory vector had χ² 47000: `s1m_exact_factor` multiplied the theory's box noise by the shot-noise amplitude
+  (1 + α₀) although that noise already carries it (the histogram factor never did), so at the fits' α₀ ≈ 1.2 the box
+  reference was inflated and the factor 5–10% low, worst for the noisiest blocks (σ = 25, high m). Diagnosed by
+  decomposing the factor at the fit's inputs (`scratchpad/decompose.py`): signal only, the window file reproduces the
+  direct 4320-cell kernels of the validation. Fixed, the exact factor is 0.3–1.3% below the calibrated histogram
+  factor at the same point (mean 0.7%: the halo edge correction it does not contain). The "halo" mode of the fit
+  launcher multiplies the exact window by δ_halo / δ_Gauss of the histogram products (NGC 0.5%, SGC 0.9% on average,
+  up to 1.7% at σ = 25) on top of the Gaussian residual: the non-Gaussian edge effect is still a calibrated factor.
+  The profiles also showed that the exact factor is cheap once `_chi_moment` uses 16 nodes (22 ms with gradient per
+  cap; 64 nodes were 10x slower for nothing: the integrand is periodic and analytic).
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
