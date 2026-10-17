@@ -626,6 +626,14 @@ variance level.**
   blocks of masked kernels at tilted edges, but the weighted net shift of the predicted ratios is only +0.05–0.09%
   (σ = 50–71, m ≤ l − 2) and ~0 at m = l: part of NGC's positive m = 0 residual, not its negative m = l one. Left as a
   refinement; the exact window is used plane-parallel.
+- **Likelihood representation, restructured (2026-10-17, 4c62f65).** The SVD of the full rows barely compressed
+  (ranks 800–1500 of 3840: the cell-to-cell variation is mostly the coverage). Now the rows minus the coverage model
+  f × (unmasked row) are compressed (ranks ≤ 18) and the factor is a control variate: the coverage model summed over
+  every support cell through a fine (256 × 8) coverage–noise histogram, plus the exact − model mean over the sample
+  cells. The model subtracted on the samples must be the one summed over every cell (the m-averaged noise map, not
+  the per-component noise), else the estimator is biased by 0.2%; with that, the JAX factor matches
+  `CellWindow.control_variate` to 3e-6 on the toy for four spectra. The sampling noise is then that of the
+  correction term only, so 40 cells per bin suffice (~0.085%).
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
