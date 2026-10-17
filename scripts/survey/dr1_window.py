@@ -497,7 +497,15 @@ def run_products(args, geometries, setups, pk):
                 None, grid=RSDGrid(kmax=args.grid_kmax), processes=args.processes)
             ric_path = args.output / f"ric_transfer_{cap}.npz"
             transfer = RICTransfer.load(ric_path) if ric_path.exists() else None
-            data_product.build_exact(s["config"], rows, cell_weights, labels, ric_transfer=transfer)
+            ones = {blk: np.ones_like(c) for blk, c in correction.items()}  # the coverage model over every cell
+            coverage_only = SurveyWindow.build(window, ones, s.get("noise_data", s["noise"]), weights, q=args.q,
+                                               ntransfer=256, nnoise=8)  # fine bins: the all-cells term must be exact
+            maps = s.get("noise_data", s["noise"])
+            at = np.searchsorted(np.flatnonzero(g.support), cells)
+            noise_model = np.array([[maps[j, ell][at] for ell in range(s["config"].L + 1)]
+                                    for j in range(s["config"].J + 1)]).transpose(2, 0, 1)
+            data_product.build_exact(s["config"], rows, cell_weights, labels, ric_transfer=transfer,
+                                     coverage_hist=coverage_only, noise_model=noise_model)
             ranks = [b["u"].shape[-1] for b in data_product.exact.values()]
             print(f"{cap}: exact window at {len(cells)} cells in {time.time() - t0:.0f} s, ranks {min(ranks)}-{max(ranks)},"
                   f" RIC transfer {'yes' if transfer is not None else 'no'}", flush=True)

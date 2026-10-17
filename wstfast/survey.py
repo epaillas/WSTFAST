@@ -1000,6 +1000,7 @@ class CellWindow:
             pfull = [np.where(kfull > 0, p(np.where(kfull > 0, kfull, 1e-4), mufull), 0.0) / self.g.cellsize**3
                      * full.multiplicity / full.n**3 for p in spectra]
         out.update({k: np.zeros((nc, nj, nl, nl, 3)) for k in ("noise_masked", "noise_unmasked")})
+        out["coverage"] = np.zeros((nc, nj, nl))  # f(x) = sum_m |g_m|^2 / sum_m |psi_m|^2, the coverage of the wavelet
         for j in range(nj):
             self._prepare(j)
             modes = self._modes[j]
@@ -1036,6 +1037,7 @@ class CellWindow:
                     rotation = self._rotations[ell]
                     psi_r = rotation(psi.reshape(2 * ell + 1, -1), self.theta[ic], self.phi[ic]).reshape(psi.shape)
                     g = psi_r * W
+                    out["coverage"][io, j, ell] = float(np.sum(g.astype(np.float64) ** 2) / np.sum(psi_r.astype(np.float64) ** 2))
                     ghat = sfft.rfftn(g, axes=(1, 2, 3), workers=self.workers)
                     phat = sfft.rfftn(psi_r, axes=(1, 2, 3), workers=self.workers)
                     if modes["cic"] is not None:  # kernels seen by the CIC-correlated noise: g * c
@@ -1393,25 +1395,38 @@ def _chi_moment_xp(lam_a, lam_b, q, xp):
     return 2**p * xp.exp(gammaln(1 + p)) * xp.mean((lam_a[..., None] * c2 + lam_b[..., None] * (1 - c2)) ** p, axis=-1)
 
 
-def s1m_exact_factor(weight, u, v, noise, vbox, pgrid, noise_scale, box_noise, two, q: float):
-    """Survey / box ratio of the Gaussian part of S1m for blocks (B,) from the exact per-cell covariances of
-    ``SurveyWindow.exact`` (``s1m_exact_arrays``): weight (B, C), u (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3),
-    the unmasked row vbox (B, N), the spectrum on the grid ``pgrid`` (N,), the shot-noise amplitude ``noise_scale``, the
-    box noise of the theory ``box_noise`` (B,), and ``two`` (B,) whether the block is a |m| > 0 pair. Per cell the
-    covariance of (X_m, X_-m) is (C_mm, C_-m-m, C_m-m) = u (v pgrid) + noise_scale noise, and its moment follows from
-    the eigenvalues; the box moment uses the box variance vbox pgrid + noise_scale box_noise. NumPy or JAX."""
+def s1m_exact_factor(hist, sample, pgrid, noise_scale, box_noise, two, q: float):
+    """Survey / box ratio of the Gaussian part of S1m for blocks (B,) from ``SurveyWindow.exact``
+    (``s1m_exact_arrays``), as a control variate: the coverage model lambda = f lambda_box + noise_scale lambda_N,
+    with independent components, summed over every support cell through its histogram ``hist`` = (weight (B, nbin),
+    transfer f (B, nbin), noise (B, nbin)), plus, over the ``sample`` cells = (weight (B, C), coverage (B, C), u
+    (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3), vbox (B, N), noise_model (B, C)), the exact moment minus the
+    coverage model's (at the model's own noise, noise_model): the
+    exact covariance of (X_m, X_-m) is (C_mm, C_-m-m, C_m-m) = f lambda_box (1, 1, 0) + u (v pgrid) + noise_scale
+    noise, with u v the SVD of the rows minus the coverage model. ``pgrid`` (N,) is the spectrum on the grid,
+    ``box_noise`` (B,) the theory's box noise and ``two`` (B,) whether the block is an |m| > 0 pair. NumPy or JAX."""
     import jax.numpy as jnp
 
     xp = jnp if any(isinstance(x, jnp.ndarray) for x in (pgrid, noise_scale, box_noise)) else np
+    hw, hf, hn = hist
+    sw, sf, u, v, sn, vbox, snm = sample
+    lam_box = vbox @ pgrid  # (B,)
+    box = lam_box + noise_scale * box_noise
+    box_moment = xp.where(two, _chi_moment_xp(box, box, q, xp), _chi_moment_xp(box, None, q, xp))
+    lam_h = xp.maximum(hf * lam_box[:, None] + noise_scale * hn, 1e-30)  # coverage model, every cell (bins)
+    model_h = xp.where(two[:, None], _chi_moment_xp(lam_h, lam_h, q, xp), _chi_moment_xp(lam_h, None, q, xp))
+    total_h = xp.sum(hw * model_h, axis=1) / xp.sum(hw, axis=1)
     coef = xp.einsum("bern,n->ber", v, pgrid)  # (B, 3, r)
-    cov = xp.einsum("bcer,ber->bce", u, coef) + noise_scale * noise  # (B, C, 3)
+    base = sf[:, :, None] * lam_box[:, None, None] * xp.asarray([1.0, 1.0, 0.0])
+    cov = base + xp.einsum("bcer,ber->bce", u, coef) + noise_scale * sn  # (B, C, 3), exact
     a, b, c = cov[..., 0], cov[..., 1], cov[..., 2]
     half, disc = 0.5 * (a + b), xp.sqrt(xp.maximum(0.25 * (a - b) ** 2 + c**2, 0.0))
     lp, lm = xp.maximum(half + disc, 1e-30), xp.maximum(half - disc, 1e-30)
-    moment = xp.where(two[:, None], _chi_moment_xp(lp, lm, q, xp), _chi_moment_xp(xp.maximum(a, 1e-30), None, q, xp))
-    box = vbox @ pgrid + noise_scale * box_noise
-    box_moment = xp.where(two, _chi_moment_xp(box, box, q, xp), _chi_moment_xp(box, None, q, xp))
-    return xp.sum(weight * moment, axis=1) / xp.sum(weight, axis=1) / box_moment
+    exact = xp.where(two[:, None], _chi_moment_xp(lp, lm, q, xp), _chi_moment_xp(xp.maximum(a, 1e-30), None, q, xp))
+    lam_s = xp.maximum(sf * lam_box[:, None] + noise_scale * snm, 1e-30)  # the same model, at the sample cells
+    model_s = xp.where(two[:, None], _chi_moment_xp(lam_s, lam_s, q, xp), _chi_moment_xp(lam_s, None, q, xp))
+    correction = xp.sum(sw * (exact - model_s), axis=1) / xp.sum(sw, axis=1)
+    return (total_h + correction) / box_moment
 
 
 @dataclass
@@ -1480,42 +1495,68 @@ class SurveyWindow:
         return float(self.veff * (h @ local) ** 2 / (h2 @ local**2) * h2.sum() / h.sum() ** 2)
 
     def build_exact(self, config: WSTConfig, rows: dict, weights: np.ndarray, labels: np.ndarray | None = None,
-                    ric_transfer: dict | None = None, tol: float = 1e-4):
+                    ric_transfer: dict | None = None, tol: float = 1e-4, coverage_hist: "SurveyWindow | None" = None,
+                    noise_model: np.ndarray | None = None):
         """Add the exact window from ``CellWindow.covariances(None, grid=...)`` rows (``masked`` and ``unmasked``
-        [cell, j, l, |m|, 3, N], ``noise_masked`` [cell, j, l, |m|, 3]) at sample cells of ``weights`` and bin
-        ``labels`` (for ``ric_transfer``, ``RICTransfer.transfer()``). The masked rows of each block are compressed by
-        an SVD across cells, keeping the rank that reproduces them to ``tol`` in the Frobenius norm."""
+        [cell, j, l, |m|, 3, N], ``noise_masked`` [cell, j, l, |m|, 3], ``coverage`` [cell, j, l]) at sample cells of
+        ``weights`` and bin ``labels`` (for ``ric_transfer``, ``RICTransfer.transfer()``). The rows of each block, minus
+        the coverage model f x the unmasked row, are compressed by an SVD across cells keeping the rank that reproduces
+        them to ``tol`` of the full rows' norm. ``coverage_hist``: a ``SurveyWindow`` built with the coverage only
+        (correction 1), whose histograms carry the coverage model over every support cell (``s1m_exact_factor``);
+        by default this window's own ``s1m`` blocks. ``noise_model`` [cell, j, l]: the noise of the coverage model
+        at the sample cells, the same m-averaged maps as the histograms (``noise_variance_maps``), so that the model
+        subtracted on the samples is the one summed over every cell (an unbiased control variate); by default the
+        sample cells' exact noise averaged over the two components."""
         masked = rows["masked"] if ric_transfer is None else RICTransfer.apply(ric_transfer, rows["masked"], labels)
+        hist = (coverage_hist or self).s1m
         self.exact = {}
         for j in range(config.J + 1):
             for ell in range(config.L + 1):
+                f = rows["coverage"][:, j, ell]
                 for m in range(ell + 1):
-                    block = masked[:, j, ell, m]  # (C, 3, N)
+                    key = (self.key(config.sigma(j)), ell, m)
+                    vbox = rows["unmasked"][:, j, ell, m, 0].mean(axis=0)
+                    block = np.array(masked[:, j, ell, m])  # (C, 3, N)
+                    block[:, 0] -= f[:, None] * vbox[None, :]
+                    block[:, 1] -= f[:, None] * vbox[None, :]
                     c, _, n = block.shape
                     flat = block.transpose(1, 0, 2).reshape(3 * c, n) if m else block[:, 0]
+                    scale = np.linalg.norm(masked[:, j, ell, m, 0])
                     uu, ss, vt = np.linalg.svd(flat, full_matrices=False)
-                    tail = np.sqrt(np.cumsum(ss[::-1] ** 2)[::-1] / np.sum(ss**2))
-                    r = int(np.searchsorted(-tail, -tol)) if tail[-1] > tol else max(int(np.argmax(tail <= tol)), 1)
-                    r = max(r, 1)
+                    tail = np.sqrt(np.cumsum(ss[::-1] ** 2)[::-1])
+                    r = max(int(np.argmax(tail <= tol * scale)) if np.any(tail <= tol * scale) else len(ss), 1)
                     us = uu[:, :r] * ss[:r]
                     u = np.stack([us[e * c:(e + 1) * c] for e in range(3)], axis=1) if m else \
                         np.stack([us, us, np.zeros_like(us)], axis=1)
                     v = np.broadcast_to(vt[:r], (3, r, n)).copy()
                     if m == 0:
                         v[2] = 0.0
-                    self.exact[self.key(config.sigma(j)), ell, m] = dict(
-                        weight=np.asarray(weights, dtype=float), u=u, v=v, noise=rows["noise_masked"][:, j, ell, m],
-                        vbox=rows["unmasked"][:, j, ell, m, 0].mean(axis=0))
+                    h = hist[key]
+                    nm = (noise_model[:, j, ell] if noise_model is not None
+                          else 0.5 * (rows["noise_masked"][:, j, ell, m, 0] + rows["noise_masked"][:, j, ell, m, 1]))
+                    self.exact[key] = dict(weight=np.asarray(weights, dtype=float), coverage=f.copy(), u=u, v=v,
+                                           noise=rows["noise_masked"][:, j, ell, m], noise_model=np.asarray(nm, dtype=float),
+                                           vbox=vbox,
+                                           hist_weight=np.asarray(h["weight"], dtype=float),
+                                           hist_transfer=np.asarray(h["transfer"], dtype=float),
+                                           hist_noise=np.asarray(h["noise"], dtype=float))
 
     def s1m_exact_arrays(self, keys):
-        """Stacked, rank-padded arrays of ``exact`` for ``s1m_exact_factor``: weight (B, C), u (B, C, 3, r), v (B, 3, r, N),
-        noise (B, C, 3), vbox (B, N), two (B,)."""
+        """(hist, sample) stacked and padded arrays of ``exact`` for ``s1m_exact_factor``: hist = (weight, transfer,
+        noise) (B, nbin); sample = (weight (B, C), coverage (B, C), u (B, C, 3, r), v (B, 3, r, N), noise (B, C, 3),
+        vbox (B, N), noise_model (B, C))."""
         r = max(self.exact[k]["u"].shape[-1] for k in keys)
+        nbin = max(len(self.exact[k]["hist_weight"]) for k in keys)
         pad_u = lambda a: np.pad(a, ((0, 0), (0, 0), (0, r - a.shape[-1])))  # noqa: E731
         pad_v = lambda a: np.pad(a, ((0, 0), (0, r - a.shape[1]), (0, 0)))  # noqa: E731
-        return (np.array([self.exact[k]["weight"] for k in keys]), np.array([pad_u(self.exact[k]["u"]) for k in keys]),
-                np.array([pad_v(self.exact[k]["v"]) for k in keys]), np.array([self.exact[k]["noise"] for k in keys]),
-                np.array([self.exact[k]["vbox"] for k in keys]), np.array([k[2] > 0 for k in keys]))
+        pad_h = lambda a: np.pad(a, (0, nbin - len(a)))  # noqa: E731
+        hist = tuple(np.array([pad_h(self.exact[k][name]) for k in keys])
+                     for name in ("hist_weight", "hist_transfer", "hist_noise"))
+        sample = (np.array([self.exact[k]["weight"] for k in keys]), np.array([self.exact[k]["coverage"] for k in keys]),
+                  np.array([pad_u(self.exact[k]["u"]) for k in keys]), np.array([pad_v(self.exact[k]["v"]) for k in keys]),
+                  np.array([self.exact[k]["noise"] for k in keys]), np.array([self.exact[k]["vbox"] for k in keys]),
+                  np.array([self.exact[k]["noise_model"] for k in keys]))
+        return hist, sample
 
     def calibrate_s1m(self, key, survey, box, signal, box_noise):
         """delta of a block from paired mocks (``survey``, ``box`` (nmock,) measured on the support and unmasked on the
