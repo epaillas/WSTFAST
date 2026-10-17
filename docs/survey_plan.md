@@ -696,6 +696,17 @@ variance level.**
   histogram gave +3.8σ. What remains is SGC's ω_cdm (+2.4σ; NGC is fine), which the histogram setup also showed
   (SGC 0.1267 ± 0.0051), and a joint χ² of 468 against 413. The profiles are Minuit profiles; the covariance is the
   analytic one of the 25-mock mean.
+- **Baseline consolidated (2026-10-17 night, 0ffb544).** (i) The exact products had carried the *Gaussian* K of the
+  second layer (±1.1–1.6% from the halo-calibrated one of `cic_halorecal`); the recalibrated products
+  (`dr1_window_products_exact_pca_hrecal`, and `_halos` with the survey-side noise doubled for the halo mocks) now
+  carry the halo K. (ii) `S21mTheory` takes the first-layer W of its K/(δW) from the exact window and its own δ
+  when the window has one, so one first-layer window serves both layers. (iii) The paper figure (Fig. footprint,
+  `scripts/paper/survey.py --halo`) is regenerated with this baseline: on the 25 held-out halo pairs the box × window
+  reproduces the footprint to 0.18% rms (max 0.46%, 0.18σ, χ² 94/60) for S1m and 0.33% rms (0.28σ, χ² 50/54) for
+  S21m; the residual factor of the first layer is within 0.0–0.9% of one. The paper's survey section, discussion,
+  conclusions and a new appendix describe the computed window (paper/main_v2.tex, local). NUTS chains of the joint
+  and NGC Abacus fits with this baseline are running (`abacus_N25_exactpca_exp_hrecal_nuts_*`); SGC alone is too
+  noisy to fit separately (user's call).
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
