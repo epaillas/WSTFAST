@@ -1,7 +1,7 @@
 """Tree-level connected noise of the line-of-sight-resolved first-layer moduli of a biased, discrete tracer.
 
 Redshift-space, biased-tracer version of modulus_noise.py. For the |m| block M of the wavelet vector X (n = n_M
-components of variance lambda) and U = |X_M|, the noise of U beyond the Gaussian chaos value g (rsd_moduli.py) is,
+components of variance lambda) and U = |X_M|, the noise of U beyond the Gaussian chaos value g (second_layer.py) is,
 in units of <U>^2 and with the Gaussian moments of the modulus A2 = <U> / (n lambda), A4 = -<U> / (n (n+2) lambda^2):
 
 * ``E``:   -2 E_1 g, the shift of <U>^2 by its Edgeworth correction (q = 1);
@@ -16,10 +16,10 @@ F(p, q) = (-1)^l c_l^2 w_M R(p) R(q) Re[Y_lM(p) Y_lM(q)^*] is the block pair ker
 The tracer correlators are those of a Poisson-sampled biased field: P_d = Z1^2 P_L D^2 + N, B_d = B + N (P + P + P)
 + N^2, T_d = T + N sum B + N^2 (sum P) + N^3, N = V / N_obj, with the tree-level Z_n of the Eulerian bias expansion
 including the cubic operators (b3, bG3, bdG2) that the power spectrum does not see. The clustering parts are
-velocity-damped on every leg, D(k) = exp(-(f k mu sigma_v)^2 / 2), the Poisson parts are not (as rsd_bias.py).
+velocity-damped on every leg, D(k) = exp(-(f k mu sigma_v)^2 / 2), the Poisson parts are not (as first_layer.py).
 
 The terms are evaluated at fixed biases (no monomial expansion), on nodes in u = sigma K and mu_K, with scrambled
-Sobol points importance-sampled on the filters (rsd.LegSampler). The Z kernels depend on directions only,
+Sobol points importance-sampled on the filters (first_layer.LegSampler). The Z kernels depend on directions only,
 so for a given (l, u, mu_K) they are shared by every sigma and |m|.
 
 With ``fog=True``, every term also comes with its first-order Fingers-of-God counterterm (``<name>_fog``): the tree
@@ -34,8 +34,8 @@ import numpy as np
 from scipy.special import sph_harm_y
 
 from .bias import cubic_kernel, galaxy_kernel
-from .rsd import LegSampler
-from .rsd_bias import linear_components
+from .first_layer import LegSampler
+from .bias import linear_components
 
 #: Reference wavenumber [h/Mpc] of the Fingers-of-God counterterm of the connected correlators.
 KR = 0.3
@@ -263,7 +263,7 @@ class ConnectedNoiseRSD:
                 lam = out["norm"][i, 0, 0] / n
                 one_point[i] = (kappa / lam**2, kappa, skew, lam)
                 k4 = kappa / lam**2
-                # NLO Edgeworth factor of <U> (q = 1) of one block, as rsd.block_edgeworth:
+                # NLO Edgeworth factor of <U> (q = 1) of one block, as first_layer.block_edgeworth:
                 # q (q - 2) K4 / (8 n (n + 2)) + [m = 0, even l] q (q - 2) (q - 4) kappa_3^2 / (72 lambda^3)
                 e1 = -k4 / (8 * n * (n + 2)) + (3 * skew**2 / (72 * lam**3) if m == 0 and ell % 2 == 0 else 0.0)
                 if "E" in terms:
@@ -392,7 +392,7 @@ def noise_ratio(fields, pk, f, sigma_v, beta, cubic, shotnoise, unodes=UNODES, n
 def interpolate_ratio(rho, unodes, munodes, sigmas, k, mu):
     """rho (nfield, nu, nmu) at the nodes -> (nfield, nk, nmu_out) on the grid (k, mu): linear in u = sigma k (constant
     beyond the nodes), Lagrange in mu^2 through the Gauss nodes."""
-    from .rsd import lagrange_matrix
+    from .spectrum import lagrange_matrix
 
     wmu = lagrange_matrix(np.asarray(munodes) ** 2, np.asarray(mu) ** 2)  # (nmu_out, nmu)
     out = []

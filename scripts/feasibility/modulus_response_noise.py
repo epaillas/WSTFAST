@@ -4,7 +4,7 @@
 From the stored multipoles (monopoles) of each field (j1, l, |m|):
   response   P_Ud / <U> = s b_U^model(K) (P_dd - V/N) + C: s is the data / model ratio of the response,
   noise      N_U(K) = [P_UU - P_Ud^2 / P_dd] / <U>^2   (the stochasticity of U with respect to delta).
-Model: wstfast.theory.rsd_bias (ModulusSpectraRSD with tracer kernels) at the Quijote cosmology and given biases:
+Model: wstfast.theory.rsd_bias (ModulusSpectra with tracer kernels) at the Quijote cosmology and given biases:
   b_U = int R Z1 P_L / int Z1^2 P_L,   R = (r0 + N r1) / (n0 + N n1)   (response to delta_L, per field),
   N_U ~ g = (G0 + N G1 + N^2 G2) / (n0 + N n1)^2   (Gaussian noise of the model, before the free amplitude a).
 
@@ -23,21 +23,23 @@ import wstfast.theory  # noqa: F401
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_measurement
 from wstfast.theory.bias import galaxy_kernel, monomial_product, monomials, product_coefficients
-from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, linear_components, split
-from wstfast.theory.rsd import spherical_harmonic
-from wstfast.theory.rsd_moduli import SIGMA_V_FACTOR, first_layer_fields
+from wstfast.theory.bias import linear_components
+from wstfast.theory.layout import split
+from wstfast.theory.second_layer import ModulusSpectra
+from wstfast.theory.first_layer import spherical_harmonic
+from wstfast.theory.second_layer import SIGMA_V_FACTOR, first_layer_fields
 
 
 def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FACTOR, c_v=None):
     """b_U(K) and g(K) (monopoles over mu) per field. With ``c_v``, the Fingers-of-God counterterm (second order in
-    c_v, ``rsd_bias.BiasedModulusSpectraRSD(fog=True)``) replaces the velocity damping."""
+    c_v, ``second_layer.ModulusSpectra(fog=True)``) replaces the velocity damping."""
     nmu = 6
     x, wx = np.polynomial.legendre.leggauss(2 * nmu)
     mu, wmu = x[nmu:], wx[nmu:]
     logk, logp = np.log(klin), np.log(pklin)
     pk = lambda q: np.exp(np.interp(np.log(np.maximum(q, 1e-30)), logk, logp))  # noqa: E731
     sigma_v = sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
-    spectra = BiasedModulusSpectraRSD(fields, kvals, mu)
+    spectra = ModulusSpectra(fields, kvals, mu)
     grids, norms = spectra(pk, f, sigma_v, fog=c_v is not None)  # grids (nfield, nk, nmu, 296), norms (nfield, 16)
     if c_v is not None:  # [base 296 | 4 blocks x order 1 | x order 2]: X0 - c X1 + c^2 X2 on R0, R1, G0, G1 and n0
         base, blocks = grids[..., :296], (0, 70, 210, 280)

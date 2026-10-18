@@ -12,17 +12,18 @@ def linear_power():
 
 
 def test_cross_moduli_reproduce_the_basis():
-    """At fixed biases, the auto terms of ModulusCrossRSD equal the emulated basis (BiasedModulusSpectraRSD)."""
+    """At fixed biases, the auto terms of ModulusCrossRSD equal the emulated basis (ModulusSpectra)."""
     from wstfast.theory.bias import monomials
     from wstfast.theory.covariance_rsd import ModulusCrossRSD
-    from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, split
+    from wstfast.theory.layout import split
+    from wstfast.theory.second_layer import ModulusSpectra
 
     k, pl = linear_power()
     pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), np.log(k), np.log(pl)))  # noqa: E731
     fields = [(25.0, 2, 0), (25.0, 2, 1), (25.0, 3, 2)]
     kg, mug = np.array([0.01, 0.03]), np.array([0.2, 0.8])
     beta, N, f, sv = np.array([1.0, 1.9, -0.7, -0.6, 0.8]), 3000.0, 0.72, 4.0
-    grids, norms = BiasedModulusSpectraRSD(fields, kg, mug, npts=16, nx=8, nphi=6)(pk, f, sv)
+    grids, norms = ModulusSpectra(fields, kg, mug, npts=16, nx=8, nphi=6)(pk, f, sv)
     m2, m4 = monomials(beta, 2), monomials(beta, 4)
     r0r0, r0r1, r1r1, g0, g1, g2 = split(grids, (70, 70, 70, 70, 15, 1))
     norm2 = (norms[:, :15] @ m2 + N * norms[:, 15]) ** 2

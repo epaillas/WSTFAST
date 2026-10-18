@@ -207,3 +207,13 @@ def cubic_priors(b1, b2):
 
         return jnp.stack([-1.028 + 7.646 * b1 - 6.227 * b1**2 + 0.912 * b1**3, -22.0 / 63.0 * (b1 - 1.0), -2.0 / 7.0 * b2])
     return np.array([-1.028 + 7.646 * b1 - 6.227 * b1**2 + 0.912 * b1**3, -22.0 / 63.0 * (b1 - 1.0), -2.0 / 7.0 * b2])
+
+
+def linear_components(vectors, f):
+    """Z1 = b1 + f mu^2 along beta, for wavevectors (..., 3): (..., 5)."""
+    vectors = np.asarray(vectors)
+    norm2 = np.sum(vectors**2, axis=-1)
+    mu2 = np.divide(vectors[..., 2] ** 2, norm2, out=np.zeros_like(norm2), where=norm2 > 0)
+    out = np.zeros(vectors.shape[:-1] + (5,))
+    out[..., 0], out[..., 1] = f * mu2, 1.
+    return out

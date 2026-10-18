@@ -33,7 +33,7 @@ from analytic_covariance_rsd import DATA, model_field_power  # noqa: E402
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients  # noqa: E402
 from wstfast.data import load_measurement, load_power_dataset  # noqa: E402
 from wstfast.theory.covariance_rsd import ModulusCrossRSD, ModulusTables, RSDWSTCovariance  # noqa: E402
-from wstfast.theory.rsd_moduli import first_layer_fields, s21m_entries  # noqa: E402
+from wstfast.theory.second_layer import first_layer_fields, s21m_entries
 
 
 def survey(args):
@@ -42,7 +42,7 @@ def survey(args):
 
     from wstfast.config import ABACUS_COSMOLOGY, ABACUS_M_NCDM
     from wstfast.survey import SurveyWindow, survey_covariance
-    from wstfast.theory.rsd_bias import FOG_KNL
+    from wstfast.theory.layout import FOG_KNL
 
     if args.window is None or len(args.window) != len(args.survey):
         raise SystemExit("--survey needs one --window file per cap")

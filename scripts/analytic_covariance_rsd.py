@@ -82,10 +82,10 @@ def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=No
     from fit_rsd import load_basis
     from wstfast.calculators import RSDPowerTheory
     from wstfast.config import QUIJOTE_COSMOLOGY
-    from wstfast.theory.rsd import RSDGrid
+    from wstfast.theory.spectrum import SpectrumGrid
 
     basis, settings = load_basis(emulator, ("omega_cdm", "logA", "n_s", "h"))
-    grid = RSDGrid(kmax=settings["kmax"])
+    grid = SpectrumGrid(kmax=settings["kmax"])
     nk, nmu = grid.k.size, grid.mu.size
 
     class Identity:  # projection whose output is the P_s grid itself (no shot noise)

@@ -2,7 +2,7 @@
 """Per-entry correction of the S21m Gaussian noise for the tree-level connected noise of the moduli.
 
 For every S21m entry of an emulated basis, c_e = sum M_e g rho / sum M_e g, with the second-layer lattice weights M_e
-of the entry (rsd_moduli.S21mProjection), the Gaussian noise g of its first-layer field on the basis (K, mu) grid
+of the entry (second_layer.S21mProjection), the Gaussian noise g of its first-layer field on the basis (K, mu) grid
 and rho = Delta N / g from wstfast.theory.connected_noise_rsd, all at one cosmology (Quijote) and one set of biases.
 The fit then uses (1 + a_field) (1 + c_e) for the noise of entry e (fit_rsd.py --s21-connected).
 
@@ -25,8 +25,9 @@ from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_measurement
 from wstfast.theory.bias import cubic_priors, monomials
 from wstfast.theory.connected_noise_rsd import TERMS, interpolate_ratio, noise_ratio
-from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, split
-from wstfast.theory.rsd_moduli import S21mProjection, first_layer_fields
+from wstfast.theory.layout import split
+from wstfast.theory.second_layer import ModulusSpectra
+from wstfast.theory.second_layer import S21mProjection, first_layer_fields
 
 
 def main():
@@ -62,10 +63,10 @@ def main():
     f = float(fo.sigma8_z(settings["z"], of="theta_cb") / fo.sigma8_z(settings["z"], of="delta_cb"))
     sigma_v = settings.get("s21_damping", 2.0) * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
     pk = lambda q: np.where(np.asarray(q) > 0, np.exp(np.interp(np.log(np.maximum(q, 1e-30)), np.log(klin), np.log(pklin))), 0.0)  # noqa
-    # Gaussian noise of every field on the basis grid (as rsd_bias.BiasedRSDS21mBasis)
+    # Gaussian noise of every field on the basis grid (as second_layer.S21mBasis)
     x, _ = np.polynomial.legendre.leggauss(12)
     kgrid, mugrid = np.geomspace(4e-3, 0.12, 24), x[6:]
-    grids, norms = BiasedModulusSpectraRSD(fields, kgrid, mugrid)(pk, f, sigma_v)
+    grids, norms = ModulusSpectra(fields, kgrid, mugrid)(pk, f, sigma_v)
     m2, m4 = np.asarray(monomials(beta, 2)), np.asarray(monomials(beta, 4))
     _, _, _, g0, g1, g2 = split(grids, (70, 70, 70, 70, 15, 1))
     norm2 = (norms[:, :15] @ m2 + shot * norms[:, 15]) ** 2

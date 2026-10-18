@@ -164,7 +164,7 @@ def test_tree_trispectrum_is_symmetric_and_f3_conserves_momentum():
 def test_leg_sampler_integrates_gaussian():
     import jax.numpy as jnp
 
-    from wstfast.theory.rsd import LegSampler
+    from wstfast.theory.first_layer import LegSampler
 
     # Legs u1, u2, u1 + u2 - U, u1, u2: the integrand exp(-sum |leg|^2 / 2) = exp(-(v.M v - 2 b.v + U^2) / 2)
     # per Cartesian component, with M = [[3, 1], [1, 3]] and b = (U, U) for the z component only.
@@ -225,30 +225,15 @@ def test_torch_line_of_sight_matches_numpy():
         np.testing.assert_allclose(result[name], reference[name], rtol=2e-4, atol=1e-9)
 
 
-def test_rsd_moments_reduce_to_isotropic_limit():
-    from wstfast.theory.rsd import anisotropic_moment, edgeworth_tensors, multiplicity
-
-    q, s2 = 0.8, 0.37
-    for ell in (0, 1, 3):
-        n = 2 * ell + 1
-        lam = np.full(ell + 1, s2)
-        exact = (2 * s2) ** (q / 2) * np.exp(gammaln((n + q) / 2) - gammaln(n / 2))
-        assert float(anisotropic_moment(lam, multiplicity(ell), q)) == pytest.approx(exact, rel=1e-4)
-        moment, t4, t22 = edgeworth_tensors(lam, multiplicity(ell), q)
-        a4 = q * (q - 2) * exact / (n * (n + 2) * s2**2)  # E_G[d^4 r^q] per pairing, isotropic
-        assert float(t4[0]) == pytest.approx(3 * a4, rel=1e-8)
-        assert float(t22[0, -1]) == pytest.approx(a4, rel=1e-8)
-
-
 def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
     from wstfast.theory.ap import QUIJOTE_FIDUCIAL as fid, ap_ratios, observed_to_true
-    from wstfast.theory.rsd import MultipoleProjection, RSDGrid, multipole_ap_projection
+    from wstfast.theory.spectrum import MultipoleProjection, SpectrumGrid, multipole_ap_projection
 
     assert np.allclose(ap_ratios(0.5, fid.h, fid.omega_b, fid.omega_cdm), 1.0)
     qpar, qperp = ap_ratios(0.5, 0.70, fid.omega_b, fid.omega_cdm)
     assert qpar > 1.0 and qperp > 1.0  # larger h: shorter H^-1 in Mpc, longer in Mpc/h
 
-    grid = RSDGrid(kmax=0.12, nmu=8)
+    grid = SpectrumGrid(kmax=0.12, nmu=8)
     model = lambda k, mu: (1 + 0.7 * mu**2) ** 2 * np.exp(-((k / 0.05) ** 2))  # noqa: E731  (polynomial in mu^2)
     rows = model(*np.meshgrid(grid.k, grid.mu, indexing="ij"))[None]
     edges = np.linspace(0.02, 0.1, 9)
@@ -263,8 +248,8 @@ def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
 
 def test_block_pair_kernels_sum_to_isotropic_kernel():
     from wstfast.theory.moduli import legendre
-    from wstfast.theory.rsd import spherical_harmonic
-    from wstfast.theory.rsd_moduli import s21m_entries
+    from wstfast.theory.first_layer import spherical_harmonic
+    from wstfast.theory.second_layer import s21m_entries
     from wstfast.config import Coefficient
 
     rng = np.random.default_rng(3)
@@ -279,7 +264,7 @@ def test_block_pair_kernels_sum_to_isotropic_kernel():
 
 
 def test_s1m_edgeworth_amplitude_per_coefficient():
-    from wstfast.theory.rsd import s1m_from_variances
+    from wstfast.theory.first_layer import s1m_from_variances
 
     ells, q = [0, 2, 1], 0.8
     nblocks = sum(ell + 1 for ell in ells)

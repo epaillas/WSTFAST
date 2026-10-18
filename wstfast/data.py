@@ -239,8 +239,8 @@ def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=N
 
 def load_s21m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
     """Line-of-sight-resolved S21m = S2m(j1, j2, l, |m1|, |m2|) / S1m(j1, l, |m1|) of the S21 ``coefficients``
-    (coefficient-major, then |m1|, then |m2|; ``wstfast.theory.rsd_moduli.s21m_entries``)."""
-    from .theory.rsd_moduli import s21m_entries
+    (coefficient-major, then |m1|, then |m2|; ``wstfast.theory.second_layer.s21m_entries``)."""
+    from .theory.second_layer import s21m_entries
 
     files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
     if not files:

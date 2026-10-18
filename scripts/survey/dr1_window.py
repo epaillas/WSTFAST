@@ -155,7 +155,7 @@ def get_args():
     parser.add_argument("--exact", action="store_true",
                         help="products: add the exact per-cell window (survey.CellWindow at --per-bin cells per bin, "
                              "CIC noise, the RIC transfer of <output>/ric_transfer_<cap>.npz if present) to the window "
-                             "files; its rows are on RSDGrid(kmax=--grid-kmax), the emulator's")
+                             "files; its rows are on SpectrumGrid(kmax=--grid-kmax), the emulator's")
     parser.add_argument("--grid-kmax", type=float, default=0.3)
     parser.add_argument("--exact-basis", type=Path, default=None,
                         help="products --exact: project the exact rows on a spectrum basis (survey.spectrum_basis) instead "
@@ -504,13 +504,13 @@ def run_products(args, geometries, setups, pk):
                   f"{time.time() - t0:.0f} s", flush=True)
         elif args.exact:
             from wstfast.survey import CellWindow, RICTransfer, sample_cells
-            from wstfast.theory.rsd import RSDGrid
+            from wstfast.theory.spectrum import SpectrumGrid
 
             basis = exact_spectrum_basis(args) if args.exact_basis is not None else None
             cells, cell_weights, labels = sample_cells(g, per_bin=args.per_bin, seed=0)
             t0 = time.time()
             rows = CellWindow(g, s["config"], cells, noise_window="cic").covariances(
-                None, grid=RSDGrid(kmax=args.grid_kmax), processes=args.processes)
+                None, grid=SpectrumGrid(kmax=args.grid_kmax), processes=args.processes)
             ric_path = args.output / f"ric_transfer_{cap}.npz"
             transfer = RICTransfer.load(ric_path) if ric_path.exists() else None
             ones = {blk: np.ones_like(c) for blk, c in correction.items()}  # the coverage model over every cell
@@ -685,7 +685,7 @@ def run_covariance(args, geometries, setups, pk):
     from wstfast.config import select_coefficients
     from wstfast.survey import SurveyWindow, block_signal
     from wstfast.theory.covariance_rsd import ModulusCrossRSD, ModulusTables, RSDWSTCovariance
-    from wstfast.theory.rsd_moduli import first_layer_fields
+    from wstfast.theory.second_layer import first_layer_fields
 
     b, f, a, t = VARIANTS["fiducial"]
     plin = spectrum(pk, a, t)
@@ -835,7 +835,7 @@ def run_halos(args, geometries, setups, pk):
 
 def exact_spectrum_basis(args) -> np.ndarray:
     """The spectrum basis of ``--exact-basis``: a saved .npy, or sampled from an RSDBasis emulator (.h5) with the
-    fit's priors (``calculators.sample_biased_grids``, ``survey.spectrum_basis``) and saved as
+    fit's priors (``calculators.sample_grids``, ``survey.spectrum_basis``) and saved as
     <output>/spectrum_basis.npy (read back by a later run)."""
     if args.exact_basis is None:
         raise SystemExit("--exact-from needs --exact-basis")
@@ -849,13 +849,13 @@ def exact_spectrum_basis(args) -> np.ndarray:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from fit_rsd import load_basis
 
-    from wstfast.calculators import sample_biased_grids
+    from wstfast.calculators import sample_grids
     from wstfast.survey import spectrum_basis
 
     settings = json.loads(args.exact_basis.with_suffix(".json").read_text())
     emulated, _ = load_basis(args.exact_basis, settings["vary"])
     t0 = time.time()
-    basis = spectrum_basis(sample_biased_grids(emulated, settings, n=2000, seed=1))
+    basis = spectrum_basis(sample_grids(emulated, settings, n=2000, seed=1))
     np.save(cache, basis)
     print(f"spectrum basis of {args.exact_basis.name}: {len(basis)} components in {time.time() - t0:.0f} s", flush=True)
     return basis

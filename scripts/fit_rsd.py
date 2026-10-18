@@ -41,8 +41,8 @@ from wstfast.data import (chi_squared, hartlap_factor, load_measurement, load_po
                           load_s21m_dataset, percival_m1, sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
                                 profile, sample_mh, sample_nuts)
-from wstfast.theory.rsd import (APPolynomial, MultipoleProjection, RSDGrid, S1mProjection, multipole_ap_projection,
-                                s1m_ap_projection)
+from wstfast.theory.spectrum import (APPolynomial, multipole_ap_projection, MultipoleProjection, s1m_ap_projection,
+                                     S1mProjection, SpectrumGrid)
 
 
 def parse_args(argv=None):
@@ -207,14 +207,14 @@ def contract_unprojected_s21m(args, config, emulator, settings):
     from numpy.polynomial.legendre import leggauss
 
     from wstfast.calculators import contract_s21m
-    from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+    from wstfast.theory.second_layer import S21mAPProjection, S21mProjection, first_layer_fields
 
     if settings.get("s21_projected", True) or "s21m" not in args.stats or args.s21_connected:
         return None
     coefficients, emulated21 = s21m_selection(args, config, settings)
     if any(c not in emulated21 for c in coefficients):
         return None  # build_problem reports the missing terms
-    x, _ = leggauss(12)  # the (K, mu_K) grid of BiasedRSDS21mBasis
+    x, _ = leggauss(12)  # the (K, mu_K) grid of S21mBasis
     boxsize, nmesh = settings.get("lattice", [1000.0, 256])
     grid = dict(k=np.geomspace(4e-3, 0.12, 24), mu=x[6:], boxsize=float(boxsize), nmesh=int(nmesh))
     fields = first_layer_fields(coefficients)
@@ -240,7 +240,7 @@ def load_correction(args, config, coefficients, settings):
     """Control-variate correction of the emulated S1m cumulants at the Quijote cosmology (cached next to the emulator)."""
     from cosmoprimo import Cosmology
 
-    from wstfast.theory.rsd_bias import biased_cumulant_correction as cumulant_correction
+    from wstfast.theory.first_layer import cumulant_correction as cumulant_correction
 
     cache = args.emulator.with_suffix(f".correction_{args.cumulant_points}.npz")
     if cache.exists():
@@ -266,7 +266,7 @@ def load_correction(args, config, coefficients, settings):
 
 def _tile_ap(settings, kappa, skewness2):
     """The control-variate correction (computed without AP) for every AP-polynomial term of an --ap-order emulator."""
-    from wstfast.theory.rsd_bias import AP_TERMS
+    from wstfast.theory.layout import AP_TERMS
 
     n = AP_TERMS[settings.get("ap_order", 0)]
     return np.tile(kappa, n), np.tile(skewness2, n)
@@ -288,9 +288,9 @@ def load_layer2(args, projection, coefficients, first_layer, q, kwargs):
     fiducial linear block variances at the template's biases, from the basis evaluated at the Quijote cosmology."""
     from desilike import build
 
-    from wstfast.calculators import S21mTheory, biased_rows
+    from wstfast.calculators import S21mTheory, basis_rows
     from wstfast.theory.bias import MATTER_BETA, beta_vector, monomials
-    from wstfast.theory.rsd_bias import TREE as TREE_INDEX
+    from wstfast.theory.layout import TREE as TREE_INDEX
 
     template = layer2_template(args)
     rows = {tuple(r["key"]): (r["gauss"], r["tree"]) for r in template["rows"]}
@@ -306,7 +306,7 @@ def load_layer2(args, projection, coefficients, first_layer, q, kwargs):
     fiducial = {n: QUIJOTE_COSMOLOGY[n] for n in get_params(probe).select(varied=True, derived=False).names()
                 if n in QUIJOTE_COSMOLOGY}
     graph(fiducial)
-    basis_rows = biased_rows(probe.basis)[0]
+    basis_rows = basis_rows(probe.basis)[0]
     tree = np.tensordot(np.asarray(monomials(beta, 2))[np.array(TREE_INDEX)], np.asarray(basis_rows[:len(TREE_INDEX)]), axes=1)
     blocks = np.asarray(probe.matrix) @ tree.ravel()
     offsets = np.cumsum([0] + [f.ell + 1 for f in first_layer])
@@ -408,7 +408,7 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
     fog = getattr(args, "fog", None)
     if bool(fog) != bool(settings.get("fog")):
         raise SystemExit("--fog needs an emulator trained with --fog, and such an emulator needs --fog")
-    grid = RSDGrid(kmax=settings["kmax"])
+    grid = SpectrumGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
     boxsize, nmesh = settings.get("lattice", [1000.0, 256])  # the periodic lattice the emulator describes
     lattice = dict(boxsize=float(boxsize), nmesh=int(nmesh))
@@ -447,7 +447,7 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
             labels += [f"{prefix}{qprefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
         meta = s1m.metadata
     if "s21m" in args.stats:
-        from wstfast.theory.rsd_moduli import s21m_entries
+        from wstfast.theory.second_layer import s21m_entries
 
         unprojected = not settings.get("s21_projected", True)
         if args.ap and not unprojected and not settings.get("ap_order"):
@@ -487,12 +487,12 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
         elif unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap
             from numpy.polynomial.legendre import leggauss
 
-            from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+            from wstfast.theory.second_layer import S21mAPProjection, S21mProjection, first_layer_fields
 
             if s21m_kwargs["noise_correction"] is not None:
                 raise SystemExit("--s21-connected is not implemented for the unprojected S21m basis")
             fields, basis_fields = first_layer_fields(coefficients), first_layer_fields(emulated21)
-            x, _ = leggauss(12)  # the (K, mu_K) grid of BiasedRSDS21mBasis
+            x, _ = leggauss(12)  # the (K, mu_K) grid of S21mBasis
             s21m_kwargs.update(entry_index=None, noise_correction=None, ap=ap,
                                s21_projection=(S21mAPProjection if args.ap else S21mProjection)(
                                    config, coefficients, fields, np.geomspace(4e-3, 0.12, 24), x[6:],

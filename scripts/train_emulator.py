@@ -119,7 +119,7 @@ def train_rsd(args):
     """Emulate RSDBasis (redshift-space P_s grid + S1m cumulants of every S1 coefficient with sigma >= --s1-min-scale +
     S21m terms of the S21 coefficients of the --s21-* cuts, unless --no-s21); validate the S1m blocks, the multipoles
     (counterterms at zero) and S21m (noise amplitudes at zero) against the exact basis at random points."""
-    from wstfast.theory.rsd import MultipoleProjection, RSDGrid, S1mProjection
+    from wstfast.theory.spectrum import MultipoleProjection, S1mProjection, SpectrumGrid
 
     if args.config is not None:  # survey: no box measurements; the settings come from the options
         config = wstfast.WSTConfig(**args.config)
@@ -174,7 +174,7 @@ def train_rsd(args):
         power = load_power_dataset(args.data_dir, "rsd", kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files,
                                    ells=(0, 2, 4))
         shotnoise, edges = s1m.shotnoise, power.edges
-    grid = RSDGrid(kmax=args.kmax)  # the same grid as the basis
+    grid = SpectrumGrid(kmax=args.kmax)  # the same grid as the basis
     projections = dict(s1m=S1mProjection(config, coefficients, grid, **lattice),
                        pk=MultipoleProjection(edges, grid, **lattice))
     # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles.
@@ -189,7 +189,7 @@ def train_rsd(args):
             if args.s21_unprojected:
                 from numpy.polynomial.legendre import leggauss
 
-                from wstfast.theory.rsd_moduli import S21mProjection, first_layer_fields
+                from wstfast.theory.second_layer import S21mProjection, first_layer_fields
 
                 x, _ = leggauss(12)
                 unprojected = dict(s21_projection=S21mProjection(config, s21, first_layer_fields(s21),

@@ -22,8 +22,9 @@ import wstfast.theory  # noqa: F401
 from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_measurement
 from wstfast.theory.bias import monomials
-from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, split
-from wstfast.theory.rsd_moduli import first_layer_fields
+from wstfast.theory.layout import split
+from wstfast.theory.second_layer import ModulusSpectra
+from wstfast.theory.second_layer import first_layer_fields
 
 
 def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=28, connected=None, **quadrature):
@@ -31,7 +32,7 @@ def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=
     lattice modes of each bin (as the measurement), from the model on a (K, mu) grid."""
     from types import SimpleNamespace
 
-    from wstfast.theory.rsd import grid_interpolation, lattice_modes
+    from wstfast.theory.spectrum import grid_interpolation, lattice_modes
 
     x, _ = np.polynomial.legendre.leggauss(2 * nmu)
     kgrid = np.geomspace(0.5 * edges[0] + 1e-3, edges[-1] * 1.05, nk)
@@ -48,7 +49,7 @@ def model(fields, edges, f, klin, pklin, beta, noise, sigma_v_factor, nmu=6, nk=
     logk, logp = np.log(klin), np.log(pklin)
     pk = lambda q: np.exp(np.interp(np.log(np.maximum(q, 1e-30)), logk, logp))  # noqa: E731
     sigma_v = sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
-    grids, norms = BiasedModulusSpectraRSD(fields, kgrid, x[nmu:], **quadrature)(pk, f, sigma_v)
+    grids, norms = ModulusSpectra(fields, kgrid, x[nmu:], **quadrature)(pk, f, sigma_v)
     m2, m4 = np.asarray(monomials(beta, 2)), np.asarray(monomials(beta, 4))
     r0r0, r0r1, r1r1, g0, g1, g2 = split(grids, (70, 70, 70, 70, 15, 1))
     norm2 = (norms[:, :15] @ m2 + noise * norms[:, 15]) ** 2

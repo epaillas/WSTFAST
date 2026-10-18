@@ -62,7 +62,8 @@ def test_monomial_algebra():
 
 def test_biased_loop_matter_limit_and_renormalization():
     from wstfast.theory.eft_loop import LinearSpectrum, Quadrature, loop_integrals
-    from wstfast.theory.rsd_bias import LOOP, renormalize
+    from wstfast.theory.layout import LOOP
+    from wstfast.theory.spectrum import renormalize
     from wstfast.theory.bias import monomial_exponents
 
     spectrum = LinearSpectrum(*linear_power())
@@ -96,38 +97,15 @@ def test_loop_tables_equal_direct_integrals(biased):
                                        atol=1e-12 * np.abs(direct[name]).max())
 
 
-def test_biased_cumulants_and_s21m_matter_limit():
-    from wstfast.theory.rsd import RSDS1Basis
-    from wstfast.theory.rsd_bias import (KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis, BiasedRSDS21mBasis,
-                                         split)
-    from wstfast.theory.rsd_moduli import RSDS21mBasis
-
-    klin, pklin = linear_power()
-    f = 0.75
-    m = lambda d: np.asarray(monomials(MATTER_BETA, d))  # noqa: E731
-    s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=25.0) if c.kind == "S1" and c.ell in (0, 2)][:3]
-    kappa, skew2 = RSDS1Basis(SUPERSET, s1, npoints=2**10, lattice=False, damping="linear").cumulants(klin, pklin, f)
-    bk, bs = BiasedRSDS1Basis(SUPERSET, s1, npoints=2**10, lattice=False, damping="linear").cumulants(klin, pklin, f)
-    np.testing.assert_allclose(split(bk, KAPPA_SIZES)[0] @ m(4), kappa, rtol=1e-10, atol=1e-30)
-    np.testing.assert_allclose(15 * (split(bs, SKEW_SIZES)[0] @ m(3)) ** 2, skew2, rtol=1e-10, atol=1e-30)
-    s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
-           if c.kind == "S21"][:1]
-    quad = dict(npts=16, nx=8, nphi=6)
-    matter = RSDS21mBasis(SUPERSET, s21, nk=6, nmu=3, **quad)(klin, pklin, f)
-    terms = split(BiasedRSDS21mBasis(SUPERSET, s21, nk=6, nmu=3, **quad)(klin, pklin, f), S21_SIZES)
-    norm2 = (terms[6] @ m(2)) ** 2
-    np.testing.assert_allclose(terms[0] @ m(4) / norm2, matter[:, 0], rtol=1e-10)
-    np.testing.assert_allclose(terms[3] @ m(4) / norm2, matter[:, 1], rtol=1e-10)
-
-
 def test_poisson_cumulants_of_gaussian_wavelet():
     """Pure shot-noise kappa_4 and kappa_3 of the l = 0 block: n^-3 int psi^4 and n^-2 int psi^3 (CIC window ~1%)."""
-    from wstfast.theory.rsd_bias import KAPPA_SIZES, SKEW_SIZES, BiasedRSDS1Basis, split
+    from wstfast.theory.first_layer import S1mBasis
+    from wstfast.theory.layout import KAPPA_SIZES, SKEW_SIZES, split
 
     klin, pklin = linear_power()
     coefs = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell == 0][:1]
     sigma = SUPERSET.sigma(coefs[0].j)
-    kappa, skewness = BiasedRSDS1Basis(SUPERSET, coefs, npoints=2**14, lattice=False).cumulants(klin, pklin, 0.7)
+    kappa, skewness = S1mBasis(SUPERSET, coefs, npoints=2**14).cumulants(klin, pklin, 0.7)
     k4 = (2 * np.pi * sigma**2) ** -6 * (np.pi * sigma**2 / 2) ** 1.5
     k3 = (2 * np.pi * sigma**2) ** -4.5 * (2 * np.pi * sigma**2 / 3) ** 1.5
     assert split(kappa, KAPPA_SIZES)[3][0, 0, 0] == pytest.approx(k4, rel=0.02)
@@ -148,52 +126,22 @@ def test_read_fof():
     assert np.array_equal(real[:, :2], rsd[:, :2]) and not np.array_equal(real[:, 2], rsd[:, 2])
 
 
-@pytest.mark.slow
-def test_biased_theories_matter_limit():
-    """At beta = (1, 1, 0, 0, 0) and alpha = 0, the biased P_l, S1m and S21m equal the matter ones (no shot noise)."""
-    from desilike import build
-
-    from wstfast.calculators import (JointTheory, RSDBasis, RSDPowerTheory, S1mTheory, S21mTheory, build_cosmology)
-    from wstfast.config import Coefficient
-    from wstfast.theory.rsd import MultipoleProjection, RSDGrid, S1mProjection
-
-    s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell <= 1][:3]
-    s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=35.0, s21_min_ratio=2.0, s21_min_scale2=70.0)
-           if c.kind == "S21" and c.ell == 1][:1]
-    first = [Coefficient("S1", c.ell, c.j) for c in s21]
-    s1 = s1 + [c for c in first if c not in s1]
-    grid = RSDGrid(kmax=0.2)
-    edges = np.linspace(0.01, 0.15, 8)
-
-    def theory(tracer):
-        basis = RSDBasis(cosmo=build_cosmology(()), config=SUPERSET, coefficients=s1, kmax=0.2, npoints=2**10,
-                         s21_coefficients=s21, tracer=tracer)
-        return JointTheory([
-            S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, tracer=tracer),
-            RSDPowerTheory(MultipoleProjection(edges, grid), basis=basis, tracer=tracer),
-            S21mTheory(S1mProjection(SUPERSET, first, grid), s21, first, basis=basis,
-                       cumulant_index=[s1.index(c) for c in first], tracer=tracer)])
-
-    matter = np.asarray(build(theory("matter"))({}))
-    biased = np.asarray(build(theory("biased"))({"b1": 1.0}))
-    np.testing.assert_allclose(biased, matter, rtol=1e-8)
-
-
 def test_fog_counterterm_reproduces_damping():
     """At c_v = (f sigma_v k_NL)^2 / 2, the second-order Fingers-of-God counterterm columns reproduce the velocity-
     damped S1m cumulants and S21m terms (damping 1 x linear here) to second order; order 0 is the undamped basis."""
-    from wstfast.theory.rsd_bias import (FOG_KNL, KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis,
-                                         BiasedRSDS21mBasis, collapse_fog)
+    from wstfast.theory.first_layer import S1mBasis
+    from wstfast.theory.layout import FOG_KNL, KAPPA_SIZES, S21_SIZES, SKEW_SIZES, collapse_fog
+    from wstfast.theory.second_layer import S21mBasis
 
     klin, pklin = linear_power()
     f = 0.76
     sigma_v = float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
     c = 0.5 * (f * sigma_v * FOG_KNL) ** 2
     s1 = [c_ for c_ in select_coefficients(SUPERSET, s1_min_scale=25.0) if c_.kind == "S1" and c_.ell in (0, 2)][:2]
-    kwargs = dict(npoints=2**10, lattice=False, cubic=True)
-    damped = BiasedRSDS1Basis(SUPERSET, s1, damping=sigma_v, **kwargs).cumulants(klin, pklin, f)
-    undamped = BiasedRSDS1Basis(SUPERSET, s1, damping=None, **kwargs).cumulants(klin, pklin, f)
-    fog = BiasedRSDS1Basis(SUPERSET, s1, fog=True, **kwargs).cumulants(klin, pklin, f)
+    kwargs = dict(npoints=2**10, cubic=True)
+    damped = S1mBasis(SUPERSET, s1, damping=sigma_v, **kwargs).cumulants(klin, pklin, f)
+    undamped = S1mBasis(SUPERSET, s1, damping=None, **kwargs).cumulants(klin, pklin, f)
+    fog = S1mBasis(SUPERSET, s1, fog=True, **kwargs).cumulants(klin, pklin, f)
     np.testing.assert_allclose(collapse_fog(*fog, c_s1=0.0)[0], undamped[0], rtol=1e-12)
     for got, want, n in zip(collapse_fog(*fog, c_s1=c)[:2], damped, (KAPPA_SIZES[0], SKEW_SIZES[0])):
         scale = np.max(np.abs(want[..., :n]))
@@ -201,9 +149,9 @@ def test_fog_counterterm_reproduces_damping():
     s21 = [c_ for c_ in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
            if c_.kind == "S21"][:1]
     quad = dict(nk=6, nmu=3, npts=16, nx=8, nphi=6)
-    damped = BiasedRSDS21mBasis(SUPERSET, s21, sigma_v_factor=1.0, **quad)(klin, pklin, f)
-    fog = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
-    np.testing.assert_allclose(fog[:, :sum(S21_SIZES)], BiasedRSDS21mBasis(SUPERSET, s21, sigma_v_factor=0.0, **quad)(
+    damped = S21mBasis(SUPERSET, s21, sigma_v_factor=1.0, **quad)(klin, pklin, f)
+    fog = S21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
+    np.testing.assert_allclose(fog[:, :sum(S21_SIZES)], S21mBasis(SUPERSET, s21, sigma_v_factor=0.0, **quad)(
         klin, pklin, f), rtol=1e-12)
     got = collapse_fog(s21m=fog, c_s21=c)[2]
     assert np.max(np.abs(got - damped)) < 1e-3 * np.max(np.abs(damped))
@@ -212,22 +160,23 @@ def test_fog_counterterm_reproduces_damping():
 def test_ap_polynomial_bases_reduce_at_q1():
     """The AP-polynomial cumulants and S21m terms (rsd_bias, ap > 0): their alpha = 0 term is the basis without AP
     (exact at q = 1), and they evaluate through ap_evaluate / s21m_lambda_mask."""
-    from wstfast.theory.rsd_bias import (AP_TERMS, BiasedRSDS1Basis, BiasedRSDS21mBasis, ap_evaluate, basis_layout,
-                                         s21m_lambda_mask)
+    from wstfast.theory.first_layer import S1mBasis
+    from wstfast.theory.layout import AP_TERMS, ap_evaluate, basis_layout, s21m_lambda_mask
+    from wstfast.theory.second_layer import S21mBasis
 
     klin, pklin = linear_power()
     f = 0.76
     s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=25.0) if c.kind == "S1" and c.ell in (1, 2)][:2]
-    kwargs = dict(npoints=2**10, lattice=False, cubic=True, fog=True)
-    k0, s0 = BiasedRSDS1Basis(SUPERSET, s1, **kwargs).cumulants(klin, pklin, f)
-    k3, s3 = BiasedRSDS1Basis(SUPERSET, s1, ap=3, **kwargs).cumulants(klin, pklin, f)
+    kwargs = dict(npoints=2**10, cubic=True, fog=True)
+    k0, s0 = S1mBasis(SUPERSET, s1, **kwargs).cumulants(klin, pklin, f)
+    k3, s3 = S1mBasis(SUPERSET, s1, ap=3, **kwargs).cumulants(klin, pklin, f)
     assert basis_layout(k3.shape[-1]) == (True, True, AP_TERMS[3])
     np.testing.assert_allclose(ap_evaluate(k3, AP_TERMS[3]), k0, rtol=1e-12, atol=1e-300)
     np.testing.assert_allclose(ap_evaluate(s3, AP_TERMS[3]), s0, rtol=1e-12, atol=1e-300)
     s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8, s21_min_scale2=70.0)
            if c.kind == "S21"][:1]
     quad = dict(nk=4, nmu=3, npts=12, nx=6, nphi=4)
-    t0 = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
-    t3 = BiasedRSDS21mBasis(SUPERSET, s21, fog=True, ap=3, **quad)(klin, pklin, f)
+    t0 = S21mBasis(SUPERSET, s21, fog=True, **quad)(klin, pklin, f)
+    t3 = S21mBasis(SUPERSET, s21, fog=True, ap=3, **quad)(klin, pklin, f)
     assert t3.shape[-1] == AP_TERMS[3] * t0.shape[-1] and s21m_lambda_mask(True).size == t0.shape[-1]
     np.testing.assert_allclose(ap_evaluate(t3, AP_TERMS[3]), t0, rtol=1e-4)  # the AP projection's grouping at q = 1

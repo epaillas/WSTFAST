@@ -34,7 +34,7 @@ import numpy as np
 
 from .cumulants import _EPS, ZeroLagCumulants, _dot, _f2, tree_trispectrum
 from .moduli import ModulusClustering, legendre
-from .rsd import LegSampler
+from .first_layer import LegSampler
 
 #: Nodes in u = sigma K; the second layer of a pair with sigma_j2 >= 2 sigma_j1 probes u <~ 3.
 UNODES = np.array([0.02, 0.1, 0.25, 0.45, 0.7, 0.95, 1.2, 1.5, 1.8, 2.2, 2.6, 3.0])

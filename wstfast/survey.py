@@ -976,7 +976,7 @@ class CellWindow:
 
     def _covariances(self, spectra, ells, grid, which):
         """Covariances of the rotated components at every sample cell and block, for ``spectra`` (callables
-        P(k, mu) [(Mpc/h)^3], mu about the local line of sight; or, with ``grid`` an ``RSDGrid``, None for the linear
+        P(k, mu) [(Mpc/h)^3], mu about the local line of sight; or, with ``grid`` an ``SpectrumGrid``, None for the linear
         rows on the grid). Returns a dict of arrays indexed [spectrum, cell, j, l, |m|, 3] with the three entries
         (C_mm, C_-m-m, C_m-m) (for m = 0: (C_00, C_00, 0)): ``masked`` and ``unmasked`` (signal, per spectrum) and
         ``noise_masked``, ``noise_unmasked`` (per unit shot noise, indexed [cell, j, l, |m|, 3]); with ``grid`` the
@@ -1200,12 +1200,12 @@ class CellWindow:
 
     @staticmethod
     def _grid_rows(grid, k, mu, weights=None, chunk: int = 200_000, tail: float = -2.2):
-        """Rows on ``grid`` (``theory.rsd.RSDGrid``) of weighted sums over lattice modes (k [h/Mpc], |mu|): with
+        """Rows on ``grid`` (``theory.spectrum.SpectrumGrid``) of weighted sums over lattice modes (k [h/Mpc], |mu|): with
         ``weights`` (a list of arrays over the modes) the rows (nweights, nrow); without, a function of such a list,
         reusing the interpolation of these modes (built once, in chunks). Modes at k = 0 are dropped; those below the
         grid's first k are clipped to it; those beyond its last k (which masked kernels reach through the ringing of
         the edge) take the power of the last node times (k / kmax)^tail, a fixed slope: still linear in the grid."""
-        from .theory.rsd import grid_interpolation
+        from .theory.spectrum import grid_interpolation
 
         keep = k > 0
         index = np.flatnonzero(keep)
@@ -1403,7 +1403,7 @@ def _chi_moment_xp(lam_a, lam_b, q, xp):
 
 def spectrum_basis(spectra: np.ndarray, tol: float = 1e-5, nmax: int | None = None) -> np.ndarray:
     """Orthonormal basis (nb, N) of the spectra a fit can produce on the grid, from a sample of them (n, N)
-    (``calculators.sample_biased_grids``): the principal components of the first half, kept up to the smallest number
+    (``calculators.sample_grids``): the principal components of the first half, kept up to the smallest number
     that reconstructs every spectrum of the second half to ``tol`` of its norm (at most ``nmax``). The exact window
     stores its rows projected on it (``SurveyWindow.build_exact(basis=)``): a spectrum in the span gives the exact
     per-cell variances, one outside gives them to the part of it in the span."""

@@ -235,11 +235,11 @@ class RSDBasis(Calculator):
     """Cosmology-dependent redshift-space pieces shared by the P(k) multipoles, the S1m blocks and S21m.
 
     Every output is resolved into the monomials of the bias vector beta = (1, b1, b2, bG2, bGamma3)
-    (``wstfast.theory.rsd_bias``), so one basis serves any tracer: matter is the limit b1 = 1, b2 = bG2 = bGamma3 = 0
-    and no shot noise, taken by the theories (``tracer="matter"``), not here. Outputs ``grid_terms`` (BIASED_GRID_TERMS
+    (``wstfast.theory.layout``), so one basis serves any tracer: matter is the limit b1 = 1, b2 = bG2 = bGamma3 = 0
+    and no shot noise, taken by the theories (``tracer="matter"``), not here. Outputs ``grid_terms`` (GRID_TERMS
     of the P_s grid), ``kappa`` and ``skewness2`` (the per-block cumulants of the S1m blocks of ``coefficients``),
     ``s21m_terms`` (the S21m terms of every entry of ``s21_coefficients``) and ``dlogA``. With ``ir``, the grid is BAO
-    IR-resummed. Rows are rescaled by powers of A_s / POWER_AMPLITUDE (``rsd_bias.biased_scalings``) so that a Taylor
+    IR-resummed. Rows are rescaled by powers of A_s / POWER_AMPLITUDE (``layout.amplitude_scalings``) so that a Taylor
     emulator is nearly exact in logA. ``tracer`` is recorded only (emulator metadata). NumPy (pure_callback).
     """
 
@@ -257,28 +257,30 @@ class RSDBasis(Calculator):
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
                       s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0):
-        from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
+        from .theory.first_layer import S1mBasis
+        from .theory.second_layer import S21mBasis
+        from .theory.spectrum import SpectrumGrid
 
         if tracer not in ("matter", "biased"):
             raise ValueError(f"unknown tracer {tracer!r}")
         self.z, self.tracer = float(z), tracer
         if cubic_biases and tracer == "matter":
             raise ValueError("cubic_biases needs tracer='biased' (the cubic biases of matter vanish)")
-        #: The kappa columns also hold the trispectrum of the cubic operators (``rsd_bias.CUBIC_KAPPA_SIZES``).
+        #: The kappa columns also hold the trispectrum of the cubic operators (``layout.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
         #: Fingers-of-God counterterm columns instead of the velocity damping, in the S1m cumulants and the S21m terms
-        #: (``rsd_bias.fog_sizes``; combined at the counterterm c_v by S1mTheory / S21mTheory).
+        #: (``layout.fog_sizes``; combined at the counterterm c_v by S1mTheory / S21mTheory).
         self.fog = bool(fog)
         if self.fog and s21_damping is not None:
             raise ValueError("fog replaces the velocity damping: drop s21_damping")
-        self.grid = BiasedRSDGrid(kmax=kmax, ir=ir)
+        self.grid = SpectrumGrid(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         cubic = dict(cubic=True) if self.cubic_biases else {}
         if self.fog:
             cubic["fog"] = True
-        #: Order of the AP polynomial of the observed-frame cumulants and S21m terms (0: none; ``rsd_bias``): the outputs
+        #: Order of the AP polynomial of the observed-frame cumulants and S21m terms (0: none; ``layout``): the outputs
         #: then hold, per AP term, the column layout without AP (alpha-major), evaluated at the trial (q_par, q_perp) by
-        #: S1mTheory / S21mTheory (``rsd_bias.ap_evaluate``), like the AP polynomials of the projections.
+        #: S1mTheory / S21mTheory (``layout.ap_evaluate``), like the AP polynomials of the projections.
         self.ap_order = int(ap_order)
         if self.ap_order:
             if not self.fog:
@@ -286,8 +288,8 @@ class RSDBasis(Calculator):
             if not s21_projected:
                 raise ValueError("ap_order needs the projected S21m basis")
             cubic["ap"] = self.ap_order
-        self.cumulant_model = (BiasedRSDS1Basis(config, self.coefficients, damping=damping, npoints=npoints,
-                                                lattice=False, **cubic) if self.coefficients else None)
+        self.cumulant_model = (S1mBasis(config, self.coefficients, damping=damping, npoints=npoints, **cubic)
+                               if self.coefficients else None)
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
         if self.fog:
             s21_kwargs["fog"] = True
@@ -296,9 +298,9 @@ class RSDBasis(Calculator):
         # The lattice of the S21m mode sums (the periodic reference of the measurement) and the mass-assignment window
         # of the first-layer legs of the modulus spectra (0: none, as for the box fits).
         s21_kwargs.update(boxsize=float(s21_lattice[0]), nmesh=int(s21_lattice[1]), cellsize=float(s21_cellsize))
-        self.s21_model = BiasedRSDS21mBasis(config, list(s21_coefficients), **s21_kwargs) if len(s21_coefficients) else None
+        self.s21_model = S21mBasis(config, list(s21_coefficients), **s21_kwargs) if len(s21_coefficients) else None
         #: With ``s21_projected=False`` the S21m output is unprojected: the modulus-spectrum grids of every first-layer
-        #: field and their norms (``s21m_grids``, ``s21m_norms``; ``BiasedRSDS21mBasis.field_grids``), projected to lambda_2 at
+        #: field and their norms (``s21m_grids``, ``s21m_norms``; ``S21mBasis.field_grids``), projected to lambda_2 at
         #: assembly by S21mTheory (``s21_projection``, with AP or not); ``s21m_terms`` is then empty, with the column
         #: layout of the projected terms.
         self.s21_projected = bool(s21_projected)
@@ -314,9 +316,9 @@ class RSDBasis(Calculator):
                   / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
         ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE
         h, r_bao = float(self.cosmo.get("params.h")), float(self.cosmo.get("thermodynamics.rs_drag"))
-        from .theory.rsd_bias import AP_TERMS, biased_scalings, s21m_field_powers
+        from .theory.layout import AP_TERMS, amplitude_scalings, s21m_field_powers
 
-        scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
+        scale = amplitude_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
         self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
         if self.cumulant_model is not None:
             kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
@@ -350,10 +352,10 @@ class RSDBasis(Calculator):
         return obj
 
 
-def biased_s21m_fields(basis):
+def s21m_fields(basis):
     """Field grids (nfield, ncol, ngrid) and norms (nfield, nnorm) of an unprojected biased RSDBasis output, at the
-    basis's amplitude (``rsd_bias.s21m_field_powers``)."""
-    from .theory.rsd_bias import is_fog, s21m_field_powers
+    basis's amplitude (``layout.s21m_field_powers``)."""
+    from .theory.layout import is_fog, s21m_field_powers
 
     plam, pnorm = s21m_field_powers(is_fog(s21m=basis.s21m_terms))
     a = jnp.exp(basis.dlogA)
@@ -380,9 +382,9 @@ def contract_s21m(emulator, coefficients, basis_coefficients, projection) -> Con
     its field-grid output becomes the projected terms, (nalpha, nentry, ncol), by contracting the emulator's Taylor
     derivatives with the projection matrices. Exact (the emulator is linear in its derivatives), so the per-call cost
     is that of a projected emulator: ~43k outputs per AP term instead of 1.5M. ``projection``: an S21mProjection over
-    ``coefficients`` (no AP) or ``rsd.APPolynomial`` of an S21mAPProjection (AP, nalpha terms). ``basis_coefficients``:
+    ``coefficients`` (no AP) or ``spectrum.APPolynomial`` of an S21mAPProjection (AP, nalpha terms). ``basis_coefficients``:
     the S21 coefficients of the emulator, in its order. Call before ``emulator.to_calculator()``."""
-    from .theory.rsd_moduli import first_layer_fields
+    from .theory.second_layer import first_layer_fields
 
     fields, basis_fields = first_layer_fields(coefficients), first_layer_fields(basis_coefficients)
     rows = np.array([basis_fields.index(field) for field in fields])
@@ -405,13 +407,13 @@ def contract_s21m(emulator, coefficients, basis_coefficients, projection) -> Con
     return ContractedS21m(powers, entry_rows, matrix, getattr(projection, "entries", None))
 
 
-def biased_rows(basis):
+def basis_rows(basis):
     """Grid rows, kappa, skewness and S21m terms of a biased-tracer RSDBasis at the basis's amplitude (with the
-    Fingers-of-God counterterm orders of a ``fog`` basis; see ``rsd_bias.collapse_fog``)."""
-    from .theory.rsd_bias import basis_layout, biased_scalings
+    Fingers-of-God counterterm orders of a ``fog`` basis; see ``layout.collapse_fog``)."""
+    from .theory.layout import amplitude_scalings, basis_layout
 
     cubic, fog, nalpha = basis_layout(basis.kappa.shape[-1])
-    scale = biased_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog, ap_terms=nalpha)
+    scale = amplitude_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog, ap_terms=nalpha)
     return (basis.grid_terms * scale["grid"][:, None, None], basis.kappa * scale["kappa"],
             basis.skewness2 * scale["skewness"], basis.s21m_terms * scale["s21m"])
 
@@ -419,7 +421,7 @@ def biased_rows(basis):
 def ap_cumulants(basis, kappa, skewness, ap, ap_params):
     """Cumulants of a basis with AP-polynomial terms (RSDBasis(ap_order)) at the AP ratios of the trial cosmology
     (q = 1 without ``ap``); unchanged for a basis without them."""
-    from .theory.rsd_bias import ap_evaluate, basis_layout
+    from .theory.layout import ap_evaluate, basis_layout
 
     nalpha = basis_layout(basis.kappa.shape[-1])[2]
     if nalpha == 1:
@@ -520,19 +522,19 @@ def bias_beta(params):
                                       for name in ("b1", "b2", "bG2", "bGamma3"))])
 
 
-from .theory.rsd_bias import TREE as TREE_INDEX  # noqa: E402
+from .theory.layout import TREE as TREE_INDEX
 
 
 def _value(params, name):
     return params[name].value if params else None
 
 
-def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2=None, alpha_k2=None):
-    """P_s grid and its tree part from the biased rows (BIASED_GRID_TERMS), with the stochastic k^2 mu^2 term and,
+def tracer_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2=None, alpha_k2=None):
+    """P_s grid and its tree part from the biased rows (GRID_TERMS), with the stochastic k^2 mu^2 term and,
     with ``ck4`` [(Mpc/h)^4], the next-to-leading redshift-space counterterm -ck4 k^4 mu^4 (b1 + f mu^2)^2 P_L (the
     f^4 of the usual c~ (f mu)^4 k^4 form is absorbed into ck4)."""
     from .theory.bias import monomials
-    from .theory.rsd_bias import LOOP, TREE
+    from .theory.layout import LOOP, TREE
 
     m2 = monomials(beta, 2)
     nt, nl = len(TREE), len(LOOP)
@@ -547,15 +549,15 @@ def biased_grid(rows, beta, counterterms, k2mu2, shotnoise, alpha2, ck4=None, k2
     return grid, tree
 
 
-def sample_biased_grids(basis, settings: dict, n: int = 2000, seed: int = 1, shotnoise: float = 2000.0) -> np.ndarray:
+def sample_grids(basis, settings: dict, n: int = 2000, seed: int = 1, shotnoise: float = 2000.0) -> np.ndarray:
     """``n`` biased P_s grids (n, nk x nmu) a fit with the emulated ``basis`` (``settings`` its .json: bounds, kmax)
     can produce, for ``survey.spectrum_basis``: cosmologies uniform in the emulated box, b1 uniform in [0.5, 3.5], the
     other biases N(0, 2) (prior widths 1), counterterms uniform in their limits, the k^2 mu^2 and k^2 stochastic
     terms (``shotnoise`` x N(0, 20) and N(0, 2)) and the k^4 mu^4 counterterm (N(0, 20) (Mpc/h)^4), wider than any
     posterior, so that the span of the sample covers the fit's spectra."""
-    from .theory.rsd import RSDGrid
+    from .theory.spectrum import SpectrumGrid
 
-    grid = RSDGrid(kmax=settings["kmax"])
+    grid = SpectrumGrid(kmax=settings["kmax"])
     k2 = grid.k[:, None] ** 2 * np.ones_like(grid.mu)[None, :]
     k2mu2 = k2 * grid.mu[None, :] ** 2
     params = get_params(basis)
@@ -567,20 +569,20 @@ def sample_biased_grids(basis, settings: dict, n: int = 2000, seed: int = 1, sho
         for name, (low, high) in bounds.items():
             params[name].value = rng.uniform(low, high)
         basis()
-        rows = biased_rows(basis)[0]
+        rows = basis_rows(basis)[0]
         beta = jnp.asarray([1.0, rng.uniform(0.5, 3.5), *rng.normal(0.0, 2.0, 3)])
-        out, _ = biased_grid(rows, beta, rng.uniform(*limits, 3), k2mu2, shotnoise, rng.normal(0.0, 20.0),
+        out, _ = tracer_grid(rows, beta, rng.uniform(*limits, 3), k2mu2, shotnoise, rng.normal(0.0, 20.0),
                              rng.normal(0.0, 20.0), k2, rng.normal(0.0, 2.0))
         spectra.append(np.asarray(out).ravel())
     return np.array(spectra)
 
 
-def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None, shot=None):
+def tracer_cumulants(kappa, skewness, beta, shotnoise, cubic=None, shot=None):
     """Per-block kappa (ncoef, L + 1) and 15 skewness^2 (ncoef,) of a tracer of Poisson shot noise ``shotnoise``.
     ``cubic`` = (b3, bG3, bdG2) adds the cubic-operator trispectrum (needs the basis columns CUBIC_KAPPA_SIZES);
     ``shot`` = (A_TN, A_TN2) scales the N and N^2 pieces of kappa (non-Poisson stochasticity)."""
     from .theory.bias import monomials
-    from .theory.rsd_bias import CUBIC_KAPPA_SIZES, KAPPA_SIZES, SKEW_SIZES, split
+    from .theory.layout import CUBIC_KAPPA_SIZES, KAPPA_SIZES, SKEW_SIZES, split
 
     n = shotnoise
     k = split(kappa, KAPPA_SIZES + CUBIC_KAPPA_SIZES)
@@ -599,7 +601,7 @@ def biased_cumulants(kappa, skewness, beta, shotnoise, cubic=None, shot=None):
 
 
 def _k4_counterterm(enabled, prefix, latex):
-    """{'ck4': Parameter} of the k^4 mu^4 counterterm (``biased_grid``), or {} when not ``enabled``."""
+    """{'ck4': Parameter} of the k^4 mu^4 counterterm (``tracer_grid``), or {} when not ``enabled``."""
     if not enabled:
         return {}
     return {"ck4": Parameter(f"ck4{prefix}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
@@ -607,7 +609,7 @@ def _k4_counterterm(enabled, prefix, latex):
 
 
 def _k2_stochastic(enabled):
-    """{'alpha_k2': Parameter} of the isotropic k^2 stochastic term (``biased_grid``) [(Mpc/h)^2], or {}."""
+    """{'alpha_k2': Parameter} of the isotropic k^2 stochastic term (``tracer_grid``) [(Mpc/h)^2], or {}."""
     if not enabled:
         return {}
     return {"alpha_k2": Parameter("alpha_k2", value=0.0, prior=dict(dist="norm", loc=0.0, scale=20.0, limits=[-200.0, 200.0]),
@@ -667,9 +669,9 @@ class RSDPowerTheory(Calculator):
 
     def __call__(self):
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-        rows = biased_rows(self.basis)[0]
+        rows = basis_rows(self.basis)[0]
         ck4 = self.k4_params["ck4"].value if self.k4_params else None
-        grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
+        grid, _ = tracer_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
                               self.bias_params["alpha2"].value, ck4, self.k2, _value(self.k2_params, "alpha_k2"))
         noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
         if self.ap is None:
@@ -693,7 +695,7 @@ class S1mTheory(Calculator):
     """Line-of-sight-resolved S1m of the selected S1 coefficients (all |m| blocks), from the shared RSDBasis.
 
     Counterterms ``c0``, ``c2``, ``c4`` [(Mpc/h)^2] of the block variances (separate from the P(k) ones).
-    ``correction`` = (kappa ratio, skewness^2 ratio) from ``wstfast.theory.rsd.cumulant_correction`` corrects the
+    ``correction`` = (kappa ratio, skewness^2 ratio) from ``wstfast.theory.first_layer.cumulant_correction`` corrects the
     sampling error of the basis cumulants. ``ng_amplitude`` frees the amplitude of the Edgeworth correction (the
     damped tree cumulants overshoot it by ~7% at sigma = 25 Mpc/h, less at larger scales):
 
@@ -706,7 +708,7 @@ class S1mTheory(Calculator):
       legs, each leg filtered like the block), on top of the linear velocity damping of the cumulants.
 
     ``fog`` (a basis trained with ``fog=True``): the Fingers-of-God counterterm c_v of every external leg of the tree
-    cumulants in place of the velocity damping (``rsd_bias.collapse_fog``); "shared" (c_v, also the S21m one) or
+    cumulants in place of the velocity damping (``layout.collapse_fog``); "shared" (c_v, also the S21m one) or
     "separate" (c_v_s1). c_v = (f sigma_v k_NL)^2 / 2 reproduces the linear damping to second order.
 
     "slope" and "per-scale" need ``sigmas``, the filter scale of each coefficient.
@@ -763,23 +765,23 @@ class S1mTheory(Calculator):
                                                  if correction is not None else (1.0, 1.0))
 
     def __call__(self):
-        from .theory.rsd import s1m_from_variances
+        from .theory.first_layer import s1m_from_variances
 
         amplitude = self.ng_amplitude()
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
         # the Gaussian part of the Edgeworth normalisation includes the shot noise
-        rows, kappa, skewness, _ = biased_rows(self.basis)
+        rows, kappa, skewness, _ = basis_rows(self.basis)
         beta = bias_beta(self.bias_params)
         kappa, skewness = kappa[self.cumulant_index] * self.kappa_ratio, skewness[self.cumulant_index] * self.skewness_ratio
         kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
         if _fog_check(self.basis, self.fog_params):
-            from .theory.rsd_bias import collapse_fog
+            from .theory.layout import collapse_fog
 
             kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
-        kappa, skewness2 = biased_cumulants(kappa, skewness, beta, self.shotnoise, cubic_values(self.bias_params),
+        kappa, skewness2 = tracer_cumulants(kappa, skewness, beta, self.shotnoise, cubic_values(self.bias_params),
                                             kappa_shot_values(self.bias_params))
         ck4 = self.k4_params["ck4"].value if self.k4_params else None
-        grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
+        grid, linear_grid = tracer_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
                                         ck4, self.k2, _value(self.k2_params, "alpha_k2"))
         noise = linear_noise = 1 + self.bias_params["alpha0"].value
         block_scale = None
@@ -833,7 +835,7 @@ class S1mTheory(Calculator):
 
 class S21mTheory(Calculator):
     """Line-of-sight-resolved S21m = S2m / S1m of the selected S21 coefficients (every |m1|, |m2|), from the shared
-    RSDBasis (``wstfast.theory.rsd_moduli``).
+    RSDBasis (``wstfast.theory.second_layer``).
 
     Nuisance parameters: one noise amplitude ``noise_j{j1}_l{l}_m{m1}`` per first-layer field (its Gaussian noise is
     (1 + noise) times the tree value). The one-point factor (1 + E_1(1))^q / (1 + E_1(q)) uses the linear block
@@ -849,7 +851,7 @@ class S21mTheory(Calculator):
                  cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
                  fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
                  first_ap=None, window=None):
-        from .theory.rsd_moduli import first_layer_fields
+        from .theory.second_layer import first_layer_fields
 
         self.basis = basis
         self.ap = ap
@@ -925,7 +927,7 @@ class S21mTheory(Calculator):
                       cubic_biases: str | None = None, noise_calibration=None, kappa_shot: bool = False, layer2=None,
                       fog: str | None = None, s21_projection=None, s21_field_rows=None, ap=None,
                  first_ap=None, window=None):
-        from .theory.rsd_moduli import first_layer_fields, s21m_entries
+        from .theory.second_layer import first_layer_fields, s21m_entries
 
         # Survey window (survey.SurveyWindow of one cap, biased tracers): S21m x K / (delta W) of the entry's first-layer
         # block, W the S1m window factor of that block at its box (tree + noise) variances.
@@ -948,7 +950,7 @@ class S21mTheory(Calculator):
         # ``s21_projection`` (S21mProjection over these coefficients, or S21mAPProjection with ``ap``); the basis field
         # of each of its fields is ``s21_field_rows`` (default: the same fields, in the same order).
         self.s21_projection = s21_projection
-        #: AP projection of the first-layer blocks (``rsd.APPolynomial`` of ``s1m_ap_projection`` over ``first_layer``):
+        #: AP projection of the first-layer blocks (``spectrum.APPolynomial`` of ``s1m_ap_projection`` over ``first_layer``):
         #: with ``ap``, the linear first-layer variances of the one-point factor are those of the observed frame.
         self.first_ap = first_ap
         self.s21_contracted = False
@@ -990,7 +992,7 @@ class S21mTheory(Calculator):
             self.calibration_gradient = {name: jnp.asarray(g, dtype="f8") for name, g in zip(names, noise_calibration["gradient"])}
             self.calibration_reference = jnp.asarray(noise_calibration["reference"], dtype="f8")
         if white_noise or k2_noise or noise_calibration is not None:  # lattice sums of 1 and K^2 in P_UU / <U>^2
-            from .theory.rsd_moduli import S21mProjection
+            from .theory.second_layer import S21mProjection
 
             if config is None:
                 raise ValueError("white_noise / k2_noise need the WST config")
@@ -1025,17 +1027,17 @@ class S21mTheory(Calculator):
 
     def __call__(self):
         from .theory.bias import monomials
-        from .theory.rsd import block_edgeworth
-        from .theory.rsd_bias import S21_SIZES, split
-        from .theory.rsd_moduli import s21m_from_terms
+        from .theory.first_layer import block_edgeworth
+        from .theory.layout import S21_SIZES, split
+        from .theory.second_layer import s21m_from_terms
 
-        rows, kappa, skewness, s21 = biased_rows(self.basis)
+        rows, kappa, skewness, s21 = basis_rows(self.basis)
         if self.s21_projection is not None:
             s21 = self._project_s21()
         kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
         s21 = self._ap_s21(s21)
         if _fog_check(self.basis, self.fog_params):
-            from .theory.rsd_bias import collapse_fog
+            from .theory.layout import collapse_fog
 
             kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
             s21 = collapse_fog(s21m=s21, c_s21=_fog_value(self.fog_params, "s21"))[2]
@@ -1047,14 +1049,14 @@ class S21mTheory(Calculator):
             linear = self.first_ap(tree[None], *self.ap.ratios(self.ap_params), noise)[0]
         else:
             linear = self.matrix @ tree.ravel() + noise * self.shot
-        kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
+        kappa, skewness2 = tracer_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
                                             self.shotnoise, cubic_values(self.bias_params),
                                             kappa_shot_values(self.bias_params))
         r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
         norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
         if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block
             c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-            grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
+            grid, _ = tracer_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
                                   k2=self.k2, alpha_k2=_value(self.k2_params, "alpha_k2"))
             full = self.matrix @ grid.ravel() + noise * self.shot
             norm2 = norm2 * (full / linear)[self.block_index] ** 2
@@ -1126,7 +1128,7 @@ class S21mTheory(Calculator):
     def _ap_s21(self, s21):
         """S21m terms of a basis with AP-polynomial terms (RSDBasis(ap_order)) at the AP ratios of the trial cosmology
         (q = 1 without ``ap``), the lambda_2 columns times the volume factor of the second-layer sum."""
-        from .theory.rsd_bias import ap_evaluate, basis_layout, s21m_lambda_mask
+        from .theory.layout import ap_evaluate, basis_layout, s21m_lambda_mask
 
         _, fog, nalpha = basis_layout(self.basis.kappa.shape[-1])
         if nalpha == 1:
@@ -1137,9 +1139,9 @@ class S21mTheory(Calculator):
 
     def _project_s21(self):
         """S21m terms (nentry, ncol) of the coefficients from the unprojected basis: lambda_2 = matrix @ field grid, with
-        the AP ratios of the trial cosmology when ``ap`` is set, then ``rsd_bias.s21m_assemble``. With an emulator
+        the AP ratios of the trial cosmology when ``ap`` is set, then ``layout.s21m_assemble``. With an emulator
         contracted by ``contract_s21m``, lambda_2 = sum_alpha w_alpha(q) P_alpha of its projected terms."""
-        from .theory.rsd_bias import is_fog, s21m_assemble, s21m_field_powers
+        from .theory.layout import is_fog, s21m_assemble, s21m_field_powers
 
         if self.s21_contracted:
             fog = is_fog(s21m=self.basis.s21m_terms)
@@ -1153,7 +1155,7 @@ class S21mTheory(Calculator):
             lam = jnp.tensordot(weights, terms, axes=1)
             norms = (self.basis.s21m_norms * a ** jnp.asarray(pnorm))[self.s21_projection.norm_rows]
             return s21m_assemble(lam, norms, fog)
-        grids, norms = biased_s21m_fields(self.basis)
+        grids, norms = s21m_fields(self.basis)
         grids, norms = grids[self.s21_field_rows], norms[self.s21_field_rows]
         if self.s21_matrix is not None:
             matrix = self.s21_matrix
@@ -1183,7 +1185,7 @@ FOG_KNL = 0.3
 
 
 def _fog_counterterms(mode) -> dict:
-    """Fingers-of-God counterterm of a ``fog`` basis (``rsd_bias.collapse_fog``): ``"shared"``, one c_v for the
+    """Fingers-of-God counterterm of a ``fog`` basis (``layout.collapse_fog``): ``"shared"``, one c_v for the
     first-layer cumulants (S1m and the one-point factor of S21m) and the modulus spectra of S21m; ``"separate"``,
     c_v_s1 and c_v_s21. Keyed by role ("s1", "s21"); shared: "s1" only (see ``_fog_value``)."""
     if not mode:
@@ -1204,7 +1206,7 @@ def _fog_value(params, role):
 
 
 def _fog_check(basis, params):
-    from .theory.rsd_bias import is_fog
+    from .theory.layout import is_fog
 
     fog = is_fog(basis.kappa, basis.s21m_terms)
     if fog and not params:

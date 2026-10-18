@@ -105,7 +105,7 @@ def select_coefficients(config: WSTConfig, s1_min_scale: float = 25.0, s1_ells=(
     ``s21_min_ratio`` is the smallest sigma_j2 / sigma_j1 kept in the second layer. The default 2.8 drops
     adjacent pairs (sigma_j2 = 2 sigma_j1), whose second-layer non-Gaussianity is not perturbative at
     sigma_j1 ~ 12.5 Mpc/h: tree level overshoots the N-body value by ~2x. ``s21_min_scale2`` is the smallest
-    sigma_j2 (in redshift space, 70 Mpc/h with sigma_j1 >= 17.7 Mpc/h; see ``wstfast.theory.rsd_moduli``).
+    sigma_j2 (in redshift space, 70 Mpc/h with sigma_j1 >= 17.7 Mpc/h; see ``wstfast.theory.second_layer``).
     """
     out = [Coefficient("S1", ell, j) for ell in s1_ells if ell <= config.L for j in range(config.J + 1)
            if config.sigma(j) >= s1_min_scale - 1e-6]

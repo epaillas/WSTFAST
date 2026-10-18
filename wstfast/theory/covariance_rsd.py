@@ -7,7 +7,7 @@ the block weight W2 = R2^2 sum_{m in |m2|} Y_m^2 at sigma_{j2}. In units of <U_a
 
     P_{U_a U_b}(K) = r_a r_b P_L(K) + N_ab(K),        P_{U_a d}(K) = r_a Z1(K) P_L(K),
 
-with the tree response r_a (rsd_bias: r0 + N r1 over n lambda) and the noise N_ab: the Gaussian-chaos cross noise
+with the tree response r_a (second_layer: r0 + N r1 over n lambda) and the noise N_ab: the Gaussian-chaos cross noise
 g_ab of the tracer (``ModulusCrossRSD``), with the auto noise of the fit (1 + a_a) g_aa + W and the cross noise
 rescaled by the geometric mean of the auto ratios. The part of U_a correlated with the analysed field d is
 c_a = P_{U_a d} / P_d; the rest, N_ab - c_a c_b P_d + r_a r_b P_L, is its own noise.
@@ -31,14 +31,14 @@ import numpy as np
 
 from .bias import galaxy_kernel
 from .covariance import HalfLattice, chaos_covariances, components
-from .rsd_bias import linear_components
-from .rsd import spherical_harmonic
-from .rsd_moduli import ModulusSpectraRSD
+from .bias import linear_components
+from .first_layer import spherical_harmonic
+from .second_layer import ModulusSpectra
 
 
-class ModulusCrossRSD(ModulusSpectraRSD):
+class ModulusCrossRSD(ModulusSpectra):
     """Response r_a and Gaussian-chaos cross noise g_ab of every pair of first-layer fields of a biased, discrete
-    tracer at fixed biases, on the (K, mu_K) grid: the fixed-beta, cross-field version of rsd_bias.BiasedModulusSpectraRSD
+    tracer at fixed biases, on the (K, mu_K) grid: the fixed-beta, cross-field version of second_layer.ModulusSpectra
     (whose auto terms it reproduces: r_a^2 P_L(K) and g_aa)."""
 
     def spectra(self, pk, f: float, sigma_v: float, beta, shotnoise: float):
@@ -212,7 +212,7 @@ class ModulusTables:
     the auto noise (1 + a) g_aa + W; the cross noise is g_ab rescaled by sqrt(N_aa N_bb / (g_aa g_bb))."""
 
     def __init__(self, k, mu, r, g, amplitudes=None, white=None):
-        from .rsd import lagrange_matrix
+        from .spectrum import lagrange_matrix
 
         self.logk, self.nodes = np.log(np.asarray(k)), np.asarray(mu) ** 2
         self.lagrange = lambda mu: lagrange_matrix(self.nodes, np.asarray(mu) ** 2)  # noqa: E731

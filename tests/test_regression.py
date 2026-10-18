@@ -142,7 +142,7 @@ def real_outputs() -> dict:
 def matter_rsd_setup() -> dict:
     """Configurations of the matter-limit fixture (those of test_bias.py)."""
     from wstfast.config import SUPERSET, Coefficient, select_coefficients
-    from wstfast.theory.rsd import RSDGrid
+    from wstfast.theory.spectrum import SpectrumGrid
 
     s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell <= 1][:3]
     s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=35.0, s21_min_ratio=2.0, s21_min_scale2=70.0)
@@ -153,7 +153,7 @@ def matter_rsd_setup() -> dict:
                               if c.kind == "S1" and c.ell in (0, 2)][:3],
                 s21_terms=[c for c in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8,
                                                           s21_min_scale2=70.0) if c.kind == "S21"][:1],
-                s1=s1 + [c for c in first if c not in s1], s21=s21, first=first, grid=RSDGrid(kmax=0.2),
+                s1=s1 + [c for c in first if c not in s1], s21=s21, first=first, grid=SpectrumGrid(kmax=0.2),
                 edges=np.linspace(0.01, 0.15, 8))
 
 
@@ -165,8 +165,10 @@ def matter_rsd_outputs(tracer: str = "biased") -> dict:
     from wstfast.calculators import JointTheory, RSDBasis, RSDPowerTheory, S1mTheory, S21mTheory, build_cosmology
     from wstfast.config import SUPERSET
     from wstfast.theory.bias import MATTER_BETA, monomials
-    from wstfast.theory.rsd import MultipoleProjection, S1mProjection
-    from wstfast.theory.rsd_bias import KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis, BiasedRSDS21mBasis, split
+    from wstfast.theory.spectrum import MultipoleProjection, S1mProjection
+    from wstfast.theory.first_layer import S1mBasis
+    from wstfast.theory.layout import KAPPA_SIZES, S21_SIZES, SKEW_SIZES, split
+    from wstfast.theory.second_layer import S21mBasis
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from test_bias import linear_power
@@ -175,9 +177,9 @@ def matter_rsd_outputs(tracer: str = "biased") -> dict:
     klin, pklin = linear_power()
     f = setup["f"]
     m = lambda d: np.asarray(monomials(MATTER_BETA, d))  # noqa: E731
-    kappa, skewness = BiasedRSDS1Basis(SUPERSET, setup["s1_cumulants"], npoints=2**10, lattice=False,
+    kappa, skewness = S1mBasis(SUPERSET, setup["s1_cumulants"], npoints=2**10,
                                        damping="linear").cumulants(klin, pklin, f)
-    terms = split(BiasedRSDS21mBasis(SUPERSET, setup["s21_terms"], nk=6, nmu=3, **setup["quad"])(klin, pklin, f),
+    terms = split(S21mBasis(SUPERSET, setup["s21_terms"], nk=6, nmu=3, **setup["quad"])(klin, pklin, f),
                   S21_SIZES)
     norm2 = (terms[6] @ m(2)) ** 2
     s1, s21, first, grid, edges = (setup[k] for k in ("s1", "s21", "first", "grid", "edges"))

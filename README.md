@@ -119,12 +119,12 @@ The cosmology-dependent band integrals (`WSTBasis`) are what the emulator replac
 parameters stay exact in `WSTTheory`, as in the DSC model.
 
 Not yet included in this real-space model: one-loop responses. Redshift space (line-of-sight-resolved
-S1m, S21m and P_ℓ, `wstfast/theory/rsd.py`, `rsd_moduli.py`, `scripts/fit_rsd.py`) and biased tracers are
+S1m, S21m and P_ℓ: `wstfast/theory/spectrum.py`, `first_layer.py`, `second_layer.py`, `scripts/fit_rsd.py`) and biased tracers are
 handled by the redshift-space model below.
 
 ## Biased tracers (Quijote FoF halos)
 
-The redshift-space model extends to Eulerian-biased tracers (`wstfast/theory/bias.py`, `rsd_bias.py`).
+The redshift-space model extends to Eulerian-biased tracers (`wstfast/theory/bias.py`, with the column layout of `layout.py`).
 - **Bias expansion:** b1, b2, bG2, bΓ3 at one loop (the CLASS-PT basis, with the b2 parts of P13 and of the
   k → 0 limit of P22 renormalized).
 - **Stochastic terms:** (1 + α0) V/N and α2 k²μ² V/N.
@@ -132,8 +132,9 @@ The redshift-space model extends to Eulerian-biased tracers (`wstfast/theory/bia
   noise.
 - **Emulation:** every basis output is resolved into the coefficients of the monomials of
   β = (1, b1, b2, bG2, bΓ3), so the emulator stays cosmology-only.
-- **Matter limit:** with β = (1, 1, 0, 0, 0) and no shot noise, the model is exactly the matter model
-  (`tests/test_bias.py`).
+- **Matter limit:** matter is β = (1, 1, 0, 0, 0) with Poisson shot noise only: the theories take it with
+  `tracer="matter"` (the biases fixed), on the same basis. It reproduces the former matter-only code
+  (`tests/test_regression.py`).
 
 ```bash
 scripts/download_quijote_halos.sh 0 1999                      # Globus, ~26 MB per box

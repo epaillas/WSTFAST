@@ -67,17 +67,17 @@ def test_first_order_is_kaiser():
 
 
 def test_unprojected_s21m_columns_and_powers():
-    from wstfast.theory.rsd_bias import S21_SIZES, biased_scalings, s21m_assemble, s21m_field_powers
+    from wstfast.theory.layout import S21_SIZES, amplitude_scalings, s21m_assemble, s21m_field_powers
 
     rng = np.random.default_rng(0)
     for fog in (False, True):
         plam, pnorm = s21m_field_powers(fog)
         lam, norms = rng.normal(size=(3, plam.size)), rng.normal(size=(3, pnorm.size))
         assembled = s21m_assemble(lam, norms, fog)
-        assert assembled.shape[-1] == biased_scalings(2.0, fog=fog)["s21m"].size
+        assert assembled.shape[-1] == amplitude_scalings(2.0, fog=fog)["s21m"].size
         ratio = 1.37
         np.testing.assert_allclose(s21m_assemble(lam * ratio**plam, norms * ratio**pnorm, fog),
-                                   assembled * np.asarray(biased_scalings(ratio, fog=fog)["s21m"]), rtol=1e-12)
+                                   assembled * np.asarray(amplitude_scalings(ratio, fog=fog)["s21m"]), rtol=1e-12)
     assert sum(S21_SIZES) == s21m_field_powers(False)[0].size + s21m_field_powers(False)[1].size
 
 
@@ -86,7 +86,7 @@ def test_s21m_ap_projection_matches_fixed_projection_and_scales_with_volume():
 
     from wstfast import WSTConfig
     from wstfast.config import Coefficient
-    from wstfast.theory.rsd_moduli import S21mAPProjection, S21mProjection, first_layer_fields
+    from wstfast.theory.second_layer import S21mAPProjection, S21mProjection, first_layer_fields
 
     config = WSTConfig(J=3, L=2, L2=2, sigma0=2.5, step=2**0.5, cellsize=10.0, min_dj=3)
     coefficients = [Coefficient("S21", ell, 0, 3) for ell in (1, 2)]
@@ -108,11 +108,11 @@ def test_ap_polynomial_matches_exact_ap_projections():
 
     from wstfast import WSTConfig
     from wstfast.config import Coefficient
-    from wstfast.theory.rsd import APPolynomial, RSDGrid, s1m_ap_projection
-    from wstfast.theory.rsd_moduli import S21mAPProjection, first_layer_fields
+    from wstfast.theory.spectrum import APPolynomial, SpectrumGrid, s1m_ap_projection
+    from wstfast.theory.second_layer import S21mAPProjection, first_layer_fields
 
     config = WSTConfig(J=3, L=2, L2=2, sigma0=2.5, step=2**0.5, cellsize=10.0, min_dj=3)
-    grid = RSDGrid(kmax=0.3)
+    grid = SpectrumGrid(kmax=0.3)
     rows = (np.exp(-((grid.k[:, None] / 0.1) ** 2)) * (1 + grid.mu[None, :] ** 2) / (1 + (grid.k[:, None] / 0.02) ** 2))
     exact = s1m_ap_projection(config, [Coefficient("S1", ell, j) for j in (0, 3) for ell in (0, 2)], grid,
                               boxsize=1500.0, nmesh=96)
