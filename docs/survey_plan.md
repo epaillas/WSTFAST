@@ -707,6 +707,13 @@ variance level.**
   conclusions and a new appendix describe the computed window (paper/main_v2.tex, local). NUTS chains of the joint
   and NGC Abacus fits with this baseline are running (`abacus_N25_exactpca_exp_hrecal_nuts_*`); SGC alone is too
   noisy to fit separately (user's call).
+- **Chain cost (2026-10-17 night).** The exact factor's gradient (22 ms per cap, four evaluations per likelihood call
+  with both layers) makes the NUTS chains ~20x slower than with the histogram window: 68 min without a first 200-step
+  checkpoint on the Mac. Sharing one factor between the layers is NOT an option: at the best fit the factor at the
+  tree spectrum (the second layer's) differs from the one-loop one by up to 1.5% (0.8% rms). `_chi_moment` now uses
+  12 nodes (exact to 1e-9 at the DR1 eigenvalue ratios); 80 cells per bin are kept (40 would add a 0.085% per-block
+  sampling pattern, 0.3-0.5σ per block on the 25-mock mean). The chains run on a Perlmutter GPU node instead
+  (JAX 0.9.1 on A100s in cosmodesi): fit inputs synced to outputs/ there.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.

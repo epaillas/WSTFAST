@@ -824,8 +824,8 @@ def signal_variances(pcell: np.ndarray, config: WSTConfig, lattice: Lattice) -> 
 
 
 #: Midpoint nodes of the phi integral of ``_chi_moment`` over a quarter period: the integrand is periodic and analytic,
-#: so 16 nodes are exact to 3e-12 for lam_b / lam_a >= 0.1 (the DR1 cells' minimum) and to 4e-6 at 0.01.
-CHI_NODES = 16
+#: so 12 nodes are exact to 1e-9 for lam_b / lam_a >= 0.1 (the DR1 cells' minimum; 16 give 3e-12).
+CHI_NODES = 12
 
 
 def _chi_moment(lam_a, lam_b, q):
