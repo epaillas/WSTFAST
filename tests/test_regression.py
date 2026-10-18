@@ -1,0 +1,192 @@
+"""Regression fixtures of the code-release refactor (docs/refactor_plan.md, step 0), frozen from the code of 2026-10-18.
+
+- ``halo``: the halo baseline of the paper (scripts/fit_halo_baseline.sh: S1m + S21m with c_v, cubic biases, layer-2
+  template and AP, on the ap3_base emulator), plus the P(k) multipoles from the same emulator, at the fiducial point
+  and at the best fit of outputs/inference/rsd/fullap_ap_V60. The refactor must reproduce these to round-off
+  (the emulators stay valid, D2).
+- ``basis``: one non-emulated biased RSDBasis (fog, cubic, AP order 3, IR) at the Quijote cosmology, on a few
+  coefficients: the pure model code, without the emulator. Also to round-off.
+- ``real``: the real-space matter WSTMatterBasis at the Quijote cosmology and its Assembly at fixed nuisances, the
+  reference the f = 0 limit is compared with in step 3 (agreement within the measurement errors, not round-off).
+
+The tests skip when the emulators or measurements (outside git) are missing. Regenerate only on purpose:
+
+    python tests/test_regression.py [halo] [basis] [real]
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+HALO_DATA = ROOT / "data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"
+HALO_EMULATOR = ROOT / "outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_base.h5"
+LAYER2_TEMPLATE = ROOT / "outputs/layer2/template_rsd.json"
+#: Best fit of the baseline at 60 (Gpc/h)^3 (outputs/inference/rsd/fullap_ap_V60/summary.json), frozen here.
+HALO_BESTFIT = {
+    "omega_cdm": 0.11855275407688619, "logA": 3.0809323306353344, "h": 0.6715176079415945, "c_v": 0.9404955575032141,
+    "b1": 1.9200740815717343, "b2": -0.4940009277812223, "bG2": -0.49209491995535704, "bGamma3": 0.46128970092937305,
+    "alpha0": 0.10299975170922426, "alpha2": -2.7310008046711545, "db3": 0.7339378203766374,
+    "dbG3": 0.0712432728914183, "dbdG2": -0.03894042659402053, "c0": 24.63512573192721, "c2": 29.263813704946543,
+    "c4": -9.57378295304558, "W_j6": 411.36979279931955, "noise_j6_l1_m0": -0.02749080596434006,
+    "noise_j6_l1_m1": -0.059922886482247306, "noise_j6_l2_m0": 0.008454522273308451,
+    "noise_j6_l2_m1": -0.0425740807624293, "noise_j6_l2_m2": -0.012042269648838033,
+    "noise_j6_l3_m0": 0.03493221518682843, "noise_j6_l3_m1": -0.0273887256426818,
+    "noise_j6_l3_m2": -0.03685271942439583, "noise_j6_l3_m3": 0.0019909298057141367,
+    "noise_j6_l4_m0": 0.050193335862497634, "noise_j6_l4_m1": -0.012801198667800162,
+    "noise_j6_l4_m2": -0.044104909582148855, "noise_j6_l4_m3": -0.04026501990797049,
+    "noise_j6_l4_m4": 0.008971587731911201,
+    # P(k) nuisances (not in the WST baseline): representative halo values
+    "c0_pk": 5.0, "c2_pk": 10.0, "c4_pk": 0.0,
+}
+#: Coefficients of the non-emulated basis fixture: every l of the first layer at sigma_j6 = 25 Mpc/h, one larger scale,
+#: and one S21 entry.
+BASIS_S1 = ["S1_j6_l0", "S1_j6_l1", "S1_j6_l2", "S1_j6_l3", "S1_j6_l4", "S1_j8_l2"]
+BASIS_S21 = ["S21_j6_j9_l2"]
+REAL_DATA = ROOT / "data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256"
+REAL_SHOTNOISE = 7.450580596923828  # (1000 Mpc/h)^3 / 512^3, as in outputs/emulators/wst_basis_taylor_superset.json
+REAL_NUISANCE = dict(cs2=0.5, noise=0.1)
+
+RTOL = 1e-10
+
+
+def _halo_args(stats):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import fit_rsd
+
+    output = tempfile.mkdtemp()
+    argv = ["--data-dir", str(HALO_DATA), "--emulator", str(HALO_EMULATOR), "--ap", "--stats", *stats,
+            "--s21-min-scale", "25", "--s21-white", "--cubic-biases", "relation", "--s21-layer2", str(LAYER2_TEMPLATE),
+            "--s21-layer2-c", "halo", "--s21-layer2-marg", "per_l", "--fog", "shared", "--vary", "omega_cdm", "logA",
+            "h", "--output-dir", output]
+    return fit_rsd, fit_rsd.parse_args(argv)
+
+
+def halo_predictions() -> dict:
+    """Baseline WST and P_l predictions of the halo model at the fiducial point and at HALO_BESTFIT."""
+    from desilike import build, get_params
+
+    from wstfast.calculators import JointTheory
+
+    fit_rsd, args = _halo_args(["s1m", "s21m", "pk"])
+    problem = fit_rsd.build_problem(args)
+    theory = JointTheory(problem["theories"])
+    params = get_params(theory)
+    varied = params.select(varied=True, derived=False).names()
+    fiducial = {name: float(params[name].value) for name in varied}
+    bestfit = {name: HALO_BESTFIT.get(name, fiducial[name]) for name in varied}
+    missing = sorted(set(varied) - set(HALO_BESTFIT))
+    if missing:
+        print(f"halo fixture: no best-fit value for {missing}, fiducial used")
+    graph = build(theory, output=lambda: theory.flattheory)
+    return dict(labels=np.array(problem["labels"]), fiducial=np.asarray(graph(fiducial)),
+                bestfit=np.asarray(graph(bestfit)), params=json.dumps(dict(fiducial=fiducial, bestfit=bestfit)))
+
+
+def basis_outputs() -> dict:
+    """Outputs of a non-emulated biased RSDBasis with the settings of the ap3_base emulator, at the Quijote cosmology."""
+    from desilike import build
+
+    from wstfast.calculators import RSDBasis, build_cosmology
+    from wstfast.config import WSTConfig
+
+    settings = json.loads(HALO_EMULATOR.with_suffix(".json").read_text())
+    config = WSTConfig(**settings["config"])
+    basis = RSDBasis(cosmo=build_cosmology(settings["vary"]), config=config, coefficients=_coefficients(config, BASIS_S1),
+                     z=settings["z"], kmax=settings["kmax"], ir=settings["ir"],
+                     s21_coefficients=_coefficients(config, BASIS_S21), tracer="biased",
+                     cubic_biases=settings["cubic_biases"], fog=settings["fog"], s21_lattice=settings["lattice"],
+                     s21_projected=settings["s21_projected"], ap_order=settings["ap_order"])
+    keys = ("grid_terms", "kappa", "skewness2", "s21m_terms", "dlogA")
+    out = build(basis, output=lambda: {key: getattr(basis, key) for key in keys})({})
+    return {key: np.asarray(value) for key, value in out.items()}
+
+
+def _coefficients(config, labels):
+    from wstfast.config import select_coefficients
+
+    every = {c.label: c for c in select_coefficients(config, s1_min_scale=0.0, s21_min_scale=0.0, s21_min_ratio=0.0)}
+    return [every[label] for label in labels]
+
+
+def real_outputs() -> dict:
+    """Band integrals of WSTMatterBasis (all coefficients) at the Quijote cosmology, and their Assembly at REAL_NUISANCE."""
+    import jax.numpy as jnp
+    from desilike import build
+
+    from wstfast.calculators import WSTBasis
+    from wstfast.data import load_measurement
+    from wstfast.theory import Assembly, all_coefficients
+
+    config = load_measurement(sorted((REAL_DATA / "real").glob("wst_r*.npz"))[0], q=0.8)["config"]
+    basis = WSTBasis(config=config, shotnoise=REAL_SHOTNOISE)
+    s1_terms, s21_terms = build(basis, output=lambda: (basis.s1_terms, basis.s21_terms))({})
+    coefficients = all_coefficients(config)
+    assembly = Assembly(config, coefficients)
+    noise = jnp.full(len(assembly.noise_keys), REAL_NUISANCE["noise"])
+    prediction = assembly(s1_terms, s21_terms, REAL_NUISANCE["cs2"], noise)
+    return dict(labels=np.array([c.label for c in coefficients]), s1_terms=np.asarray(s1_terms),
+                s21_terms=np.asarray(s21_terms), prediction=np.asarray(prediction))
+
+
+GENERATORS = {"halo": (halo_predictions, (HALO_DATA, HALO_EMULATOR, LAYER2_TEMPLATE)),
+              "basis": (basis_outputs, (HALO_EMULATOR,)),
+              "real": (real_outputs, (REAL_DATA,))}
+
+
+def _reference(name):
+    path = FIXTURES / f"regression_{name}.npz"
+    if not path.exists():
+        pytest.skip(f"no fixture {path.name}")
+    missing = [str(p) for p in GENERATORS[name][1] if not p.exists()]
+    if missing:
+        pytest.skip(f"inputs outside git missing: {missing}")
+    with np.load(path) as data:
+        return {key: data[key] for key in data.files}
+
+
+@pytest.mark.slow
+def test_halo_baseline_predictions():
+    reference = _reference("halo")
+    current = halo_predictions()
+    assert current["labels"].tolist() == reference["labels"].tolist()
+    assert json.loads(str(current["params"])) == json.loads(str(reference["params"]))
+    for key in ("fiducial", "bestfit"):
+        np.testing.assert_allclose(current[key], reference[key], rtol=RTOL, atol=0.0, err_msg=key)
+
+
+@pytest.mark.slow
+def test_biased_basis_outputs():
+    reference = _reference("basis")
+    current = basis_outputs()
+    for key, value in reference.items():
+        np.testing.assert_allclose(current[key], value, rtol=RTOL, atol=1e-300, err_msg=key)
+
+
+@pytest.mark.slow
+def test_real_space_matter_outputs():
+    """Holds only until step 3 replaces WSTMatterBasis by the f = 0 limit; the fixture stays as its reference."""
+    reference = _reference("real")
+    current = real_outputs()
+    assert current["labels"].tolist() == reference["labels"].tolist()
+    for key in ("s1_terms", "s21_terms", "prediction"):
+        np.testing.assert_allclose(current[key], reference[key], rtol=RTOL, atol=1e-300, err_msg=key)
+
+
+if __name__ == "__main__":
+    import time
+
+    import wstfast.theory  # noqa: F401  (double precision)
+
+    FIXTURES.mkdir(exist_ok=True)
+    for name in sys.argv[1:] or GENERATORS:
+        start = time.time()
+        np.savez(FIXTURES / f"regression_{name}.npz", **GENERATORS[name][0]())
+        print(f"wrote regression_{name}.npz in {time.time() - start:.0f} s")
