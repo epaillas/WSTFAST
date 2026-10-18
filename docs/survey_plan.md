@@ -727,7 +727,12 @@ variance level.**
   file), S21m entries = the mean weighted by W_c × S1m_c of their first-layer block (the union's S2m over its S1m);
   the theory is `calculators.CombinedCaps` over the per-cap theories (each cap keeps its own window), the analytic and
   extra covariances are projected with the Jacobian at the data mean. The likelihood cost is that of the joint fit
-  (both caps' windows are still evaluated); the data vector is half as long.
+  (both caps' windows are still evaluated); the data vector is half as long. Profile (a5a8421, same setup as the
+  joint one): ω_cdm 0.1241 ± 0.0034, logA 3.050 ± 0.053, h 0.683 ± 0.013, α₀ 0.50 ± 0.22, χ² 233 / 83, against
+  the joint's 0.1233 / 3.095 / 0.689, χ² 455 / 197 (truth 0.1200 / 3.036 / 0.6736): the same cosmology within
+  0.3σ, logA 1σ closer to the truth. NGC NUTS chain (exact window, recalibrated δ): 0.1189 ± 0.0038, 3.029 ± 0.061,
+  0.679 ± 0.014 (pulls −0.3, −0.1, +0.4σ), Gelman–Rubin 1.00. The joint chain was stopped at 600 steps per chain
+  (R = 1.01, checkpoints kept) in favour of the GCcomb chain (`abacus_N25_exactpca_exp_hrecal_GCcomb_nuts`).
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
