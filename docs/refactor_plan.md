@@ -199,16 +199,30 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    `rsd.py`), `rsd_moduli._harmonic` is replaced by `rsd.spherical_harmonic`, and `covariance.real_harmonics` by
    `measure.real_harmonics`. The fixtures are unchanged. Still depending on real-space modules:
    `covariance.py` (`cross_noise`, `ShellCovariance`: the real-space covariance, replaced in step 3/6).
-2. **Collapse matter into biased in redshift space.** Make the `Biased*` classes the only implementation (folded
-   into `spectrum.py` / `first_layer.py` / `second_layer.py`). Delete `RSDGrid` / `RSDS1Basis` / `RSDS21mBasis`
-   as separate code paths and the `tracer=` branches in `RSDBasis` and the theories. Add `layout.py` and
-   `ModelSpec`. Gate: halo fixtures unchanged. Redshift-space matter predictions agree with the old
-   `tracer="matter"` ones to integration precision. Fit the 688 `_los/rsd` matter boxes once to confirm.
+2. **Collapse matter into biased in redshift space.** *Done 2026-10-18, in three commits.*
+   - 2a: the calculators have one code path. `RSDBasis` always builds the monomial basis, and `tracer="matter"` is
+     the matter limit taken by the theories (`BiasParameters(tracer="matter")`: b1 = 1, the rest 0, fixed). Emulators
+     of the retired matter layout (`rsd_basis_taylor_4p*`, not used by the paper) are refused at load; new ones are
+     tagged `layout="monomial"`.
+   - 2b: `rsd.py` / `rsd_bias.py` / `rsd_moduli.py` became `spectrum.py` (`SpectrumGrid`, the projections, AP),
+     `first_layer.py` (`S1mBasis`, `LegSampler`, harmonics, S1m assembly), `second_layer.py` (`ModulusSpectra`,
+     `S21mBasis`, the S21m projections) and `layout.py` (the monomial column layout). Matter-only code was deleted.
+     Renames: `biased_scalings` -> `amplitude_scalings`, `BIASED_GRID_TERMS` -> `GRID_TERMS`, and in the calculators
+     `biased_rows` / `biased_grid` / `biased_cumulants` -> `basis_rows` / `tracer_grid` / `tracer_cumulants`.
+   - 2c: `config.ModelSpec` (tracer, space, ir, fog, ap_order, cubic) validates the model options once. `RSDBasis`
+     holds one as `spec`, `train_emulator.py` stores it as `settings["model"]`, and `fit_rsd.py` reads it back
+     (`ModelSpec.from_settings` also reads the separate keys of older emulators).
+
+   Gates: the halo and basis fixtures are unchanged to 1e-10. Instead of a fit of the matter boxes, the old matter
+   classes were frozen as `tests/fixtures/regression_matter_rsd.npz` before deletion. The matter limit reproduces
+   them: cumulants and S21m terms to 1e-10, and the P_l + S1m + S21m theories with `tracer="matter"` to 1e-8. A
+   matter emulator of the new layout is trained only when a matter fit is needed.
 3. **Real space as f = 0.** Add `space="real"` to the basis and the f = 0 parameter fixing. Gates:
    - S1m blocks at f = 0 are degenerate in |m| (same lambda) to 1e-10;
-   - the m-summed S1 from `s1_rsd` at f = 0 agrees with the old `WSTMatterBasis` S1 to well under the 868-box
-     error bar. Expected differences: lattice sums against continuum integrals, and `eft_loop` against
-     `OneLoopMatter`. Quantify them and record them in this file;
+   - at f = 0, the m-summed S1 built from the common block variance (the chi moment with n = 2l + 1, plus the
+     isotropic Edgeworth factor; `s1_rsd` no longer exists) agrees with the old `WSTMatterBasis` S1 to well under the
+     868-box error bar (`tests/fixtures/regression_real.npz`). Expected differences: lattice sums against continuum
+     integrals, and `eft_loop` against `OneLoopMatter`. Quantify them and record them in this file;
    - the connected noise at f = 0 against the old `ModulusNoise` dN.
 4. **Calculators and inference.** Build the single `Basis`, `PowerTheory` / `S1Theory` / `S21Theory`,
    `NuisanceParameters` and `inference.build_likelihood`. Turn `fit_rsd.py` into the thin `fit.py`. Prune the

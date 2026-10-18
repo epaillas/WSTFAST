@@ -280,3 +280,16 @@ def test_s1m_edgeworth_amplitude_per_coefficient():
     mixed = s1m_from_variances(variances, linear, kappa, skewness2, ells, q, edgeworth_amplitude=[0.9, 0.0, 0.9])
     np.testing.assert_allclose(mixed[1:4], gaussian[1:4], rtol=1e-14)  # the l = 2 blocks
     np.testing.assert_allclose(mixed[:1], scalar[:1], rtol=1e-14)
+
+
+def test_model_spec_validates_and_reads_legacy_settings():
+    from wstfast.config import ModelSpec
+
+    assert ModelSpec.matter() == ModelSpec(tracer="matter")
+    legacy = dict(tracer="biased", ir=True, fog=True, ap_order=3, cubic_biases=True)
+    spec = ModelSpec.from_settings(legacy)
+    assert spec == ModelSpec(tracer="biased", ir=True, fog=True, ap_order=3, cubic=True)
+    assert ModelSpec.from_settings({"model": spec.to_dict()}) == spec
+    for bad in (dict(tracer="matter", cubic=True), dict(ap_order=2), dict(ap_order=9, fog=True), dict(tracer="halo")):
+        with pytest.raises(ValueError):
+            ModelSpec(**bad)

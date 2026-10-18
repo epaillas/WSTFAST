@@ -18,7 +18,7 @@ from desilike.base import Calculator, GaussianLikelihood
 from desilike.parameter import Parameter
 from desilike.theories import CosmoprimoCosmology
 
-from .config import ABACUS_COSMOLOGY, ABACUS_M_NCDM, QUIJOTE_COSMOLOGY, WSTConfig
+from .config import ABACUS_COSMOLOGY, ABACUS_M_NCDM, QUIJOTE_COSMOLOGY, ModelSpec, WSTConfig
 from .theory import Assembly, WSTMatterBasis
 from .theory.power import LatticeBinning, matter_power_terms
 
@@ -261,11 +261,9 @@ class RSDBasis(Calculator):
         from .theory.second_layer import S21mBasis
         from .theory.spectrum import SpectrumGrid
 
-        if tracer not in ("matter", "biased"):
-            raise ValueError(f"unknown tracer {tracer!r}")
+        #: What the basis includes (validated there); the keyword arguments below are its fields.
+        self.spec = ModelSpec(tracer=tracer, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
         self.z, self.tracer = float(z), tracer
-        if cubic_biases and tracer == "matter":
-            raise ValueError("cubic_biases needs tracer='biased' (the cubic biases of matter vanish)")
         #: The kappa columns also hold the trispectrum of the cubic operators (``layout.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
         #: Fingers-of-God counterterm columns instead of the velocity damping, in the S1m cumulants and the S21m terms
@@ -283,8 +281,6 @@ class RSDBasis(Calculator):
         #: S1mTheory / S21mTheory (``layout.ap_evaluate``), like the AP polynomials of the projections.
         self.ap_order = int(ap_order)
         if self.ap_order:
-            if not self.fog:
-                raise ValueError("ap_order needs fog=True")
             if not s21_projected:
                 raise ValueError("ap_order needs the projected S21m basis")
             cubic["ap"] = self.ap_order

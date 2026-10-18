@@ -150,6 +150,7 @@ def train_rsd(args):
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
                      s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected,
                      ap_order=args.ap_order)
+    settings["model"] = basis.spec.to_dict()
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     mpi = {}

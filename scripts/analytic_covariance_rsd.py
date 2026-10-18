@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 from scipy.special import eval_legendre
 
-from wstfast.config import select_coefficients
+from wstfast.config import ModelSpec, select_coefficients
 from wstfast.data import load_measurement, load_power_dataset
 from wstfast.theory.covariance import RSDGaussianCovariance, chaos_covariances
 
@@ -98,7 +98,7 @@ def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=No
         first = sorted((data_dir / "rsd").glob("wst_r*.npz"))[0]
         meta = json.loads(str(np.load(first)["metadata"]))
         shotnoise = meta["boxsize"] ** 3 / meta["nparticles"]
-    theory = RSDPowerTheory(Identity(), basis=basis, shotnoise=shotnoise, tracer=settings.get("tracer", "matter"))
+    theory = RSDPowerTheory(Identity(), basis=basis, shotnoise=shotnoise, tracer=ModelSpec.from_settings(settings).tracer)
     names = get_params(theory).select(varied=True, derived=False).names()
     cosmology = QUIJOTE_COSMOLOGY if cosmology is None else cosmology
     values = {name: cosmology[name] for name in ("omega_cdm", "logA", "n_s", "h") if name in names}

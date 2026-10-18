@@ -70,6 +70,68 @@ class WSTConfig:
 SUPERSET = WSTConfig(J=9, L=6, L2=4, min_dj=2, sigma0=0.8, step=2**0.5)
 
 
+#: Highest order of the AP polynomial of the basis (``theory.layout.AP_TERMS``).
+MAX_AP_ORDER = 4
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """What the model of the WST and P(k) includes. There is one implementation, of a biased, discrete tracer in redshift
+    space; the other cases are its limits:
+
+    - ``tracer``: ``"biased"`` (Eulerian biases b1, b2, bG2, bGamma3 and stochastic terms) or ``"matter"`` (b1 = 1, the
+      others 0, Poisson shot noise: the theories fix the biases, on the same basis);
+    - ``space``: ``"redshift"`` (line of sight z) or ``"real"`` (the limit f = 0, without Fingers-of-God or AP);
+    - ``ir``: BAO infrared resummation of the P_s grid;
+    - ``fog``: the Fingers-of-God counterterm c_v of the S1m cumulants and S21m modulus spectra, in place of the linear
+      velocity damping;
+    - ``ap_order``: order of the Alcock-Paczynski polynomial of the observed-frame cumulants and S21m terms (needs
+      ``fog``; 0: none, the projections still carry AP);
+    - ``cubic``: the cubic biases of the tree trispectrum (biased tracers).
+
+    Validated once here; an emulator stores it in its settings (``to_dict``, read back by ``from_settings``).
+    """
+
+    tracer: str = "biased"
+    space: str = "redshift"
+    ir: bool = False
+    fog: bool = False
+    ap_order: int = 0
+    cubic: bool = False
+
+    def __post_init__(self):
+        if self.tracer not in ("biased", "matter"):
+            raise ValueError(f"unknown tracer {self.tracer!r}")
+        if self.space not in ("redshift", "real"):
+            raise ValueError(f"unknown space {self.space!r}")
+        if self.space == "real":
+            raise NotImplementedError("real space (the f = 0 limit) is not implemented yet (docs/refactor_plan.md, step 3)")
+        if self.cubic and self.tracer == "matter":
+            raise ValueError("cubic biases need tracer='biased' (they vanish for matter)")
+        if not 0 <= int(self.ap_order) <= MAX_AP_ORDER:
+            raise ValueError(f"ap_order must be in 0..{MAX_AP_ORDER}")
+        if self.ap_order and not self.fog:
+            raise ValueError("ap_order needs fog=True")
+
+    @classmethod
+    def matter(cls, space: str = "redshift", **kwargs) -> "ModelSpec":
+        """The matter limit (``tracer="matter"``)."""
+        return cls(tracer="matter", space=space, **kwargs)
+
+    @classmethod
+    def from_settings(cls, settings: dict) -> "ModelSpec":
+        """The spec of an emulator from its settings: ``settings["model"]``, or the separate keys of emulators trained
+        before ModelSpec existed (tracer, ir, fog, ap_order, cubic_biases)."""
+        if "model" in settings:
+            return cls(**settings["model"])
+        return cls(tracer=settings.get("tracer", "matter"), ir=bool(settings.get("ir", False)),
+                   fog=bool(settings.get("fog")), ap_order=int(settings.get("ap_order") or 0),
+                   cubic=bool(settings.get("cubic_biases")))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 def s1_label(j: int, ell: int) -> str:
     return f"S1_j{j}_l{ell}"
 

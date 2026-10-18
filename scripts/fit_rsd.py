@@ -36,7 +36,7 @@ from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
 from wstfast.calculators import (APGeometry, CombinedCaps, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood,
                                  combine_caps)
-from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, WSTConfig, select_coefficients
+from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, ModelSpec, WSTConfig, select_coefficients
 from wstfast.data import (chi_squared, hartlap_factor, load_measurement, load_power_dataset, load_s1m_dataset,
                           load_s21m_dataset, percival_m1, sample_covariance)
 from wstfast.inference import (_bound_to_emulator, _fix_unvaried, bestfit_values, fix_parameters, parse_fixed,
@@ -253,8 +253,9 @@ def load_correction(args, config, coefficients, settings):
     klin = np.geomspace(1e-4, 10.0, 1024)
     pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
     f = float(fourier.sigma8_z(settings["z"], of="theta_cb") / fourier.sigma8_z(settings["z"], of="delta_cb"))
-    cubic = dict(cubic=True) if settings.get("cubic_biases") else {}
-    if settings.get("fog"):
+    spec = ModelSpec.from_settings(settings)
+    cubic = dict(cubic=True) if spec.cubic else {}
+    if spec.fog:
         cubic["fog"] = True
     kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=args.cumulant_points, **cubic)
     np.savez(cache, kappa=kappa, skewness2=skewness2, labels=np.array([c.label for c in every]))
@@ -268,7 +269,7 @@ def _tile_ap(settings, kappa, skewness2):
     """The control-variate correction (computed without AP) for every AP-polynomial term of an --ap-order emulator."""
     from wstfast.theory.layout import AP_TERMS
 
-    n = AP_TERMS[settings.get("ap_order", 0)]
+    n = AP_TERMS[ModelSpec.from_settings(settings).ap_order]
     return np.tile(kappa, n), np.tile(skewness2, n)
 
 
@@ -401,12 +402,13 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
         basis, settings = load_basis(args.emulator, args.vary, prepare=lambda e, st: contract_unprojected_s21m(
             args, config, e, st))
         apply_gaussian_priors(basis, settings, args.gaussian_prior)
-    tracer = settings.get("tracer", "matter")
+    spec = ModelSpec.from_settings(settings)
+    tracer = spec.tracer
     cubic_biases = getattr(args, "cubic_biases", None)
-    if cubic_biases is not None and not settings.get("cubic_biases"):
+    if cubic_biases is not None and not spec.cubic:
         raise SystemExit(f"--cubic-biases needs an emulator trained with --cubic-biases ({args.emulator} is not)")
     fog = getattr(args, "fog", None)
-    if bool(fog) != bool(settings.get("fog")):
+    if bool(fog) != spec.fog:
         raise SystemExit("--fog needs an emulator trained with --fog, and such an emulator needs --fog")
     grid = SpectrumGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
@@ -450,7 +452,7 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
         from wstfast.theory.second_layer import s21m_entries
 
         unprojected = not settings.get("s21_projected", True)
-        if args.ap and not unprojected and not settings.get("ap_order"):
+        if args.ap and not unprojected and not spec.ap_order:
             raise SystemExit("--ap for s21m needs an emulator with the unprojected S21m basis (--s21-unprojected) "
                              "or with AP-polynomial terms (--ap-order)")
         coefficients = [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
@@ -480,7 +482,7 @@ def build_problem(args, basis=None, settings=None, space="rsd", window=None, pre
                            noise_calibration=(dict(np.load(args.s21_noise_calibration))
                                               if args.s21_noise_calibration is not None else None),
                            cubic_biases=cubic_biases, kappa_shot=args.kappa_shot, fog=fog, window=window)
-        if settings.get("ap_order") and args.ap:  # AP-polynomial terms of the basis, at the trial AP ratios
+        if spec.ap_order and args.ap:  # AP-polynomial terms of the basis, at the trial AP ratios
             s21m_kwargs.update(ap=ap, first_ap=APPolynomial(s1m_ap_projection(config, first_layer, grid, **lattice)))
         if unprojected and settings.get("prepared") is not None:  # emulator contracted at load (contract_s21m)
             s21m_kwargs.update(entry_index=None, noise_correction=None, ap=ap, s21_projection=settings["prepared"])
