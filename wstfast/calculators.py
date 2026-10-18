@@ -257,6 +257,8 @@ class Basis(Calculator):
                  cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0,
                  s21_projected: bool = True, ap_order: int = 0):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
+        #: What the basis includes (validated there); the keyword arguments below are its fields.
+        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
@@ -267,7 +269,6 @@ class Basis(Calculator):
         from .theory.second_layer import S21mBasis
         from .theory.spectrum import SpectrumGrid
 
-        #: What the basis includes (validated there); the keyword arguments below are its fields.
         self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
         self.z, self.tracer = float(z), tracer
         #: The kappa columns also hold the trispectrum of the cubic operators (``layout.CUBIC_KAPPA_SIZES``).
