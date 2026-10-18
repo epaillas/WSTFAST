@@ -742,6 +742,12 @@ variance level.**
   `numbers_survey_abacus.tex`: pulls −0.3 / −0.1 / +0.4σ at 35 (Gpc/h)³, χ² 206/114; the histogram-window NGC
   profile's h = 0.698 is +1.8σ away), with SGC and the GCcomb combination deferred to the DESI analysis; the section
   intro, Discussion and Conclusions mention it.
+- **Paper restructured around the Abacus result (2026-10-18, local, v2 and v3):** a new Sec. II "Overview" right after
+  the Introduction opens with `figures/overview.pdf` (`scripts/paper/survey.py --overview`: the NGC 25-mock-mean data
+  vector with the best-fit model and (X − model)/σ, next to the posterior triangle with truth and MAP), says what
+  the data are, what the fit is, and that three pieces (model, analytic covariance, computed window) make it
+  possible, then hands over to the rest of the paper; the end-to-end paragraph of the survey section refers back to
+  it (its own figure removed). `abacus_vectors()` caches data/σ/model in outputs/paper/survey_abacus_vectors.npz.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
