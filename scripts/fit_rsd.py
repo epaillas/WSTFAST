@@ -179,6 +179,9 @@ def load_basis(path: Path, vary, prepare=None):
     settings = json.loads(path.with_suffix(".json").read_text())
     if settings.get("stat") != "rsd":
         raise ValueError(f"{path} is not a redshift-space (RSDBasis) emulator")
+    if settings.get("tracer", "matter") == "matter" and settings.get("layout") != "monomial":
+        raise SystemExit(f"{path} holds the retired matter-only basis layout: retrain it (train_emulator.py --stat rsd "
+                         "--tracer matter now trains the monomial basis of the matter limit)")
     emulator = Emulator.read(str(path))
     if prepare is not None:
         settings["prepared"] = prepare(emulator, settings)
@@ -237,11 +240,8 @@ def load_correction(args, config, coefficients, settings):
     """Control-variate correction of the emulated S1m cumulants at the Quijote cosmology (cached next to the emulator)."""
     from cosmoprimo import Cosmology
 
-    from wstfast.theory.rsd import cumulant_correction
-    from wstfast.theory.rsd_bias import biased_cumulant_correction
+    from wstfast.theory.rsd_bias import biased_cumulant_correction as cumulant_correction
 
-    if settings.get("tracer", "matter") == "biased":
-        cumulant_correction = biased_cumulant_correction  # noqa: F811
     cache = args.emulator.with_suffix(f".correction_{args.cumulant_points}.npz")
     if cache.exists():
         stored = np.load(cache, allow_pickle=False)
@@ -288,10 +288,9 @@ def load_layer2(args, projection, coefficients, first_layer, q, kwargs):
     fiducial linear block variances at the template's biases, from the basis evaluated at the Quijote cosmology."""
     from desilike import build
 
-    from wstfast.calculators import S21mTheory, biased_rows, rsd_rows
-    from wstfast.theory.bias import beta_vector, monomials
+    from wstfast.calculators import S21mTheory, biased_rows
+    from wstfast.theory.bias import MATTER_BETA, beta_vector, monomials
     from wstfast.theory.rsd_bias import TREE as TREE_INDEX
-    from wstfast.theory.rsd_moduli import first_layer_fields
 
     template = layer2_template(args)
     rows = {tuple(r["key"]): (r["gauss"], r["tree"]) for r in template["rows"]}
@@ -300,17 +299,15 @@ def load_layer2(args, projection, coefficients, first_layer, q, kwargs):
     c = {int(k): v for k, v in template[f"{which}_c"].items()}
     c_err = {int(k): v for k, v in template.get(f"{which}_c_err", {}).items()} or {ell: 0.1 * abs(v) for ell, v in c.items()}
     b = template["biases"]
-    beta = np.asarray(beta_vector(b["b1"], b["b2"], b["bG2"], b["bGamma3"]))
+    beta = (MATTER_BETA if kwargs.get("tracer") == "matter"
+            else np.asarray(beta_vector(b["b1"], b["b2"], b["bG2"], b["bGamma3"])))
     probe = S21mTheory(projection, coefficients, first_layer, q=q, **kwargs)
     graph = build(probe)
     fiducial = {n: QUIJOTE_COSMOLOGY[n] for n in get_params(probe).select(varied=True, derived=False).names()
                 if n in QUIJOTE_COSMOLOGY}
     graph(fiducial)
-    if kwargs.get("tracer") == "biased":
-        basis_rows = biased_rows(probe.basis)[0]
-        tree = np.tensordot(np.asarray(monomials(beta, 2))[np.array(TREE_INDEX)], np.asarray(basis_rows[:len(TREE_INDEX)]), axes=1)
-    else:
-        tree = np.asarray(rsd_rows(probe.basis)[0][0])
+    basis_rows = biased_rows(probe.basis)[0]
+    tree = np.tensordot(np.asarray(monomials(beta, 2))[np.array(TREE_INDEX)], np.asarray(basis_rows[:len(TREE_INDEX)]), axes=1)
     blocks = np.asarray(probe.matrix) @ tree.ravel()
     offsets = np.cumsum([0] + [f.ell + 1 for f in first_layer])
     lin_ref = {(f.j, f.ell, m1): float(blocks[offsets[i] + m1]) for i, f in enumerate(first_layer) for m1 in range(f.ell + 1)}

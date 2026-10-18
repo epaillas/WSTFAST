@@ -8,6 +8,9 @@
   coefficients: the pure model code, without the emulator. Also to round-off.
 - ``real``: the real-space matter WSTMatterBasis at the Quijote cosmology and its Assembly at fixed nuisances, the
   reference the f = 0 limit is compared with in step 3 (agreement within the measurement errors, not round-off).
+- ``matter_rsd``: the redshift-space MATTER classes (RSDS1Basis cumulants, RSDS21mBasis, the tracer="matter"
+  theories), frozen before step 2 deleted them, on the small configurations of test_bias.py: the matter limit of the
+  biased code (beta = (1, 1, 0, 0, 0), no shot noise) must reproduce them. Not regenerable from this file.
 
 The tests skip when the emulators or measurements (outside git) are missing. Regenerate only on purpose:
 
@@ -136,6 +139,61 @@ def real_outputs() -> dict:
                 s21_terms=np.asarray(s21_terms), prediction=np.asarray(prediction))
 
 
+def matter_rsd_setup() -> dict:
+    """Configurations of the matter-limit fixture (those of test_bias.py)."""
+    from wstfast.config import SUPERSET, Coefficient, select_coefficients
+    from wstfast.theory.rsd import RSDGrid
+
+    s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell <= 1][:3]
+    s21 = [c for c in select_coefficients(SUPERSET, s21_min_scale=35.0, s21_min_ratio=2.0, s21_min_scale2=70.0)
+           if c.kind == "S21" and c.ell == 1][:1]
+    first = [Coefficient("S1", c.ell, c.j) for c in s21]
+    return dict(f=0.75, quad=dict(npts=16, nx=8, nphi=6),
+                s1_cumulants=[c for c in select_coefficients(SUPERSET, s1_min_scale=25.0)
+                              if c.kind == "S1" and c.ell in (0, 2)][:3],
+                s21_terms=[c for c in select_coefficients(SUPERSET, s21_min_scale=25.0, s21_min_ratio=2.8,
+                                                          s21_min_scale2=70.0) if c.kind == "S21"][:1],
+                s1=s1 + [c for c in first if c not in s1], s21=s21, first=first, grid=RSDGrid(kmax=0.2),
+                edges=np.linspace(0.01, 0.15, 8))
+
+
+def matter_rsd_outputs(tracer: str = "biased") -> dict:
+    """The matter limit of the biased code on ``matter_rsd_setup``: cumulants and S21m terms contracted with the matter
+    beta, and the theories at b1 = 1 (other biases and stochastic terms at their zero defaults)."""
+    from desilike import build
+
+    from wstfast.calculators import JointTheory, RSDBasis, RSDPowerTheory, S1mTheory, S21mTheory, build_cosmology
+    from wstfast.config import SUPERSET
+    from wstfast.theory.bias import MATTER_BETA, monomials
+    from wstfast.theory.rsd import MultipoleProjection, S1mProjection
+    from wstfast.theory.rsd_bias import KAPPA_SIZES, S21_SIZES, SKEW_SIZES, BiasedRSDS1Basis, BiasedRSDS21mBasis, split
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_bias import linear_power
+
+    setup = matter_rsd_setup()
+    klin, pklin = linear_power()
+    f = setup["f"]
+    m = lambda d: np.asarray(monomials(MATTER_BETA, d))  # noqa: E731
+    kappa, skewness = BiasedRSDS1Basis(SUPERSET, setup["s1_cumulants"], npoints=2**10, lattice=False,
+                                       damping="linear").cumulants(klin, pklin, f)
+    terms = split(BiasedRSDS21mBasis(SUPERSET, setup["s21_terms"], nk=6, nmu=3, **setup["quad"])(klin, pklin, f),
+                  S21_SIZES)
+    norm2 = (terms[6] @ m(2)) ** 2
+    s1, s21, first, grid, edges = (setup[k] for k in ("s1", "s21", "first", "grid", "edges"))
+    basis = RSDBasis(cosmo=build_cosmology(()), config=SUPERSET, coefficients=s1, kmax=0.2, npoints=2**10,
+                     s21_coefficients=s21, tracer="biased")
+    theory = JointTheory([
+        S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, tracer=tracer),
+        RSDPowerTheory(MultipoleProjection(edges, grid), basis=basis, tracer=tracer),
+        S21mTheory(S1mProjection(SUPERSET, first, grid), s21, first, basis=basis,
+                   cumulant_index=[s1.index(c) for c in first], tracer=tracer)])
+    params = {"b1": 1.0} if tracer == "biased" else {}
+    return dict(kappa=split(kappa, KAPPA_SIZES)[0] @ m(4), skewness2=15 * (split(skewness, SKEW_SIZES)[0] @ m(3)) ** 2,
+                s21m=np.stack([terms[0] @ m(4) / norm2, terms[3] @ m(4) / norm2], axis=1),
+                prediction=np.asarray(build(theory, output=lambda: theory.flattheory)(params)))
+
+
 GENERATORS = {"halo": (halo_predictions, (HALO_DATA, HALO_EMULATOR, LAYER2_TEMPLATE)),
               "basis": (basis_outputs, (HALO_EMULATOR,)),
               "real": (real_outputs, (REAL_DATA,))}
@@ -178,6 +236,20 @@ def test_real_space_matter_outputs():
     assert current["labels"].tolist() == reference["labels"].tolist()
     for key in ("s1_terms", "s21_terms", "prediction"):
         np.testing.assert_allclose(current[key], reference[key], rtol=RTOL, atol=1e-300, err_msg=key)
+
+
+@pytest.mark.slow
+def test_matter_limit_of_biased_code():
+    path = FIXTURES / "regression_matter_rsd.npz"
+    if not path.exists():
+        pytest.skip(f"no fixture {path.name}")
+    with np.load(path) as data:
+        reference = {key: data[key] for key in data.files}
+    current = matter_rsd_outputs()
+    for key, rtol in (("kappa", 1e-10), ("skewness2", 1e-10), ("s21m", 1e-10), ("prediction", 1e-8)):
+        np.testing.assert_allclose(current[key], reference[key], rtol=rtol, atol=1e-30, err_msg=key)
+    # tracer="matter": the same theories with the biases fixed at the matter limit
+    np.testing.assert_allclose(matter_rsd_outputs("matter")["prediction"], reference["prediction"], rtol=1e-8)
 
 
 if __name__ == "__main__":

@@ -139,7 +139,8 @@ def train_rsd(args):
     if missing:
         raise SystemExit(f"--s1-min-scale must include the first-layer coefficients {missing}")
     bounds = {name: tuple(args.bounds.get(name, default_bounds(name, args.fiducial))) for name in args.vary}
-    settings = dict(stat="rsd", config=config.to_dict(), z=meta["redshift"], coefficients=[c.label for c in coefficients],
+    settings = dict(stat="rsd", layout="monomial", config=config.to_dict(), z=meta["redshift"],
+                    coefficients=[c.label for c in coefficients],
                     s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
                     fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,

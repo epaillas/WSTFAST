@@ -232,16 +232,15 @@ class PowerTheory(Calculator):
 
 
 class RSDBasis(Calculator):
-    """Cosmology-dependent redshift-space pieces shared by the P(k) multipoles and the S1m blocks.
+    """Cosmology-dependent redshift-space pieces shared by the P(k) multipoles, the S1m blocks and S21m.
 
-    Outputs ``grid_terms`` (5, nk, nmu): GRID_TERMS of ``wstfast.theory.rsd.RSDGrid``; ``kappa`` (ncoef, L + 1) and
-    ``skewness2`` (ncoef,): the velocity-damped tree cumulants of the S1m blocks of ``coefficients``; ``s21m_terms``
-    (nentry, 2): the S21M_TERMS of every S21m entry of ``s21_coefficients`` (``wstfast.theory.rsd_moduli``); and
-    ``dlogA``.
-    With ``ir``, the grid is BAO IR-resummed (``wstfast.theory.rsd.RSDGrid``).
-    Rows are rescaled by powers of A_s / POWER_AMPLITUDE (Kaiser and counterterms 1, loop 2, kappa 3, skewness^2 4,
-    S21m response 1, noise 0)
-    so that a Taylor emulator is nearly exact in logA (the damping breaks this slightly). NumPy (pure_callback).
+    Every output is resolved into the monomials of the bias vector beta = (1, b1, b2, bG2, bGamma3)
+    (``wstfast.theory.rsd_bias``), so one basis serves any tracer: matter is the limit b1 = 1, b2 = bG2 = bGamma3 = 0
+    and no shot noise, taken by the theories (``tracer="matter"``), not here. Outputs ``grid_terms`` (BIASED_GRID_TERMS
+    of the P_s grid), ``kappa`` and ``skewness2`` (the per-block cumulants of the S1m blocks of ``coefficients``),
+    ``s21m_terms`` (the S21m terms of every entry of ``s21_coefficients``) and ``dlogA``. With ``ir``, the grid is BAO
+    IR-resummed. Rows are rescaled by powers of A_s / POWER_AMPLITUDE (``rsd_bias.biased_scalings``) so that a Taylor
+    emulator is nearly exact in logA. ``tracer`` is recorded only (emulator metadata). NumPy (pure_callback).
     """
 
     _is_external = True
@@ -258,26 +257,21 @@ class RSDBasis(Calculator):
                       s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
                       s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0):
-        from .theory.rsd import RSDGrid, RSDS1Basis
         from .theory.rsd_bias import BiasedRSDGrid, BiasedRSDS1Basis, BiasedRSDS21mBasis
-        from .theory.rsd_moduli import RSDS21mBasis
 
         if tracer not in ("matter", "biased"):
             raise ValueError(f"unknown tracer {tracer!r}")
         self.z, self.tracer = float(z), tracer
-        biased = tracer == "biased"
-        if cubic_biases and not biased:
-            raise ValueError("cubic_biases needs tracer='biased'")
+        if cubic_biases and tracer == "matter":
+            raise ValueError("cubic_biases needs tracer='biased' (the cubic biases of matter vanish)")
         #: The kappa columns also hold the trispectrum of the cubic operators (``rsd_bias.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
         #: Fingers-of-God counterterm columns instead of the velocity damping, in the S1m cumulants and the S21m terms
         #: (``rsd_bias.fog_sizes``; combined at the counterterm c_v by S1mTheory / S21mTheory).
         self.fog = bool(fog)
-        if self.fog and not biased:
-            raise ValueError("fog needs tracer='biased'")
         if self.fog and s21_damping is not None:
             raise ValueError("fog replaces the velocity damping: drop s21_damping")
-        self.grid = (BiasedRSDGrid if biased else RSDGrid)(kmax=kmax, ir=ir)
+        self.grid = BiasedRSDGrid(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         cubic = dict(cubic=True) if self.cubic_biases else {}
         if self.fog:
@@ -287,16 +281,13 @@ class RSDBasis(Calculator):
         #: S1mTheory / S21mTheory (``rsd_bias.ap_evaluate``), like the AP polynomials of the projections.
         self.ap_order = int(ap_order)
         if self.ap_order:
-            if not (biased and self.fog):
-                raise ValueError("ap_order needs tracer='biased' and fog=True")
+            if not self.fog:
+                raise ValueError("ap_order needs fog=True")
             if not s21_projected:
                 raise ValueError("ap_order needs the projected S21m basis")
             cubic["ap"] = self.ap_order
-        self.cumulant_model = ((BiasedRSDS1Basis if biased else RSDS1Basis)(config, self.coefficients, damping=damping,
-                                                                             npoints=npoints, lattice=False, **cubic)
-                               if self.coefficients else None)
-        if s21_damping is not None and not biased:
-            raise ValueError("s21_damping is only implemented for tracer='biased'")
+        self.cumulant_model = (BiasedRSDS1Basis(config, self.coefficients, damping=damping, npoints=npoints,
+                                                lattice=False, **cubic) if self.coefficients else None)
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
         if self.fog:
             s21_kwargs["fog"] = True
@@ -305,15 +296,12 @@ class RSDBasis(Calculator):
         # The lattice of the S21m mode sums (the periodic reference of the measurement) and the mass-assignment window
         # of the first-layer legs of the modulus spectra (0: none, as for the box fits).
         s21_kwargs.update(boxsize=float(s21_lattice[0]), nmesh=int(s21_lattice[1]), cellsize=float(s21_cellsize))
-        self.s21_model = ((BiasedRSDS21mBasis if biased else RSDS21mBasis)(config, list(s21_coefficients), **s21_kwargs)
-                          if len(s21_coefficients) else None)
+        self.s21_model = BiasedRSDS21mBasis(config, list(s21_coefficients), **s21_kwargs) if len(s21_coefficients) else None
         #: With ``s21_projected=False`` the S21m output is unprojected: the modulus-spectrum grids of every first-layer
         #: field and their norms (``s21m_grids``, ``s21m_norms``; ``BiasedRSDS21mBasis.field_grids``), projected to lambda_2 at
         #: assembly by S21mTheory (``s21_projection``, with AP or not); ``s21m_terms`` is then empty, with the column
         #: layout of the projected terms.
         self.s21_projected = bool(s21_projected)
-        if not self.s21_projected and not biased:
-            raise ValueError("the unprojected S21m basis is implemented for tracer='biased'")
         self.klin = np.geomspace(1e-4, 10.0, 1024)
         # cb (cold dark matter + baryons) power: the tracers follow it; equal to delta_m without massive neutrinos.
         self.cosmo.add_requirements({"fourier.pk": [{"of": "delta_cb", "z": self.z, "k": self.klin}],
@@ -326,40 +314,24 @@ class RSDBasis(Calculator):
                   / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
         ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE
         h, r_bao = float(self.cosmo.get("params.h")), float(self.cosmo.get("thermodynamics.rs_drag"))
-        if self.tracer == "biased":
-            from .theory.rsd_bias import biased_scalings
+        from .theory.rsd_bias import AP_TERMS, biased_scalings, s21m_field_powers
 
-            from .theory.rsd_bias import AP_TERMS
-
-            scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
-            self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
-            if self.cumulant_model is not None:
-                kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
-                self.kappa, self.skewness2 = kappa / scale["kappa"], skewness / scale["skewness"]
-            else:
-                self.kappa, self.skewness2 = np.zeros((0, 1, scale["kappa"].size)), np.zeros((0, scale["skewness"].size))
-            if self.s21_projected:
-                self.s21m_terms = (self.s21_model(self.klin, pk, f) / scale["s21m"] if self.s21_model is not None
-                                   else np.zeros((0, scale["s21m"].size)))
-            else:
-                from .theory.rsd_bias import s21m_field_powers
-
-                grids, norms = self.s21_model.field_grids(self.klin, pk, f)
-                plam, pnorm = s21m_field_powers(self.fog)
-                self.s21m_grids = grids / (ratio**plam)[None, :, None]
-                self.s21m_norms = norms / ratio**pnorm
-                self.s21m_terms = np.zeros((0, scale["s21m"].size))
-            self.dlogA = np.log(ratio)
-            return self
-        self.grid_terms = (self.grid(self.klin, pk, f, h=h, r_bao=r_bao)
-                           / np.array([ratio, ratio**2, ratio, ratio, ratio])[:, None, None])
+        scale = biased_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
+        self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
         if self.cumulant_model is not None:
-            kappa, skewness2 = self.cumulant_model.cumulants(self.klin, pk, f)
+            kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
+            self.kappa, self.skewness2 = kappa / scale["kappa"], skewness / scale["skewness"]
         else:
-            kappa, skewness2 = np.zeros((0, 1)), np.zeros(0)
-        self.kappa, self.skewness2 = kappa / ratio**3, skewness2 / ratio**4
-        s21m = self.s21_model(self.klin, pk, f) if self.s21_model is not None else np.zeros((0, 2))
-        self.s21m_terms = s21m / np.array([ratio, 1.0])
+            self.kappa, self.skewness2 = np.zeros((0, 1, scale["kappa"].size)), np.zeros((0, scale["skewness"].size))
+        if self.s21_projected:
+            self.s21m_terms = (self.s21_model(self.klin, pk, f) / scale["s21m"] if self.s21_model is not None
+                               else np.zeros((0, scale["s21m"].size)))
+        else:
+            grids, norms = self.s21_model.field_grids(self.klin, pk, f)
+            plam, pnorm = s21m_field_powers(self.fog)
+            self.s21m_grids = grids / (ratio**plam)[None, :, None]
+            self.s21m_norms = norms / ratio**pnorm
+            self.s21m_terms = np.zeros((0, scale["s21m"].size))
         self.dlogA = np.log(ratio)
         return self
 
@@ -372,24 +344,10 @@ class RSDBasis(Calculator):
     @classmethod
     def tree_unflatten(cls, aux, children):
         obj = object.__new__(cls)
-        if len(children) == 4:  # emulators trained before the S21m terms existed
-            children = [*children[:3], jnp.zeros((0, 2)), children[3]]
         obj.grid_terms, obj.kappa, obj.skewness2, obj.s21m_terms, obj.dlogA = children[:5]
         if len(children) == 7:  # unprojected S21m (field grids and norms)
             obj.s21m_grids, obj.s21m_norms = children[5:]
         return obj
-
-
-def rsd_rows(basis):
-    """Grid rows, kappa and skewness^2 at the basis's amplitude, from a (possibly emulated) RSDBasis output."""
-    a = jnp.exp(basis.dlogA)
-    scale = jnp.stack([a, a**2, a, a, a])[:, None, None]
-    return basis.grid_terms * scale, basis.kappa * a**3, basis.skewness2 * a**4
-
-
-def s21m_rows(basis):
-    """S21m terms (nentry, 2) at the basis's amplitude, from a (possibly emulated) RSDBasis output."""
-    return basis.s21m_terms * jnp.stack([jnp.exp(basis.dlogA), 1.0])
 
 
 def biased_s21m_fields(basis):
@@ -473,6 +431,8 @@ def ap_cumulants(basis, kappa, skewness, ap, ap_params):
 class BiasParameters:
     """Eulerian bias (b1, b2, bG2, bGamma3) and stochastic (alpha0, alpha2) parameters of a tracer.
 
+    ``tracer="matter"`` fixes them at the matter limit, b1 = 1 and the others 0 (Poisson shot noise of the particles).
+
     Every theory of a joint fit makes its own instance; desilike shares the parameters by name. The shot noise
     is (1 + alpha0) V / N + alpha2 k^2 mu^2 V / N. Theories hold ``params`` as the attribute ``bias_params`` and
     must read the values from that attribute (desilike substitutes its own Parameter instances there):
@@ -501,9 +461,16 @@ class BiasParameters:
     #: (1 = Poisson; halos are not Poisson), with Gaussian priors N(1, 1) as the shot amplitudes of Tucci & Philcox (2026).
     KAPPA_SHOT = ("A_TN", "A_TN2")
 
-    def __init__(self, cubic: str | None = None, kappa_shot: bool = False):
+    #: Values of the matter limit (``tracer="matter"``).
+    MATTER = {"b1": 1.0, "b2": 0.0, "bG2": 0.0, "bGamma3": 0.0, "alpha0": 0.0, "alpha2": 0.0}
+
+    def __init__(self, cubic: str | None = None, kappa_shot: bool = False, tracer: str = "biased"):
         from .theory.bias import CUBIC_NAMES
 
+        if tracer not in ("matter", "biased"):
+            raise ValueError(f"unknown tracer {tracer!r}")
+        if tracer == "matter" and (cubic is not None or kappa_shot):
+            raise ValueError("the matter limit has no cubic biases or non-Poisson trispectrum")
         self.params = {}
         if kappa_shot:
             for name, latex in zip(self.KAPPA_SHOT, (r"A_{T,N}", r"A_{T,N^2}")):
@@ -514,6 +481,8 @@ class BiasParameters:
             prior = dict(limits=limits) if sigma is None else dict(dist="norm", loc=0.0, scale=sigma, limits=limits)
             self.params[name] = Parameter(name, value=value, prior=prior, ref=dict(dist="norm", loc=value, scale=scale),
                                           latex=latex)
+            if tracer == "matter":
+                self.params[name].update(value=self.MATTER[name], fixed=True)
         if cubic not in (None, "zero", "relation"):
             raise ValueError(f"unknown cubic biases {cubic!r}")
         if cubic is not None:
@@ -668,11 +637,11 @@ class APGeometry:
 
 
 class RSDPowerTheory(Calculator):
-    """Redshift-space matter P(k) multipoles, lattice-averaged: projection.matrix @ P_s grid + V/N projection.shot.
+    """Redshift-space P(k) multipoles of a tracer, lattice-averaged: projection.matrix @ P_s grid + V/N projection.shot.
 
     Counterterms ``c0_pk``, ``c2_pk``, ``c4_pk`` [(Mpc/h)^2]: P_s -= 2 (c0 + c2 mu^2 + c4 mu^4) k^2 P_L.
     With ``ap`` (see ``APGeometry``), ``projection`` is an ``APProjection`` and the AP distortions are applied.
-    With ``tracer="biased"`` (a biased-tracer basis), P_s is that of the tracer, with ``BiasParameters``.
+    Biases and stochastic terms: ``BiasParameters`` (fixed at the matter limit with ``tracer="matter"``).
     """
 
     def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
@@ -685,7 +654,7 @@ class RSDPowerTheory(Calculator):
         self.counterterms = _rsd_counterterms("", "") if shared_counterterms else _rsd_counterterms("_pk", r"^{P}")
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
-        self.bias_params = BiasParameters().params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(tracer=tracer).params
 
     def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
                       shared_counterterms: bool = False, k4_counterterm: bool = False, k2_stochastic: bool = False):
@@ -698,16 +667,11 @@ class RSDPowerTheory(Calculator):
 
     def __call__(self):
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-        noise = self.shotnoise
-        if not self.bias_params:
-            rows, _, _ = rsd_rows(self.basis)
-            grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
-        else:
-            rows = biased_rows(self.basis)[0]
-            ck4 = self.k4_params["ck4"].value if self.k4_params else None
-            grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
-                                  self.bias_params["alpha2"].value, ck4, self.k2, _value(self.k2_params, "alpha_k2"))
-            noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
+        rows = biased_rows(self.basis)[0]
+        ck4 = self.k4_params["ck4"].value if self.k4_params else None
+        grid, _ = biased_grid(rows, bias_beta(self.bias_params), c, self.k2mu2, self.shotnoise,
+                              self.bias_params["alpha2"].value, ck4, self.k2, _value(self.k2_params, "alpha_k2"))
+        noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
         if self.ap is None:
             self.flattheory = self.matrix @ grid.ravel() + noise * self.shot
         else:
@@ -759,7 +723,7 @@ class S1mTheory(Calculator):
         self.basis = basis
         self.fog_params = {k: v for k, v in _fog_counterterms(fog).items() if k == "s1"}
         self.k2_params = _k2_stochastic(k2_stochastic)
-        self.bias_params = BiasParameters(cubic_biases, kappa_shot).params if tracer == "biased" else {}
+        self.bias_params = BiasParameters(cubic_biases, kappa_shot, tracer).params
         self.counterterms = _rsd_counterterms("", "")
         self.k4_params = _k4_counterterm(k4_counterterm, "", "")
         self.ap = ap
@@ -803,29 +767,21 @@ class S1mTheory(Calculator):
 
         amplitude = self.ng_amplitude()
         c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-        if not self.bias_params:
-            rows, kappa, skewness2 = rsd_rows(self.basis)
-            kappa = kappa[self.cumulant_index] * self.kappa_ratio
-            skewness2 = skewness2[self.cumulant_index] * self.skewness_ratio
-            grid = rows[0] + rows[1] - 2 * (c[0] * rows[2] + c[1] * rows[3] + c[2] * rows[4])
-            linear_grid, noise, linear_noise = rows[0], 1.0, 0.0
-        else:  # the Gaussian part of the Edgeworth normalisation includes the shot noise
-            rows, kappa, skewness, _ = biased_rows(self.basis)
-            beta = bias_beta(self.bias_params)
-            kappa, skewness = kappa[self.cumulant_index] * self.kappa_ratio, skewness[self.cumulant_index] * self.skewness_ratio
-            kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
-            if _fog_check(self.basis, self.fog_params):
-                from .theory.rsd_bias import collapse_fog
+        # the Gaussian part of the Edgeworth normalisation includes the shot noise
+        rows, kappa, skewness, _ = biased_rows(self.basis)
+        beta = bias_beta(self.bias_params)
+        kappa, skewness = kappa[self.cumulant_index] * self.kappa_ratio, skewness[self.cumulant_index] * self.skewness_ratio
+        kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
+        if _fog_check(self.basis, self.fog_params):
+            from .theory.rsd_bias import collapse_fog
 
-                kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
-            kappa, skewness2 = biased_cumulants(kappa, skewness, beta,
-                                                self.shotnoise, cubic_values(self.bias_params),
-                                                kappa_shot_values(self.bias_params))
-            ck4 = self.k4_params["ck4"].value if self.k4_params else None
-            grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise,
-                                            self.bias_params["alpha2"].value, ck4, self.k2,
-                                            _value(self.k2_params, "alpha_k2"))
-            noise = linear_noise = 1 + self.bias_params["alpha0"].value
+            kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
+        kappa, skewness2 = biased_cumulants(kappa, skewness, beta, self.shotnoise, cubic_values(self.bias_params),
+                                            kappa_shot_values(self.bias_params))
+        ck4 = self.k4_params["ck4"].value if self.k4_params else None
+        grid, linear_grid = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
+                                        ck4, self.k2, _value(self.k2_params, "alpha_k2"))
+        noise = linear_noise = 1 + self.bias_params["alpha0"].value
         block_scale = None
         if self.ng_mode == "fog":  # 1 - c_T 4 <k^2 mu^2>_block / k_NL^2, from the block projection of the linear grid
             weight = self.matrix @ (linear_grid * self.k2mu2).ravel() / (self.matrix @ linear_grid.ravel())
@@ -934,20 +890,20 @@ class S21mTheory(Calculator):
                                                         ref=dict(dist="norm", loc=0.0, scale=0.02), latex=rf"a_{{R,{j}}}")
                                  for j in sorted({c.j for c in coefficients})} if response_amplitude else {})
         # With full_norm, the S1m counterterms (shared by name) enter the first-layer variance.
-        self.counterterms = _rsd_counterterms("", "") if full_norm and tracer == "biased" else {}
-        self.bias_params = BiasParameters(cubic_biases, kappa_shot).params if tracer == "biased" else {}
+        self.counterterms = _rsd_counterterms("", "") if full_norm else {}
+        self.bias_params = BiasParameters(cubic_biases, kappa_shot, tracer).params
         # Free amplitude of the Poisson ("same-object") bispectrum term of the response, B > (1 + B_shot) P(K) / nbar:
         # halos are not Poisson, and this stochastic term is independent of the power-spectrum one (alpha0).
         self.bshot_params = ({"B_shot": Parameter("B_shot", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
                                                                                   limits=[-5.0, 5.0]),
                                                   ref=dict(dist="norm", loc=0.0, scale=0.1), latex=r"B_{\rm shot}")}
-                             if bispectrum_shot and tracer == "biased" else {})
+                             if bispectrum_shot else {})
         # Free amplitude of the discreteness terms of the modulus noise, g > (1 + alpha_N) N [2 P + (1 + alpha_N) N]:
         # the 4-point stochasticity of halos need not be Poisson either.
         self.nshot_params = ({"alpha_N": Parameter("alpha_N", value=0.0, prior=dict(dist="norm", loc=0.0, scale=1.0,
                                                                                    limits=[-1.0, 5.0]),
                                                    ref=dict(dist="norm", loc=0.0, scale=0.05), latex=r"\alpha_N")}
-                             if noise_shot and tracer == "biased" else {})
+                             if noise_shot else {})
         self.noise = {key: Parameter(f"noise_j{key[0]}_l{key[1]}_m{key[2]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
                                      ref=dict(dist="norm", loc=0.0, scale=0.05),
                                      latex=rf"a_{{N,{key[0]},{key[1]},{key[2]}}}")
@@ -975,8 +931,8 @@ class S21mTheory(Calculator):
         # block, W the S1m window factor of that block at its box (tree + noise) variances.
         self.window = None
         if window is not None:
-            if config is None or tracer != "biased":
-                raise ValueError("window needs the WST config and tracer='biased'")
+            if config is None:
+                raise ValueError("window needs the WST config")
             keys1 = [(window.key(config.sigma(c.j)), c.ell, m) for c in first_layer for m in range(c.ell + 1)]
             weight, transfer, noise_map, delta = window.s1m_arrays(keys1)
             k21 = [window.s21m[(window.key(config.sigma(coefficients[i].j)), window.key(config.sigma(coefficients[i].j2)),
@@ -997,8 +953,6 @@ class S21mTheory(Calculator):
         self.first_ap = first_ap
         self.s21_contracted = False
         if s21_projection is not None:
-            if tracer != "biased":
-                raise ValueError("s21_projection needs tracer='biased'")
             if noise_correction is not None or entry_index is not None:
                 raise ValueError("s21_projection selects its own entries: no entry_index / noise_correction")
             self.s21_contracted = getattr(s21_projection, "contracted", False)
@@ -1070,51 +1024,44 @@ class S21mTheory(Calculator):
         self.cumulant_index = np.arange(len(first_layer)) if cumulant_index is None else np.asarray(cumulant_index)
 
     def __call__(self):
+        from .theory.bias import monomials
         from .theory.rsd import block_edgeworth
+        from .theory.rsd_bias import S21_SIZES, split
         from .theory.rsd_moduli import s21m_from_terms
 
-        if not self.bias_params:
-            rows, kappa, skewness2 = rsd_rows(self.basis)
-            linear = self.matrix @ rows[0].ravel()
-            kappa, skewness2 = kappa[self.cumulant_index], skewness2[self.cumulant_index]
-            terms = s21m_rows(self.basis)[self.entry_index]
+        rows, kappa, skewness, s21 = biased_rows(self.basis)
+        if self.s21_projection is not None:
+            s21 = self._project_s21()
+        kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
+        s21 = self._ap_s21(s21)
+        if _fog_check(self.basis, self.fog_params):
+            from .theory.rsd_bias import collapse_fog
+
+            kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
+            s21 = collapse_fog(s21m=s21, c_s21=_fog_value(self.fog_params, "s21"))[2]
+        beta = bias_beta(self.bias_params)
+        noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
+        m2, m4 = monomials(beta, 2), monomials(beta, 4)
+        tree = jnp.tensordot(m2[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
+        if self.first_ap is not None and self.ap is not None:  # observed-frame first-layer blocks
+            linear = self.first_ap(tree[None], *self.ap.ratios(self.ap_params), noise)[0]
         else:
-            from .theory.bias import monomials
-            from .theory.rsd_bias import S21_SIZES, split
-
-            rows, kappa, skewness, s21 = biased_rows(self.basis)
-            if self.s21_projection is not None:
-                s21 = self._project_s21()
-            kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
-            s21 = self._ap_s21(s21)
-            if _fog_check(self.basis, self.fog_params):
-                from .theory.rsd_bias import collapse_fog
-
-                kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=self.fog_params["s1"].value)
-                s21 = collapse_fog(s21m=s21, c_s21=_fog_value(self.fog_params, "s21"))[2]
-            beta = bias_beta(self.bias_params)
-            noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
-            m2, m4 = monomials(beta, 2), monomials(beta, 4)
-            tree = jnp.tensordot(m2[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
-            if self.first_ap is not None and self.ap is not None:  # observed-frame first-layer blocks
-                linear = self.first_ap(tree[None], *self.ap.ratios(self.ap_params), noise)[0]
-            else:
-                linear = self.matrix @ tree.ravel() + noise * self.shot
-            kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
-                                                self.shotnoise, cubic_values(self.bias_params),
-                                                kappa_shot_values(self.bias_params))
-            r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
-            norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
-            if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block
-                c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
-                grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
-                                      k2=self.k2, alpha_k2=_value(self.k2_params, "alpha_k2"))
-                full = self.matrix @ grid.ravel() + noise * self.shot
-                norm2 = norm2 * (full / linear)[self.block_index] ** 2
-            nr = noise * (1 + self.bshot_params["B_shot"].value) if self.bshot_params else noise
-            ng = noise * (1 + self.nshot_params["alpha_N"].value) if self.nshot_params else noise
-            terms = jnp.stack([(r0 + nr * r1 + nr**2 * r2) @ m4 / norm2,
-                               (g0 @ m4 + ng * g1 @ m2 + ng**2 * g2[:, 0]) / norm2], axis=1)
+            linear = self.matrix @ tree.ravel() + noise * self.shot
+        kappa, skewness2 = biased_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
+                                            self.shotnoise, cubic_values(self.bias_params),
+                                            kappa_shot_values(self.bias_params))
+        r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
+        norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
+        if self.counterterms:  # full_norm: tree -> one-loop + counterterms first-layer variance, block by block
+            c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
+            grid, _ = biased_grid(rows, beta, c, self.k2mu2, self.shotnoise, self.bias_params["alpha2"].value,
+                                  k2=self.k2, alpha_k2=_value(self.k2_params, "alpha_k2"))
+            full = self.matrix @ grid.ravel() + noise * self.shot
+            norm2 = norm2 * (full / linear)[self.block_index] ** 2
+        nr = noise * (1 + self.bshot_params["B_shot"].value) if self.bshot_params else noise
+        ng = noise * (1 + self.nshot_params["alpha_N"].value) if self.nshot_params else noise
+        terms = jnp.stack([(r0 + nr * r1 + nr**2 * r2) @ m4 / norm2,
+                           (g0 @ m4 + ng * g1 @ m2 + ng**2 * g2[:, 0]) / norm2], axis=1)
         e_q, e_1, start = [], [], 0
         for index, ell in enumerate(self.first_ells):
             lin = linear[start:start + ell + 1]
@@ -1150,13 +1097,8 @@ class S21mTheory(Calculator):
             # Non-Gaussian second layer: S21m x (1 + d0 + R_l d2 s), with the Gaussian-field and tree-level terms of the
             # perturbation-theory template (scripts/layer2/template_rsd.py), s the ratio of the linear first-layer block
             # variance (fixed reference biases) to its fiducial value, and R_l = 1 / (1 + c_l n s_lin^2 s).
-            if self.bias_params:
-                from .theory.bias import monomials
-
-                reference = jnp.tensordot(monomials(self.ng2_beta, 2)[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
-                block = (self.matrix @ reference.ravel())[self.block_index]
-            else:
-                block = linear[self.block_index]
+            reference = jnp.tensordot(monomials(self.ng2_beta, 2)[np.array(TREE_INDEX)], rows[:len(TREE_INDEX)], axes=1)
+            block = (self.matrix @ reference.ravel())[self.block_index]
             scale = block / self.ng2_lin_ref
             c = (jnp.stack([self.ng2_params[ell].value for ell in self.ng2_ell]) if self.ng2_params else self.ng2_c)
             renorm = 1.0 / (1.0 + c * self.ng2_var * scale)
