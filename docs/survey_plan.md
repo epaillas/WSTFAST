@@ -733,6 +733,10 @@ variance level.**
   0.3σ, logA 1σ closer to the truth. NGC NUTS chain (exact window, recalibrated δ): 0.1189 ± 0.0038, 3.029 ± 0.061,
   0.679 ± 0.014 (pulls −0.3, −0.1, +0.4σ), Gelman–Rubin 1.00. The joint chain was stopped at 600 steps per chain
   (R = 1.01, checkpoints kept) in favour of the GCcomb chain (`abacus_N25_exactpca_exp_hrecal_GCcomb_nuts`).
+  **GCcomb chain (converged 06:14, 3 h):** ω_cdm 0.1240 ± 0.0032 (+1.2σ), logA 3.033 ± 0.049 (−0.1σ),
+  h 0.684 ± 0.012 (+0.9σ), b₁ 1.856 ± 0.055, α₀ 0.52 ± 0.22, c_v 0.79 ± 0.18; χ² 233 / 83 at the best fit. This
+  is the baseline result of the exact window on the 25-mock mean: h recovered (the histogram window's +3.8σ is
+  gone); ω_cdm +1.2σ from SGC. Triangle: `abacus_N25_exactpca_exp_hrecal_GCcomb_triangle.png`.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
