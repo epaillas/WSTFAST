@@ -1749,7 +1749,7 @@ def window_correction(survey: np.ndarray, model: np.ndarray, box: np.ndarray | N
 
 
 def covariance_of(correction: dict, data: np.ndarray, labels) -> dict:
-    """The calibration covariance of ``window_correction`` in data units, for ``fit_rsd.py --extra-covariance``:
+    """The calibration covariance of ``window_correction`` in data units, for ``fit.py --extra-covariance``:
     dict(labels, covariance) with covariance = diag(data) ratio_covariance diag(data)."""
     data = np.asarray(data, dtype=float)
     return dict(labels=np.asarray(labels), covariance=correction["ratio_covariance"] * np.outer(data, data))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Analytic covariance of the redshift-space data vector [S1m blocks, P_0, P_2, P_4] (the halo baseline of fit_rsd.py).
+"""Analytic covariance of the redshift-space data vector [S1m blocks, P_0, P_2, P_4] (the halo baseline of fit.py).
 
 The 2nd chaos of the line-of-sight-resolved S1m blocks and the Gaussian covariance of the multipoles, with their cross
 covariance, are sums over the 3D lattice with the anisotropic field power P_s(k, mu)
@@ -10,7 +10,7 @@ The field power P_s(k, mu) (window and shot noise included) comes from
 
 * ``--inputs measured``: sum_l P_l(k) L_l(mu) of the ensemble-mean stored multipoles (l = 0, 2, 4), extrapolated as
   a power law beyond the last bin;
-* ``--inputs model``: the redshift-space model of fit_rsd.py (``--emulator``) at the Quijote cosmology and the
+* ``--inputs model``: the redshift-space model of fit.py (``--emulator``) at the Quijote cosmology and the
   nuisance values of ``--fiducial`` fit summaries: W^2 P_grid(k, mu) + (1 + alpha0) (V / N) S(k), with the tree, loop,
   P_l counterterms and alpha2 k^2 mu^2 of the grid, and the isotropic leading forms W^2 = S = exp(-(k H)^2 / 6) of the
   CIC window and aliased shot noise (H the cell size; < 1e-3 off for k < 0.25 h/Mpc).
@@ -69,7 +69,7 @@ def measured_field_power(files):
 
 
 def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=None, cosmology=None):
-    """P_field(k, mu) of the fit_rsd.py model: the P_s grid of RSDPowerTheory (identity projection) at the fiducial."""
+    """P_field(k, mu) of the fit.py model: the P_s grid of PowerTheory (identity projection) at the fiducial."""
     import json
     import sys
 
@@ -79,9 +79,9 @@ def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=No
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import wstfast.theory  # noqa: F401  (enables JAX double precision)
-    from fit_rsd import load_basis
-    from wstfast.calculators import RSDPowerTheory
+    from wstfast.calculators import NuisanceParameters, PowerTheory
     from wstfast.config import QUIJOTE_COSMOLOGY
+    from wstfast.inference import load_basis
     from wstfast.theory.spectrum import SpectrumGrid
 
     basis, settings = load_basis(emulator, ("omega_cdm", "logA", "n_s", "h"))
@@ -98,7 +98,8 @@ def model_field_power(data_dir, emulator, fiducial_files, cellsize, shotnoise=No
         first = sorted((data_dir / "rsd").glob("wst_r*.npz"))[0]
         meta = json.loads(str(np.load(first)["metadata"]))
         shotnoise = meta["boxsize"] ** 3 / meta["nparticles"]
-    theory = RSDPowerTheory(Identity(), basis=basis, shotnoise=shotnoise, tracer=ModelSpec.from_settings(settings).tracer)
+    theory = PowerTheory(Identity(), basis=basis, nuisance=NuisanceParameters(ModelSpec.from_settings(settings)),
+                         shotnoise=shotnoise)
     names = get_params(theory).select(varied=True, derived=False).names()
     cosmology = QUIJOTE_COSMOLOGY if cosmology is None else cosmology
     values = {name: cosmology[name] for name in ("omega_cdm", "logA", "n_s", "h") if name in names}

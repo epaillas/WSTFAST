@@ -183,23 +183,24 @@ def test_ap_polynomial_bases_reduce_at_q1():
 
 
 def test_real_space_theories_fix_the_anisotropic_terms():
-    """space="real": c2, c4 and alpha2 fixed at 0, with tracer="matter" the biases too; AP is refused."""
+    """ModelSpec(space="real"): c2, c4 and alpha2 fixed at 0, with tracer="matter" the biases too; AP is refused."""
     from desilike import get_params
 
-    from wstfast.calculators import APGeometry, RSDBasis, RSDPowerTheory, S1mTheory, build_cosmology
+    from wstfast.calculators import APGeometry, Basis, NuisanceParameters, PowerTheory, S1mTheory, build_cosmology
+    from wstfast.config import ModelSpec
     from wstfast.theory.spectrum import MultipoleProjection, S1mProjection, SpectrumGrid
 
     s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell <= 1][:2]
     grid = SpectrumGrid(kmax=0.2)
-    basis = RSDBasis(cosmo=build_cosmology(("omega_cdm", "h")), config=SUPERSET, coefficients=s1, kmax=0.2,
-                     npoints=2**10, tracer="matter", space="real")
-    theory = S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, tracer="matter", space="real")
+    basis = Basis(cosmo=build_cosmology(("omega_cdm", "h")), config=SUPERSET, coefficients=s1, kmax=0.2,
+                  npoints=2**10, tracer="matter", space="real")
+    matter = NuisanceParameters(ModelSpec.matter(space="real"))
+    theory = S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, nuisance=matter)
     varied = get_params(theory).select(varied=True, derived=False).names()
     assert "c0" in varied and not {"c2", "c4", "alpha2", "b1", "b2"} & set(varied)
-    power = RSDPowerTheory(MultipoleProjection(np.linspace(0.01, 0.15, 8), grid, ells=(0,)), basis=basis,
-                           tracer="biased", space="real")
+    power = PowerTheory(MultipoleProjection(np.linspace(0.01, 0.15, 8), grid, ells=(0,)), basis=basis,
+                        nuisance=NuisanceParameters(ModelSpec(space="real")))
     varied = get_params(power).select(varied=True, derived=False).names()
     assert {"c0_pk", "b1", "alpha0"} <= set(varied) and not {"c2_pk", "c4_pk", "alpha2"} & set(varied)
     with pytest.raises(ValueError):
-        S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, tracer="matter", space="real",
-                  ap=APGeometry(basis, 0.5))
+        S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, nuisance=matter, ap=APGeometry(basis, 0.5))

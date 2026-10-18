@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Fisher forecast of the redshift-space statistics (P_l, S1m, S21m) of fit_rsd.py: where does the information go?
+"""Fisher forecast of the redshift-space statistics (P_l, S1m, S21m) of fit.py: where does the information go?
 
-The model and the data vectors are those of ``fit_rsd.py`` (``build_problem``), on the widest selection the emulator
+The model and the data vectors are those of ``fit.py`` (``inference.build_problem``), on the widest selection the emulator
 supports. The derivatives of the joint model are taken once, by central finite differences at a fiducial point (the
 Quijote cosmology and nuisance values from earlier fits, ``--fiducial``), and the covariance is the sample covariance
 of the realizations (Hartlap-corrected per subset) for a survey volume ``--volume``. Each case is then a subset of
 rows (data) and a treatment of the columns (nuisance parameters):
 
 - ``fixed``: nuisances at their fiducial values (the information available in principle);
-- ``marg``: nuisances marginalised, with the Gaussian priors of ``BiasParameters`` (flat priors enter as a Gaussian
+- ``marg``: nuisances marginalised, with the Gaussian priors of ``NuisanceParameters`` (flat priors enter as a Gaussian
   of the same variance, so that unconstrained directions stay finite);
 - ``shared``: as ``marg``, but with one set of counterterms for P_l and S1m (c0 = c0_pk, ...).
 
@@ -36,8 +36,10 @@ import numpy as np
 
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, get_params
+from wstfast import inference
 from wstfast.calculators import JointTheory
 from wstfast.config import QUIJOTE_COSMOLOGY
+from wstfast.data import load_measurement
 
 COSMOLOGY = ("omega_cdm", "logA", "n_s", "h")
 STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "b1": 0.02, "b2": 0.05, "bG2": 0.05,
@@ -45,8 +47,8 @@ STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "b1": 0.02,
 DEFAULT_STEP = {"c": 1.0, "noise": 0.01}
 
 
-def load_fit_rsd():
-    spec = importlib.util.spec_from_file_location("fit_rsd", Path(__file__).with_name("fit_rsd.py"))
+def load_fit():
+    spec = importlib.util.spec_from_file_location("fit", Path(__file__).with_name("fit.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -66,7 +68,7 @@ def parse_args():
                                  Path("outputs/inference/rsd/halos_bias_only_V60_pk/summary.json")],
                         help="fit summaries whose best fits set the nuisance values (later files take precedence)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/rsd.json"))
-    parser.add_argument("--fit-args", default="", help="window mode: further fit_rsd.py arguments (the fit to size)")
+    parser.add_argument("--fit-args", default="", help="window mode: further fit.py arguments (the fit to size)")
     parser.add_argument("--window-ratios", type=Path, nargs="*", default=None,
                         help="window mode: npz per cap (s1m (nmock, J+1, L+1, L+1), s21m (nmock, nentry), s21m_keys, "
                              "sigma, veff) of measured / window-model ratios of fiducial survey mocks")
@@ -94,12 +96,12 @@ def window_calibration(args, fr):
     """Rms shift of the marginalised parameters from the calibration error of delta_b, per number of mocks."""
     import shlex
 
-    fit = fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused"]
-                        + shlex.split(args.fit_args))
-    problem = fr.build_problem(fit)
+    fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused"]
+                        + shlex.split(args.fit_args)))
+    problem = inference.build_problem(fit)
     theory = problem["theories"][0] if len(problem["theories"]) == 1 else JointTheory(problem["theories"])
     labels, vectors, meta = problem["labels"], problem["vectors"], problem["meta"]
-    config = fr.load_measurement(sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0], q=0.8)["config"]
+    config = load_measurement(sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0], q=0.8)["config"]
     params = get_params(theory).select(varied=True, derived=False)
     names = params.names()
     fiducial = {name: float(params[name].value) for name in names}
@@ -115,9 +117,9 @@ def window_calibration(args, fr):
     box = np.cov(vectors, rowvar=False, ddof=1) * (meta["boxsize"] / 1000.0) ** 3  # one box of 1 (Gpc/h)^3
     common = np.zeros_like(box)  # volume-independent theory error, the same in every cap
     if getattr(fit, "s21_layer2", None) is not None:
-        common += np.diag(fr.layer2_variance(fit, labels, vectors.mean(axis=0)))
+        common += np.diag(inference.layer2_variance(fit, labels, vectors.mean(axis=0)))
         if fit.s21_layer2_marg is not None:
-            templates = list(fr.layer2_templates(fit, labels, vectors.mean(axis=0)))
+            templates = list(inference.layer2_templates(fit, labels, vectors.mean(axis=0)))
         else:
             templates = []
     else:
@@ -191,21 +193,21 @@ def window_calibration(args, fr):
 
 def main():
     args = parse_args()
-    fr = load_fit_rsd()
+    fr = load_fit()
     if args.window_ratios:
         return window_calibration(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
-    # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit_rsd's default cuts.
-    main_args = fr.parse_args(common + ["--stats", "pk", "s1m", "s21m", "--kmax", str(max(args.kmax)),
-                                        "--s1-min-scale", str(min(args.s1_min_scale)), "--q", "0.8"])
-    problem = fr.build_problem(main_args)
+    # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit.py's default cuts.
+    main_args = fr.fit_options(fr.parse_args(common + ["--stats", "pk", "s1m", "s21m", "--kmax", str(max(args.kmax)),
+                                        "--s1-min-scale", str(min(args.s1_min_scale)), "--q", "0.8"]))
+    problem = inference.build_problem(main_args)
     theories, vectors, labels = list(problem["theories"]), [problem["vectors"]], list(problem["labels"])
     for q in args.qs:
         if q == 0.8:
             continue
-        extra = fr.build_problem(fr.parse_args(common + ["--stats", "s1m", "--q", str(q),
-                                                         "--s1-min-scale", str(min(args.s1_min_scale))]),
+        extra = inference.build_problem(fr.fit_options(fr.parse_args(common + ["--stats", "s1m", "--q", str(q),
+                                                         "--s1-min-scale", str(min(args.s1_min_scale))])),
                                  basis=problem["basis"], settings=problem["settings"])
         theories += extra["theories"]
         vectors.append(extra["vectors"])
@@ -213,7 +215,7 @@ def main():
     vectors = np.concatenate(vectors, axis=1)
     theory = JointTheory(theories)
     first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
-    config = fr.load_measurement(first, q=0.8)["config"]
+    config = load_measurement(first, q=0.8)["config"]
 
     # Fiducial point and Jacobian.
     params = get_params(theory).select(varied=True, derived=False)

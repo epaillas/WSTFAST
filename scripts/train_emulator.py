@@ -36,7 +36,7 @@ import wstfast
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, setup_logging
 from desilike.emulators import Emulator, Space
-from wstfast.calculators import (JointTheory, PowerBasis, PowerTheory, RSDBasis, RSDPowerTheory, S1mTheory,
+from wstfast.calculators import (Basis, JointTheory, LegacyPowerTheory, NuisanceParameters, PowerBasis, PowerTheory, S1mTheory,
                                  S21mTheory, WSTBasis, build_cosmology)
 from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, select_coefficients
 from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset
@@ -96,7 +96,7 @@ def train_power(args):
     print(f"wrote {args.output}")
 
     binning = LatticeBinning(dataset.edges, meta["boxsize"], meta["nmesh"], knodes)
-    theories = {name: build(PowerTheory(binning, basis=b, shotnoise=dataset.shotnoise, order=args.pk_order,
+    theories = {name: build(LegacyPowerTheory(binning, basis=b, shotnoise=dataset.shotnoise, order=args.pk_order,
                                         counterterm=False))
                 for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}
     rng = np.random.default_rng(0)
@@ -116,7 +116,7 @@ def train_power(args):
 
 
 def train_rsd(args):
-    """Emulate RSDBasis (redshift-space P_s grid + S1m cumulants of every S1 coefficient with sigma >= --s1-min-scale +
+    """Emulate Basis (redshift-space P_s grid + S1m cumulants of every S1 coefficient with sigma >= --s1-min-scale +
     S21m terms of the S21 coefficients of the --s21-* cuts, unless --no-s21); validate the S1m blocks, the multipoles
     (counterterms at zero) and S21m (noise amplitudes at zero) against the exact basis at random points."""
     from wstfast.theory.spectrum import MultipoleProjection, S1mProjection, SpectrumGrid
@@ -146,7 +146,7 @@ def train_rsd(args):
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
                     fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,
                     s21_projected=not args.s21_unprojected, ap_order=args.ap_order)
-    basis = RSDBasis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
+    basis = Basis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
                      z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
                      space=args.space,
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
@@ -168,6 +168,7 @@ def train_rsd(args):
     args.output.with_suffix(".json").write_text(json.dumps(settings, indent=2))
     print(f"wrote {args.output}")
 
+    ells = (0,) if args.space == "real" else (0, 2, 4)  # real space: the monopole
     if args.config is not None:
         shotnoise = args.shotnoise
         kfund = 2 * np.pi / lattice["boxsize"]
@@ -175,18 +176,18 @@ def train_rsd(args):
     else:
         s1m = load_s1m_dataset(args.data_dir, subdir, coefficients, q=config.q)
         power = load_power_dataset(args.data_dir, subdir, kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files,
-                                   ells=(0, 2, 4))
+                                   ells=ells)
         shotnoise, edges = s1m.shotnoise, power.edges
     grid = SpectrumGrid(kmax=args.kmax)  # the same grid as the basis
     projections = dict(s1m=S1mProjection(config, coefficients, grid, **lattice),
-                       pk=MultipoleProjection(edges, grid, **lattice))
-    # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles.
-    fog = dict(fog="shared") if args.fog else {}  # validated at c_v = 0 (the undamped orders 0)
+                       pk=MultipoleProjection(edges, grid, ells=ells, **lattice))
+    # One graph per basis (a basis cannot be shared between graphs): S1m blocks then multipoles. Validated at the default
+    # nuisances (c_v = 0: the undamped orders 0 of a fog basis).
+    nuisance = NuisanceParameters(basis.spec)
 
     def theories(b):
-        out = [S1mTheory(projections["s1m"], coefficients, q=config.q, basis=b, shotnoise=shotnoise,
-                         tracer=args.tracer, **fog),
-               RSDPowerTheory(projections["pk"], basis=b, shotnoise=shotnoise, tracer=args.tracer)]
+        out = [S1mTheory(projections["s1m"], coefficients, basis=b, nuisance=nuisance, q=config.q, shotnoise=shotnoise),
+               PowerTheory(projections["pk"], basis=b, nuisance=nuisance, shotnoise=shotnoise)]
         if s21:
             unprojected = {}
             if args.s21_unprojected:
@@ -197,9 +198,9 @@ def train_rsd(args):
                 x, _ = leggauss(12)
                 unprojected = dict(s21_projection=S21mProjection(config, s21, first_layer_fields(s21),
                                                                  np.geomspace(4e-3, 0.12, 24), x[6:], **lattice))
-            out.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), s21, first_layer, q=config.q,
-                                  basis=b, cumulant_index=[coefficients.index(c) for c in first_layer],
-                                  shotnoise=shotnoise, tracer=args.tracer, **fog, **unprojected))
+            out.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), s21, first_layer, basis=b,
+                                  nuisance=nuisance, q=config.q, cumulant_index=[coefficients.index(c) for c in first_layer],
+                                  shotnoise=shotnoise, **unprojected))
         return out
 
     graphs = {name: build(JointTheory(theories(b))) for name, b in (("exact", basis), ("emulated", emulator.to_calculator()))}

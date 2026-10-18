@@ -119,7 +119,7 @@ The cosmology-dependent band integrals (`WSTBasis`) are what the emulator replac
 parameters stay exact in `WSTTheory`, as in the DSC model.
 
 Not yet included in this real-space model: one-loop responses. Redshift space (line-of-sight-resolved
-S1m, S21m and P_ℓ: `wstfast/theory/spectrum.py`, `first_layer.py`, `second_layer.py`, `scripts/fit_rsd.py`) and biased tracers are
+S1m, S21m and P_ℓ: `wstfast/theory/spectrum.py`, `first_layer.py`, `second_layer.py`, `scripts/fit.py`) and biased tracers are
 handled by the redshift-space model below.
 
 ## Biased tracers (Quijote FoF halos)
@@ -142,7 +142,7 @@ python scripts/measure_quijote_wst.py --tracer halos --mmin 1e13 --superset --lo
 python scripts/train_emulator.py --stat rsd --tracer biased --ir --vary omega_cdm logA n_s h \
     --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \
     --output outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5
-python scripts/fit_rsd.py --stats pk s1m s21m --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5 \
+python scripts/fit.py --stats pk s1m s21m --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir.h5 \
     --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los ...
 ```
 

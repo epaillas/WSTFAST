@@ -77,13 +77,13 @@ def test_lattice_binning_matches_power_multipoles():
 def test_power_likelihood_graph_evaluates():
     from desilike import build
 
-    from wstfast.calculators import PowerBasis, PowerTheory, WSTLikelihood, build_cosmology, power_rows
+    from wstfast.calculators import PowerBasis, LegacyPowerTheory, WSTLikelihood, build_cosmology, power_rows
 
     knodes = default_knodes(0.12)
     edges = 2 * np.pi / 1000.0 * np.arange(0.5, 19.0, 2.0)
     binning = LatticeBinning(edges, 1000.0, 256, knodes)
     basis = PowerBasis(cosmo=build_cosmology(("omega_cdm", "logA")), knodes=knodes, z=0.5)
-    theory = PowerTheory(binning, basis=basis, shotnoise=7.45)
+    theory = LegacyPowerTheory(binning, basis=basis, shotnoise=7.45)
     graph = build(theory)
     prediction = np.asarray(graph({}))
     assert prediction.shape == (edges.size - 1,) and np.all(prediction > 0)

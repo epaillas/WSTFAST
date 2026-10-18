@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Bias of the halo WST baseline from the unmodelled non-Gaussianity of the second layer (linear Fisher estimate).
 
-The baseline likelihood of the paper (fit_rsd.py --stats s1m s21m --s21-min-scale 25 --s21-white, cubic biases from the
+The baseline likelihood of the paper (fit.py --stats s1m s21m --s21-min-scale 25 --s21-white, cubic biases from the
 relation, omega_cdm, logA, h free, n_s fixed, sample covariance of the 1188 halo boxes) is linearised at the best fit of
 outputs/inference/rsd/paper_c_wst_nsfixed_V25. The data vector is shifted by the measured deficit of every S21m
 coefficient, delta d = S21m x (S2m / S2m_G - 1), with S2m_G the chi-distribution value from the exact <|Y|^2> (stored
@@ -26,8 +26,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import wstfast.theory  # noqa: E402,F401
 from desilike import build, get_params  # noqa: E402
-from fit_rsd import build_problem, parse_args  # noqa: E402
+from fit import fit_options, parse_args  # noqa: E402
 from wstfast.calculators import JointTheory, WSTLikelihood  # noqa: E402
+from wstfast.inference import build_problem  # noqa: E402
 from wstfast.data import sample_covariance  # noqa: E402
 
 DATA = ROOT / "data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"
@@ -59,7 +60,7 @@ def measured_deficit(labels, q=0.8):
 
 
 def main():
-    args = parse_args(ARGS)
+    args = fit_options(parse_args(ARGS))
     problem = build_problem(args)
     theories, vectors, labels = problem["theories"], problem["vectors"], problem["labels"]
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Analytic covariance of the redshift-space halo WST data vector [ln S1m, ln S21m, P_l] (wstfast.theory.covariance_rsd).
 
-Model inputs at the nuisance values of a fit_rsd.py summary (``--fiducial``, e.g. the joint P_l + WST baseline fit):
+Model inputs at the nuisance values of a fit.py summary (``--fiducial``, e.g. the joint P_l + WST baseline fit):
 the field power P_d(k, mu) of the fit model (as analytic_covariance_rsd.py --inputs model), the tree response and
 Gaussian-chaos cross noise of the first-layer moduli at the fitted biases and shot noise, with the fitted noise
 amplitudes and white terms W_j. Writes ``lncov`` (S1m and S21m in ln, P_l linear) and its parts. Example:
@@ -13,7 +13,7 @@ Survey (``--survey NGC SGC --window <one per cap>``): the measurements of each c
 configuration and the shot noise 1 / nbar_eff, the emulator its fiducial cosmology (AbacusSummit: cb power with its
 massive neutrino), and the fitted c_v the velocity damping of the modulus spectra, sigma_v = sqrt(2 c_v) / (f k_NL).
 The box covariance (``--box``) is rescaled to each entry's effective volume on the cap (``survey.survey_covariance``);
-the caps are independent. Writes ``lncov`` (ln S1m, ln S21m) with cap-prefixed labels, for ``fit_rsd.py
+the caps are independent. Writes ``lncov`` (ln S1m, ln S21m) with cap-prefixed labels, for ``fit.py
 --covariance-file``.
 """
 

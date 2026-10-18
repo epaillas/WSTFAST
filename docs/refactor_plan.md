@@ -237,10 +237,28 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    Real-space fits still need a real-space emulator (`train_emulator.py --stat rsd --space real`) and the line-of-sight
    resolved real-space boxes (D1). The data subdirectories are named `real` / `rsd` while `ModelSpec.space` uses
    `real` / `redshift`; reconcile them in step 4.
-4. **Calculators and inference.** Build the single `Basis`, `PowerTheory` / `S1Theory` / `S21Theory`,
-   `NuisanceParameters` and `inference.build_likelihood`. Turn `fit_rsd.py` into the thin `fit.py`. Prune the
-   options listed in section 2. Gate: the halo baseline chain reproduces the paper posterior (same emulator,
-   same seed) to MCMC noise.
+4. **Calculators and inference.** *Done 2026-10-18.*
+   - `Basis` (was `RSDBasis`; the alias `RSDBasis = Basis` keeps the trained emulators loading, since desilike stores
+     the class path). `PowerTheory` (was `RSDPowerTheory`), `S1mTheory` and `S21mTheory` take
+     `nuisance=NuisanceParameters(spec, cubic=...)`. That registry declares the biases, counterterms, c_v, S21m noise
+     amplitudes and W_j with their priors, and applies the matter and real-space limits; it replaces `BiasParameters`,
+     the per-theory parameter helpers and `real_space_limit`. The former real-space P(k) theory is
+     `LegacyPowerTheory` until step 6.
+   - Pruned (used by none of the 107 paper and survey fit summaries): `ng_amplitude`, `k4_counterterm`, `b_shot`,
+     `noise_shot`, `full_norm`, `response_amplitude`, `k2_stochastic`, `s21_k2`, `s21_connected*`,
+     `s21_noise_calibration`, `kappa_shot`, `shared_counterterms`, `s21_layer2_prior`, and `fog="separate"`. `--fog`
+     is gone: c_v comes from the emulator's `ModelSpec`. The basis options (`s21_damping`, the unprojected S21m the
+     survey emulator needs) and `tracer_grid`'s ck4 / alpha_k2 terms (used only by `sample_grids` for the survey
+     spectrum basis) are kept.
+   - `inference.FitOptions` + `inference.build_fit` (not `build_likelihood`, which names the old real-space builder
+     until step 6) hold what `fit_rsd.py` did: `build_problem`, `survey_problem`, the layer-2 template, the
+     covariance assembly. `scripts/fit.py` (was `fit_rsd.py`) is the command line, sampling and summary; the summary
+     records the options and the `ModelSpec`. A real-space emulator fits `<data-dir>/real` (P(k): the monopole).
+     Scripts that imported `fit_rsd` now use `fit.fit_options(fit.parse_args(...))` and `wstfast.inference`.
+
+   Gates: halo fixtures unchanged to 1e-10 through the new command line; matter fixture unchanged; and the end-to-end
+   profile of `fit_halo_baseline.sh --volume 60` reproduces `outputs/inference/rsd/fullap_ap_V60` (chi^2 19.253
+   against 19.252, best fit equal to the optimizer tolerance).
 5. **Real-space data and fits** (per D1). Measure, train the real-space emulator, rerun the Sec. IV fits and
    figures (`scripts/paper/` moves onto the new API), and update the paper text and numbers. This is the only
    step that changes published numbers.

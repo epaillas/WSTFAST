@@ -32,7 +32,7 @@ STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "omega_b": 
 
 
 class PowerJacobian:
-    """Derivatives of the P(k) of fit_power.py (PowerBasis + PowerTheory, cs2_pk = 0) for any binning.
+    """Derivatives of the P(k) of fit_power.py (PowerBasis + LegacyPowerTheory, cs2_pk = 0) for any binning.
 
     The binned model is linear in the basis rows, binning.matrix @ (P_L + L - 2 cs2_pk k^2 P_L) + noise,
     so the cosmology derivatives are taken once on the k nodes (exact CLASS + loop) and binned per kmax.

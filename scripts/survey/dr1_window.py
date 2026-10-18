@@ -31,7 +31,7 @@ both (the calibration covariance, ``survey.window_correction``).
 
 ``--test measure``: the WST of the complete Abacus mocks (``--measure-mocks``, with ``--measure-randoms`` random files
 each) on the frozen geometry and estimator (FKP field, FKP weights, local line of sight, binned second-layer mean), as
-``fit_rsd.py`` survey data: ``<output>/<cap>/wst_r<mock>.npz`` (``data.save_measurement``, with the shot noise
+``fit.py`` survey data: ``<output>/<cap>/wst_r<mock>.npz`` (``data.save_measurement``, with the shot noise
 1 / nbar_eff of the geometry).
 
 ``--test covariance``: the analytic covariance (``theory.covariance_rsd.RSDWSTCovariance``: 2nd + 4th chaos) of the
@@ -44,7 +44,7 @@ sight, thinned to nbar(x); ``--nbar-scale`` for a geometry denser than the halos
 with their periodic parent box (NGC from box 2i, SGC from box 2i + 1 of ``--halo-dir``, i = ``--seed-offset`` +
 0..``--realizations``-1). Per mock and cap: the survey and box S1m and S2m, saved for ``--test products``
 (``partial_halos.npz``: ``<cap>``, ``<cap>_box``; ``<cap>_measured``, ``<cap>_none`` of S21m) and the survey
-measurement as ``fit_rsd.py`` survey data (``<output>/data/<cap>/wst_r<i>.npz``).
+measurement as ``fit.py`` survey data (``<output>/data/<cap>/wst_r<i>.npz``).
 
 ``--test denominator``: the ``--measure-mocks`` measured as ``--test measure`` with three FKP denominators, nbar(cell) V
 (the geometry), alpha n_r of all ``--measure-randoms`` and of each half (``<output>/<nbar|randoms|half0|half1>/<cap>/``),
@@ -134,7 +134,7 @@ def get_args():
     parser.add_argument("--s21m-mocks", type=Path, nargs="*", default=[],
                         help="products: results.npz / partial_fiducial.npz of --test s21m runs (K of S21m)")
     parser.add_argument("--measure-mocks", type=int, nargs="+", default=[0],
-                        help="measure: the complete Abacus mocks to measure (fit_rsd.py survey data)")
+                        help="measure: the complete Abacus mocks to measure (fit.py survey data)")
     parser.add_argument("--measure-randoms", type=int, nargs="+", default=list(range(18)),
                         help="measure: random files of each mock")
     parser.add_argument("--expected-mocks", type=int, nargs="*", default=[],
@@ -534,7 +534,7 @@ def run_products(args, geometries, setups, pk):
             product.exact, product.exact_basis = data_product.exact, data_product.exact_basis
         product.save(args.output / f"window_z{z}_{cap}.npz")
         np.savez(args.output / f"window_ratios_z{z}_{cap}.npz", **ratios)
-        if ratios:  # calibration error of delta and K for fit_rsd --extra-covariance (one mock set per statistic)
+        if ratios:  # calibration error of delta and K for fit.py --extra-covariance (one mock set per statistic)
             labels, blocks = [], []
             config = s["config"]
             for kind in ("s1m", "s21m"):
@@ -844,12 +844,8 @@ def exact_spectrum_basis(args) -> np.ndarray:
     cache = args.output / "spectrum_basis.npy"
     if cache.exists():
         return np.load(cache)
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from fit_rsd import load_basis
-
     from wstfast.calculators import sample_grids
+    from wstfast.inference import load_basis
     from wstfast.survey import spectrum_basis
 
     settings = json.loads(args.exact_basis.with_suffix(".json").read_text())

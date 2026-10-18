@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare a redshift-space analytic covariance (scripts/analytic_covariance_rsd.py) with the sample covariance.
 
-The data vector is [ln S1m blocks, P_0, P_2, P_4] of every box (as fit_rsd.py, with S1m in ln). Reports the ratio of
+The data vector is [ln S1m blocks, P_0, P_2, P_4] of every box (as fit.py, with S1m in ln). Reports the ratio of
 standard deviations per statistic, the rms correlation differences by block, the smallest correlation eigenvalues and
 the mean chi2 of the boxes about their mean under each precision matrix (expected: the number of entries), and writes
 the figure of the correlation matrices next to the analytic file. With ``--emulator``, also the Fisher errors on the
@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from wstfast import inference
 from wstfast.config import select_coefficients
 from wstfast.data import load_measurement, load_power_dataset, load_s1m_dataset
 
@@ -29,17 +30,17 @@ def fisher_errors(data_dir, emulator, labels, covariances, nreal, volume):
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from desilike import build, get_params
-    from fisher_rsd import COSMOLOGY, load_fit_rsd, prior_sigma, step_of
+    from fisher_rsd import COSMOLOGY, load_fit, prior_sigma, step_of
 
     import wstfast.theory  # noqa: F401
     from wstfast.calculators import JointTheory
     from wstfast.config import QUIJOTE_COSMOLOGY
 
-    fr = load_fit_rsd()
-    args = fr.parse_args(["--data-dir", str(data_dir), "--emulator", str(emulator), "--output-dir", "unused",
-                          "--vary", *COSMOLOGY, "--rebin", "2", "--stats", "pk", "s1m", "--kmax", "0.12", "--q", "0.8"])
-    problem = fr.build_problem(args)
-    assert list(problem["labels"]) == labels, "data vector of fit_rsd.py differs from the analytic file"
+    fr = load_fit()
+    args = fr.fit_options(fr.parse_args(["--data-dir", str(data_dir), "--emulator", str(emulator), "--output-dir", "unused",
+                          "--vary", *COSMOLOGY, "--rebin", "2", "--stats", "pk", "s1m", "--kmax", "0.12", "--q", "0.8"]))
+    problem = inference.build_problem(args)
+    assert list(problem["labels"]) == labels, "data vector of fit.py differs from the analytic file"
     theory = JointTheory(problem["theories"])
     params = get_params(theory).select(varied=True, derived=False)
     names = params.names()

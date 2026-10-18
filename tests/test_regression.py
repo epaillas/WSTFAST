@@ -4,7 +4,7 @@
   template and AP, on the ap3_base emulator), plus the P(k) multipoles from the same emulator, at the fiducial point
   and at the best fit of outputs/inference/rsd/fullap_ap_V60. The refactor must reproduce these to round-off
   (the emulators stay valid, D2).
-- ``basis``: one non-emulated biased RSDBasis (fog, cubic, AP order 3, IR) at the Quijote cosmology, on a few
+- ``basis``: one non-emulated biased Basis (fog, cubic, AP order 3, IR) at the Quijote cosmology, on a few
   coefficients: the pure model code, without the emulator. Also to round-off.
 - ``real``: the real-space matter WSTMatterBasis at the Quijote cosmology and its Assembly at fixed nuisances, the
   reference the f = 0 limit is compared with in step 3 (agreement within the measurement errors, not round-off).
@@ -61,16 +61,17 @@ REAL_NUISANCE = dict(cs2=0.5, noise=0.1)
 RTOL = 1e-10
 
 
-def _halo_args(stats):
+def _halo_options(stats):
+    """FitOptions of the halo baseline (scripts/fit_halo_baseline.sh), through the command line of scripts/fit.py."""
     sys.path.insert(0, str(ROOT / "scripts"))
-    import fit_rsd
+    import fit
 
     output = tempfile.mkdtemp()
     argv = ["--data-dir", str(HALO_DATA), "--emulator", str(HALO_EMULATOR), "--ap", "--stats", *stats,
             "--s21-min-scale", "25", "--s21-white", "--cubic-biases", "relation", "--s21-layer2", str(LAYER2_TEMPLATE),
-            "--s21-layer2-c", "halo", "--s21-layer2-marg", "per_l", "--fog", "shared", "--vary", "omega_cdm", "logA",
-            "h", "--output-dir", output]
-    return fit_rsd, fit_rsd.parse_args(argv)
+            "--s21-layer2-c", "halo", "--s21-layer2-marg", "per_l", "--vary", "omega_cdm", "logA", "h",
+            "--output-dir", output]
+    return fit.fit_options(fit.parse_args(argv))
 
 
 def halo_predictions() -> dict:
@@ -78,9 +79,9 @@ def halo_predictions() -> dict:
     from desilike import build, get_params
 
     from wstfast.calculators import JointTheory
+    from wstfast.inference import build_problem
 
-    fit_rsd, args = _halo_args(["s1m", "s21m", "pk"])
-    problem = fit_rsd.build_problem(args)
+    problem = build_problem(_halo_options(["s1m", "s21m", "pk"]))
     theory = JointTheory(problem["theories"])
     params = get_params(theory)
     varied = params.select(varied=True, derived=False).names()
@@ -95,15 +96,15 @@ def halo_predictions() -> dict:
 
 
 def basis_outputs() -> dict:
-    """Outputs of a non-emulated biased RSDBasis with the settings of the ap3_base emulator, at the Quijote cosmology."""
+    """Outputs of a non-emulated biased Basis with the settings of the ap3_base emulator, at the Quijote cosmology."""
     from desilike import build
 
-    from wstfast.calculators import RSDBasis, build_cosmology
+    from wstfast.calculators import Basis, build_cosmology
     from wstfast.config import WSTConfig
 
     settings = json.loads(HALO_EMULATOR.with_suffix(".json").read_text())
     config = WSTConfig(**settings["config"])
-    basis = RSDBasis(cosmo=build_cosmology(settings["vary"]), config=config, coefficients=_coefficients(config, BASIS_S1),
+    basis = Basis(cosmo=build_cosmology(settings["vary"]), config=config, coefficients=_coefficients(config, BASIS_S1),
                      z=settings["z"], kmax=settings["kmax"], ir=settings["ir"],
                      s21_coefficients=_coefficients(config, BASIS_S21), tracer="biased",
                      cubic_biases=settings["cubic_biases"], fog=settings["fog"], s21_lattice=settings["lattice"],
@@ -163,8 +164,8 @@ def matter_rsd_outputs(tracer: str = "biased") -> dict:
     beta, and the theories at b1 = 1 (other biases and stochastic terms at their zero defaults)."""
     from desilike import build
 
-    from wstfast.calculators import JointTheory, RSDBasis, RSDPowerTheory, S1mTheory, S21mTheory, build_cosmology
-    from wstfast.config import SUPERSET
+    from wstfast.calculators import Basis, JointTheory, NuisanceParameters, PowerTheory, S1mTheory, S21mTheory, build_cosmology
+    from wstfast.config import SUPERSET, ModelSpec
     from wstfast.theory.bias import MATTER_BETA, monomials
     from wstfast.theory.spectrum import MultipoleProjection, S1mProjection
     from wstfast.theory.first_layer import S1mBasis
@@ -184,13 +185,14 @@ def matter_rsd_outputs(tracer: str = "biased") -> dict:
                   S21_SIZES)
     norm2 = (terms[6] @ m(2)) ** 2
     s1, s21, first, grid, edges = (setup[k] for k in ("s1", "s21", "first", "grid", "edges"))
-    basis = RSDBasis(cosmo=build_cosmology(()), config=SUPERSET, coefficients=s1, kmax=0.2, npoints=2**10,
+    basis = Basis(cosmo=build_cosmology(()), config=SUPERSET, coefficients=s1, kmax=0.2, npoints=2**10,
                      s21_coefficients=s21, tracer="biased")
+    nuisance = NuisanceParameters(ModelSpec(tracer=tracer))
     theory = JointTheory([
-        S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, tracer=tracer),
-        RSDPowerTheory(MultipoleProjection(edges, grid), basis=basis, tracer=tracer),
-        S21mTheory(S1mProjection(SUPERSET, first, grid), s21, first, basis=basis,
-                   cumulant_index=[s1.index(c) for c in first], tracer=tracer)])
+        S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, nuisance=nuisance),
+        PowerTheory(MultipoleProjection(edges, grid), basis=basis, nuisance=nuisance),
+        S21mTheory(S1mProjection(SUPERSET, first, grid), s21, first, basis=basis, nuisance=nuisance,
+                   cumulant_index=[s1.index(c) for c in first])])
     params = {"b1": 1.0} if tracer == "biased" else {}
     return dict(kappa=split(kappa, KAPPA_SIZES)[0] @ m(4), skewness2=15 * (split(skewness, SKEW_SIZES)[0] @ m(3)) ** 2,
                 s21m=np.stack([terms[0] @ m(4) / norm2, terms[3] @ m(4) / norm2], axis=1),
@@ -249,7 +251,7 @@ def real_space_s1(labels, shotnoise=REAL_SHOTNOISE, cs2=REAL_NUISANCE["cs2"], q=
     from desilike import build
     from scipy.special import gammaln
 
-    from wstfast.calculators import RSDBasis, basis_rows, build_cosmology, tracer_cumulants, tracer_grid
+    from wstfast.calculators import Basis, basis_rows, build_cosmology, tracer_cumulants, tracer_grid
     from wstfast.data import load_measurement
     from wstfast.theory.bias import MATTER_BETA
     from wstfast.theory.first_layer import multiplicity
@@ -258,7 +260,7 @@ def real_space_s1(labels, shotnoise=REAL_SHOTNOISE, cs2=REAL_NUISANCE["cs2"], q=
     config = load_measurement(sorted((REAL_DATA / "real").glob("wst_r*.npz"))[0], q=q)["config"]
     coefficients = _coefficients(config, labels)
     kmax = 0.4
-    basis = RSDBasis(cosmo=build_cosmology(()), config=config, coefficients=coefficients, kmax=kmax, tracer="matter",
+    basis = Basis(cosmo=build_cosmology(()), config=config, coefficients=coefficients, kmax=kmax, tracer="matter",
                      space="real")
     keys = ("grid_terms", "kappa", "skewness2", "s21m_terms", "dlogA")
     out = build(basis, output=lambda: {key: getattr(basis, key) for key in keys})({})

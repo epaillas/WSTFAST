@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """Simulation-calibrated S21m noise: the per-field noise amplitudes a_i and the white term W as linear functions of
-cosmology, for fit_rsd.py --s21-noise-calibration.
+cosmology, for fit.py --s21-noise-calibration.
 
     a_i(theta) = a_i0 + grad_i . (theta - theta_0),   theta = (logA, omega_cdm) by default,
 
-with a_i0 from a fit of the noise nuisances at the true fiducial cosmology (fit_rsd.py at fixed cosmology,
+with a_i0 from a fit of the noise nuisances at the true fiducial cosmology (fit.py at fixed cosmology,
 --covariance-of-mean; ideally on boxes outside any test set, --exclude-like) and grad_i from least squares over the
 differences between Quijote derivative sets and the fiducial boxes of the same seeds (each fitted at its own truth).
-Seed pairing cancels most of the cosmic variance in the differences. Every set (and the reference) is a fit_rsd.py
+Seed pairing cancels most of the cosmic variance in the differences. Every set (and the reference) is a fit.py
 summary.json; the truths are given on the command line, as NAME=SUMMARY:logA,omega_cdm.
 
     python scripts/feasibility/noise_calibration.py --fiducial outputs/noise_calibration/v2/cal_holdout/summary.json \\

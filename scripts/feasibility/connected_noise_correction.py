@@ -4,7 +4,7 @@
 For every S21m entry of an emulated basis, c_e = sum M_e g rho / sum M_e g, with the second-layer lattice weights M_e
 of the entry (second_layer.S21mProjection), the Gaussian noise g of its first-layer field on the basis (K, mu) grid
 and rho = Delta N / g from wstfast.theory.connected_noise_rsd, all at one cosmology (Quijote) and one set of biases.
-The fit then uses (1 + a_field) (1 + c_e) for the noise of entry e (fit_rsd.py --s21-connected).
+The fit then uses (1 + a_field) (1 + c_e) for the noise of entry e (fit.py --s21-connected).
 
     python scripts/feasibility/connected_noise_correction.py --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_sv1.h5 \
         --data-dir <halo _los dir> --bias 1.96,-0.87,-0.66,1.49 --alpha0 -0.135 --cubic prior --output <npz>

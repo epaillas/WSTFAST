@@ -1,7 +1,13 @@
-"""Likelihood construction, profiling and MH sampling with desilike."""
+"""Likelihoods, profiling and sampling with desilike.
+
+The fits of the model (the emulated ``Basis`` of a tracer in redshift or real space) are built by ``build_fit`` from a
+``FitOptions`` (scripts/fit.py is its command line). The builders of the former real-space matter model
+(``build_wst_theory``, ``build_power_theory``, ``build_joint_likelihood``) remain until it is retired.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from pathlib import Path
@@ -9,11 +15,15 @@ from pathlib import Path
 import numpy as np
 from desilike import build, get_params
 
-from .calculators import (JointTheory, PowerBasis, PowerTheory, WSTBasis, WSTLikelihood, WSTTheory,
-                          build_cosmology)
-from .config import QUIJOTE_COSMOLOGY, WSTConfig
-from .data import PowerDataset, WSTDataset, chi_squared
+from .calculators import (APGeometry, CombinedCaps, JointTheory, LegacyPowerTheory, NuisanceParameters, PowerBasis,
+                          PowerTheory, S1mTheory, S21mTheory, WSTBasis, WSTLikelihood, WSTTheory, build_cosmology,
+                          combine_caps)
+from .config import QUIJOTE_COSMOLOGY, Coefficient, ModelSpec, WSTConfig, select_coefficients
+from .data import (PowerDataset, WSTDataset, chi_squared, hartlap_factor, load_measurement, load_power_dataset,
+                   load_s1m_dataset, load_s21m_dataset, percival_m1, sample_covariance)
 from .theory.power import LatticeBinning, default_knodes
+from .theory.spectrum import (APPolynomial, MultipoleProjection, S1mProjection, SpectrumGrid, multipole_ap_projection,
+                              s1m_ap_projection)
 
 
 def covariance_for(dataset: WSTDataset, kind: str = "auto", of_mean: bool = False) -> tuple[np.ndarray, str]:
@@ -109,7 +119,7 @@ def load_emulated_power_basis(path: Path, dataset: PowerDataset, vary, order: st
 
 def build_power_theory(dataset: PowerDataset, vary=("omega_cdm", "logA"), order: str = "one-loop",
                        cutoff: float | None = 0.5, emulator: Path | None = None, counterterm: bool | None = None,
-                       window: str | None = "cic") -> PowerTheory:
+                       window: str | None = "cic") -> LegacyPowerTheory:
     """Real-space matter P(k) theory with an exact (CLASS + loop) or Taylor-emulated basis."""
     if emulator is None:
         knodes = default_knodes(dataset.edges[-1], boxsize=dataset.metadata["boxsize"])
@@ -120,7 +130,7 @@ def build_power_theory(dataset: PowerDataset, vary=("omega_cdm", "logA"), order:
         _bound_to_emulator(basis, bounds)
     binning = LatticeBinning(dataset.edges, dataset.metadata["boxsize"], dataset.metadata["nmesh"], knodes,
                              window=window)
-    return PowerTheory(binning, basis=basis, shotnoise=dataset.shotnoise, order=order, counterterm=counterterm)
+    return LegacyPowerTheory(binning, basis=basis, shotnoise=dataset.shotnoise, order=order, counterterm=counterterm)
 
 
 def build_power_likelihood(dataset: PowerDataset, covariance: np.ndarray, vary=("omega_cdm", "logA"),
@@ -384,7 +394,7 @@ def plot_power_fit(path: Path, likelihood, dataset: PowerDataset, covariance: np
 
 def plot_triangle(path: Path, runs: dict, params=("omega_cdm", "logA", "h"), truth: dict | None = None,
                   title: str = ""):
-    """Triangle plot of the posteriors of ``runs`` ({legend: samples.h5 of fit_rsd.py, or a list of chain files, e.g.
+    """Triangle plot of the posteriors of ``runs`` ({legend: samples.h5 of fit.py, or a list of chain files, e.g.
     the chains/samples_<i>.h5 of a run in progress}) in ``params``, with the ``truth`` marked; the chains' first half
     is dropped as burn-in."""
     import matplotlib
@@ -409,3 +419,625 @@ def plot_triangle(path: Path, runs: dict, params=("omega_cdm", "logA", "h"), tru
     if title:
         plotter.fig.suptitle(title, y=1.02)
     plotter.export(str(path))
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fits of the line-of-sight-resolved WST and P(k) of a tracer (the emulated Basis; scripts/fit.py)
+# ---------------------------------------------------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class FitOptions:
+    """What a fit of the WST and P(k) measurements includes (``build_fit``; the command line of scripts/fit.py).
+
+    The model is that of the emulator (its ``ModelSpec``: tracer, real or redshift space, Fingers-of-God, AP order,
+    cubic biases); these options select the data, the nuisance priors and the covariance. Data: ``stats`` among
+    "pk", "s1m", "s21m" from the box measurements under ``data_dir`` (subdirectory ``rsd``, or ``real`` for a real-space
+    emulator), with the scale cuts ``s1_min_scale``, ``s1_ells``, ``s21_min_scale``, ``s21_min_scale2``,
+    ``s21_min_ratio`` and ``kmin``, ``kmax``, ``rebin`` of P(k); several exponents ``q`` concatenate the S1m vectors.
+    Survey fits: ``survey`` (caps), ``window`` (one ``survey.SurveyWindow`` file per cap), ``combine_caps``.
+    """
+
+    emulator: Path
+    data_dir: Path = Path("data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los")
+    stats: tuple = ("pk", "s1m")
+    q: tuple = (0.8,)
+    s1_min_scale: float = 25.0
+    s1_ells: tuple = (0, 1, 2, 3, 4)
+    s21_min_scale: float = 17.6
+    s21_min_scale2: float = 70.0
+    s21_min_ratio: float = 2.8
+    kmin: float = 0.0
+    kmax: float = 0.12
+    rebin: int = 2
+    vary: tuple = ("omega_cdm", "logA")
+    #: Errors of a survey of this volume [(Gpc/h)^3]: the one-box covariance / (V / V_box).
+    volume: float | None = None
+    #: Errors of the realization mean.
+    covariance_of_mean: bool = False
+    survey: tuple | None = None
+    window: tuple | None = None
+    combine_caps: bool = False
+    #: Survey: analytic covariance (analytic_covariance_rsd_wst.py --survey) instead of box realizations.
+    covariance_file: Path | None = None
+    #: npz files of modelling errors (labels, covariance in data units or fractional) added as they are.
+    extra_covariance: tuple = ()
+    no_percival: bool = False
+    #: Estimate the covariance from the realizations of this directory (the data are still those of data_dir).
+    covariance_data_dir: Path | None = None
+    #: Use only the realizations of data_dir that also exist in this directory (paired seeds).
+    realizations_like: Path | None = None
+    #: Leave out the realizations of data_dir that exist in this directory (held-out seeds).
+    exclude_like: Path | None = None
+    #: Parameters to fix, ["NAME=VALUE", ...].
+    fix: tuple | None = None
+    #: Sobol points of the control-variate correction of the S1m cumulants (0: none).
+    cumulant_points: int = 2**20
+    #: Gaussian priors on emulated cosmological parameters, ["NAME=LOC,SCALE", ...] (truncated to the emulator box).
+    gaussian_prior: tuple = ()
+    #: Free white term W_j of the S21m modulus spectra per first-layer scale.
+    s21_white: bool = False
+    #: Layer-2 template (scripts/layer2/template_rsd.py): S21m x (1 + d0 + R_l d2), R_l = 1 / (1 + c_l n s_lin^2).
+    s21_layer2: Path | None = None
+    #: c_l calibrated on the halo pairs outside the data vector ("halo") or transferred from matter.
+    s21_layer2_c: str = "halo"
+    #: Marginalize analytically over the template amplitudes: one pair ("global") or one pair per l ("per_l").
+    s21_layer2_marg: str | None = None
+    s21_layer2_marg_width: float = 1.0
+    #: Cubic biases of the S1m trispectrum: priors centred on zero ("zero") or on the halo relations ("relation").
+    cubic_biases: str | None = None
+    #: Alcock-Paczynski distortions of the trial cosmology (redshift space).
+    ap: bool = False
+    #: The configuration of the data (set by build_problem; the layer-2 template is re-keyed to it).
+    layer2_config: WSTConfig | None = None
+
+
+def load_basis(path: Path, vary, prepare=None):
+    """Emulated ``Basis`` as a calculator and its settings; ``prepare(emulator, settings)`` acts on the emulator first
+    (e.g. ``contract_s21m``), and its result is kept as settings["prepared"]. The emulated parameters not in ``vary``
+    are fixed at the fiducial."""
+    from desilike.emulators import Emulator
+
+    settings = json.loads(path.with_suffix(".json").read_text())
+    if settings.get("stat") != "rsd":
+        raise ValueError(f"{path} is not an emulator of the Basis (train_emulator.py --stat rsd)")
+    if settings.get("tracer", "matter") == "matter" and settings.get("layout") != "monomial":
+        raise SystemExit(f"{path} holds the retired matter-only basis layout: retrain it (train_emulator.py --stat rsd "
+                         "--tracer matter now trains the monomial basis of the matter limit)")
+    emulator = Emulator.read(str(path))
+    if prepare is not None:
+        settings["prepared"] = prepare(emulator, settings)
+    basis = emulator.to_calculator()
+    _bound_to_emulator(basis, _fix_unvaried(basis, settings, vary, path))
+    return basis, settings
+
+
+def s21m_selection(options, config, settings):
+    """S21 coefficients of the fit and those of the emulator (in its order)."""
+    coefficients = [c for c in select_coefficients(config, s21_min_scale=options.s21_min_scale,
+                                                   s21_min_ratio=options.s21_min_ratio,
+                                                   s21_min_scale2=options.s21_min_scale2) if c.kind == "S21"]
+    emulated21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
+                  if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
+    emulated21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
+    return coefficients, emulated21
+
+
+def contract_unprojected_s21m(options, config, emulator, settings):
+    """For an emulator of the unprojected S21m basis and an S21m fit: fold the S21m projection (its AP polynomial with
+    ``ap``) into the emulator (``contract_s21m``), so that a likelihood call costs what a projected emulator does."""
+    from numpy.polynomial.legendre import leggauss
+
+    from wstfast.calculators import contract_s21m
+    from wstfast.theory.second_layer import S21mAPProjection, S21mProjection, first_layer_fields
+
+    if settings.get("s21_projected", True) or "s21m" not in options.stats:
+        return None
+    coefficients, emulated21 = s21m_selection(options, config, settings)
+    if any(c not in emulated21 for c in coefficients):
+        return None  # build_problem reports the missing terms
+    x, _ = leggauss(12)  # the (K, mu_K) grid of S21mBasis
+    boxsize, nmesh = settings.get("lattice", [1000.0, 256])
+    grid = dict(k=np.geomspace(4e-3, 0.12, 24), mu=x[6:], boxsize=float(boxsize), nmesh=int(nmesh))
+    fields = first_layer_fields(coefficients)
+    projection = (APPolynomial(S21mAPProjection(config, coefficients, fields, grid["k"], grid["mu"],
+                                                boxsize=grid["boxsize"], nmesh=grid["nmesh"]))
+                  if options.ap else S21mProjection(config, coefficients, fields, grid["k"], grid["mu"],
+                                                 boxsize=grid["boxsize"], nmesh=grid["nmesh"]))
+    return contract_s21m(emulator, coefficients, emulated21, projection)
+
+
+def apply_gaussian_priors(basis, settings, items):
+    """Gaussian priors ['n_s=0.9649,0.042', ...] on varied emulated parameters, within the emulator bounds."""
+    params = get_params(basis)
+    for item in items:
+        name, _, values = item.partition("=")
+        loc, scale = (float(v) for v in values.split(","))
+        if name not in settings["vary"] or params[name].fixed:
+            raise ValueError(f"gaussian_prior: {name} is not a varied emulated parameter")
+        params[name].update(prior=dict(dist="norm", loc=loc, scale=scale, limits=list(settings["bounds"][name])))
+
+
+def load_correction(options, config, coefficients, settings):
+    """Control-variate correction of the emulated S1m cumulants at the Quijote cosmology (cached next to the emulator)."""
+    from cosmoprimo import Cosmology
+
+    from wstfast.theory.first_layer import cumulant_correction as cumulant_correction
+
+    cache = options.emulator.with_suffix(f".correction_{options.cumulant_points}.npz")
+    if cache.exists():
+        stored = np.load(cache, allow_pickle=False)
+        labels = list(stored["labels"])
+        index = [labels.index(c.label) for c in coefficients]
+        return _tile_ap(settings, stored["kappa"][index], stored["skewness2"][index])
+    every = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"]) if c.kind == "S1"]
+    fourier = Cosmology(engine="class", m_ncdm=0.0, **QUIJOTE_COSMOLOGY).get_fourier()
+    klin = np.geomspace(1e-4, 10.0, 1024)
+    pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
+    f = float(fourier.sigma8_z(settings["z"], of="theta_cb") / fourier.sigma8_z(settings["z"], of="delta_cb"))
+    spec = ModelSpec.from_settings(settings)
+    cubic = dict(cubic=True) if spec.cubic else {}
+    if spec.fog:
+        cubic["fog"] = True
+    kappa, skewness2 = cumulant_correction(config, every, klin, pklin, f, npoints_reference=options.cumulant_points, **cubic)
+    np.savez(cache, kappa=kappa, skewness2=skewness2, labels=np.array([c.label for c in every]))
+    print(f"wrote {cache}")
+    labels = [c.label for c in every]
+    index = [labels.index(c.label) for c in coefficients]
+    return _tile_ap(settings, kappa[index], skewness2[index])
+
+
+def _tile_ap(settings, kappa, skewness2):
+    """The control-variate correction (computed without AP) for every AP-polynomial term of an ``ap_order`` emulator."""
+    from wstfast.theory.layout import AP_TERMS
+
+    n = AP_TERMS[ModelSpec.from_settings(settings).ap_order]
+    return np.tile(kappa, n), np.tile(skewness2, n)
+
+
+def load_layer2(options, projection, coefficients, first_layer, q, kwargs):
+    """Template of the non-Gaussian second layer for S21mTheory(layer2=...): d0 and d2 per (j1, j2, l, |m1|, |m2|),
+    the matter linear variances of the first-layer fields, the c_l (halo-calibrated or transferred from matter), and the
+    fiducial linear block variances at the template's biases, from the basis evaluated at the Quijote cosmology."""
+    from desilike import build
+
+    from wstfast.calculators import S21mTheory, basis_rows
+    from wstfast.theory.bias import MATTER_BETA, beta_vector, monomials
+    from wstfast.theory.layout import TREE as TREE_INDEX
+
+    template = layer2_template(options)
+    rows = {tuple(r["key"]): (r["gauss"], r["tree"]) for r in template["rows"]}
+    var = {(r["key"][0], r["key"][2]): r["var"] for r in template["rows"]}
+    which = options.s21_layer2_c
+    c = {int(k): v for k, v in template[f"{which}_c"].items()}
+    c_err = {int(k): v for k, v in template.get(f"{which}_c_err", {}).items()} or {ell: 0.1 * abs(v) for ell, v in c.items()}
+    b = template["biases"]
+    beta = (MATTER_BETA if kwargs["nuisance"].spec.tracer == "matter"
+            else np.asarray(beta_vector(b["b1"], b["b2"], b["bG2"], b["bGamma3"])))
+    probe = S21mTheory(projection, coefficients, first_layer, q=q, **kwargs)
+    graph = build(probe)
+    fiducial = {n: QUIJOTE_COSMOLOGY[n] for n in get_params(probe).select(varied=True, derived=False).names()
+                if n in QUIJOTE_COSMOLOGY}
+    graph(fiducial)
+    rows_fid = basis_rows(probe.basis)[0]
+    tree = np.tensordot(np.asarray(monomials(beta, 2))[np.array(TREE_INDEX)], np.asarray(rows_fid[:len(TREE_INDEX)]), axes=1)
+    blocks = np.asarray(probe.matrix) @ tree.ravel()
+    offsets = np.cumsum([0] + [f.ell + 1 for f in first_layer])
+    lin_ref = {(f.j, f.ell, m1): float(blocks[offsets[i] + m1]) for i, f in enumerate(first_layer) for m1 in range(f.ell + 1)}
+    print(f"non-Gaussian second layer: {which} c_l = " + ", ".join(f"{ell}: {v:.2f}" for ell, v in sorted(c.items())),
+          flush=True)
+    return dict(rows=rows, var=var, c=c, c_err=c_err, beta_ref=beta.tolist(), lin_ref=lin_ref)
+
+
+#: The measurement settings of the layer-2 template (scripts/layer2/template_rsd.py: the halo superset), whose (j1, j2)
+#: keys are re-keyed by sigma for a fit of another configuration (a survey mesh).
+TEMPLATE_CONFIG = WSTConfig(J=9, L=6, L2=4, sigma0=0.8, cellsize=1000.0 / 256, step=2**0.5, min_dj=2)
+
+
+def layer2_template(options):
+    """The ``s21_layer2`` template, with its rows keyed in the fit's configuration (``options.layer2_config``, set by
+    build_problem): the template's scale indices mapped by sigma (rows of scales the fit lacks dropped)."""
+    template = json.loads(options.s21_layer2.read_text())
+    config = getattr(options, "layer2_config", None)
+    if config is None or (np.isclose(config.sigma(0), TEMPLATE_CONFIG.sigma(0)) and config.step == TEMPLATE_CONFIG.step):
+        return template
+
+    def index(j):
+        sigma = TEMPLATE_CONFIG.sigma(j)
+        jj = int(round(np.log(sigma / config.sigma(0)) / np.log(config.step)))
+        return jj if 0 <= jj <= config.J and np.isclose(config.sigma(jj), sigma, rtol=1e-6) else None
+
+    rows = []
+    for r in template["rows"]:
+        j1, j2 = index(r["key"][0]), index(r["key"][1])
+        if j1 is not None and j2 is not None:
+            rows.append(dict(r, key=[j1, j2] + list(r["key"][2:])))
+    return dict(template, rows=rows)
+
+
+def layer2_templates(options, labels, mean):
+    """Data-vector shapes S21m d0 and S21m R_l d2 of the template pieces (fiducial cosmology, calibrated c_l), all l
+    together ('global') or one pair per l ('per_l'); zero outside S21m."""
+    template = layer2_template(options)
+    c = {int(k): max(v, 0.0) for k, v in template[f"{options.s21_layer2_c}_c"].items()}
+    rows = {tuple(r["key"]): r for r in template["rows"]}
+    groups = {}
+    for i, label in enumerate(labels):
+        label = label.split(":")[-1]  # without the cap / q prefixes
+        if not label.startswith("S21m"):
+            continue
+        key = tuple(int(part[1:]) for part in label.split("_")[1:])
+        r = rows[key]
+        group = 0 if options.s21_layer2_marg == "global" else r["ell"]
+        d0, d2 = groups.setdefault(group, (np.zeros(len(labels)), np.zeros(len(labels))))
+        d0[i] = mean[i] * r["gauss"]
+        d2[i] = mean[i] * r["tree"] / (1.0 + c[r["ell"]] * r["var"])
+    return [v for pair in groups.values() for v in pair]
+
+
+def layer2_variance(options, labels, mean):
+    """(S21m dE)^2 per data point, dE^2 = dd0^2 + (R_l dd2)^2 with R_l at the calibrated c_l (zero for other statistics)."""
+    template = layer2_template(options)
+    c = {int(k): max(v, 0.0) for k, v in template[f"{options.s21_layer2_c}_c"].items()}
+    rows = {tuple(r["key"]): r for r in template["rows"]}
+    out = np.zeros(len(labels))
+    for i, label in enumerate(labels):
+        label = label.split(":")[-1]  # without the cap / q prefixes
+        if label.startswith("S21m"):
+            key = tuple(int(part[1:]) for part in label.split("_")[1:])
+            r = rows[key]
+            renorm = 1.0 / (1.0 + c[r["ell"]] * r["var"])
+            out[i] = (mean[i] * np.hypot(r["gauss_err"], renorm * r["tree_err"])) ** 2
+    return out
+
+
+def fiducial_omega_b(settings) -> float:
+    """omega_b of the emulator's fiducial (fixed in the AP ratios), with the massive neutrinos of AbacusSummit (matter at
+    the redshifts of the fits)."""
+    from wstfast.config import ABACUS_COSMOLOGY
+
+    if settings.get("fiducial") == "abacus":
+        return ABACUS_COSMOLOGY["omega_b"] + 0.0006442  # omega_ncdm of one 0.06 eV neutrino
+    return QUIJOTE_COSMOLOGY["omega_b"]
+
+
+def build_problem(options, basis=None, settings=None, space=None, window=None, prefix=""):
+    """Theories, data vectors (nrealizations, ndata), labels and metadata of ``options.stats``, from the emulator
+    ``options.emulator`` (or the given ``basis`` and ``settings``); also returns the basis, its settings, its
+    ``ModelSpec`` and the tracer. ``space`` is the data subdirectory (default ``rsd``, or ``real`` for a real-space
+    emulator); survey (``survey_problem``): the cap's subdirectory, ``window`` its ``survey.SurveyWindow`` and ``prefix``
+    that of its labels. The projections use the emulator's lattice (``settings["lattice"]``)."""
+    if settings is None:
+        settings = json.loads(Path(options.emulator).with_suffix(".json").read_text())
+    spec = ModelSpec.from_settings(settings)
+    if space is None:
+        space = "real" if spec.space == "real" else "rsd"
+    first = sorted((options.data_dir / space).glob("wst_r*.npz"))[0]
+    q0 = options.q[0]
+    config = load_measurement(first, q=q0)["config"]
+    options.layer2_config = config  # the layer-2 template is re-keyed to it (layer2_template)
+    if basis is None:
+        basis, settings = load_basis(options.emulator, options.vary, prepare=lambda e, st: contract_unprojected_s21m(
+            options, config, e, st))
+        apply_gaussian_priors(basis, settings, options.gaussian_prior)
+    tracer = spec.tracer
+    if options.cubic_biases is not None and not spec.cubic:
+        raise SystemExit(f"cubic biases need an emulator trained with --cubic-biases ({options.emulator} is not)")
+    if options.ap and spec.space == "real":
+        raise SystemExit("real space has no AP distortions")
+    nuisance = NuisanceParameters(spec, cubic=options.cubic_biases)
+    grid = SpectrumGrid(kmax=settings["kmax"])
+    emulated = settings["coefficients"]
+    boxsize, nmesh = settings.get("lattice", [1000.0, 256])  # the periodic lattice the emulator describes
+    lattice = dict(boxsize=float(boxsize), nmesh=int(nmesh))
+    ap = APGeometry(basis, settings["z"], omega_b=fiducial_omega_b(settings)) if options.ap else None
+
+    theories, vectors, labels = [], [], []
+    files = None
+    if getattr(options, "realizations_like", None) is not None:
+        ids = {path.name for path in (options.realizations_like / space).glob("wst_r*.npz")}
+        files = [path for path in sorted((options.data_dir / space).glob("wst_r*.npz")) if path.name in ids]
+        if not files:
+            raise SystemExit(f"no realizations of {options.data_dir} in {options.realizations_like}")
+    if getattr(options, "exclude_like", None) is not None:
+        ids = {path.name for path in (options.exclude_like / space).glob("wst_r*.npz")}
+        files = [path for path in (files or sorted((options.data_dir / space).glob("wst_r*.npz"))) if path.name not in ids]
+    if "s1m" in options.stats:
+        coefficients = [c for c in select_coefficients(config, s1_min_scale=options.s1_min_scale, s1_ells=options.s1_ells)
+                        if c.kind == "S1"]
+        missing = [c.label for c in coefficients if c.label not in emulated]
+        if missing:
+            raise ValueError(f"the emulator has no cumulants for {missing}")
+        correction = load_correction(options, config, coefficients, settings) if options.cumulant_points else None
+        projection = (APPolynomial(s1m_ap_projection(config, coefficients, grid, **lattice)) if options.ap
+                      else S1mProjection(config, coefficients, grid, **lattice))
+        for q in options.q:
+            s1m = load_s1m_dataset(options.data_dir, space, coefficients, q=q, files=files)
+            files = s1m.files
+            theories.append(S1mTheory(projection, coefficients, basis=basis, nuisance=nuisance, q=q,
+                                      shotnoise=s1m.shotnoise,
+                                      cumulant_index=[emulated.index(c.label) for c in coefficients],
+                                      correction=correction, ap=ap, sigmas=[config.sigma(c.j) for c in coefficients],
+                                      window=window))
+            vectors.append(s1m.vectors)
+            qprefix = f"q{q:g}:" if len(options.q) > 1 else ""
+            labels += [f"{prefix}{qprefix}S1m_j{c.j}_l{c.ell}_m{m}" for c in coefficients for m in range(c.ell + 1)]
+        meta = s1m.metadata
+    if "s21m" in options.stats:
+        from wstfast.theory.second_layer import s21m_entries
+
+        unprojected = not settings.get("s21_projected", True)
+        if options.ap and not unprojected and not spec.ap_order:
+            raise SystemExit("ap for s21m needs an emulator with the unprojected S21m basis (--s21-unprojected) "
+                             "or with AP-polynomial terms (--ap-order)")
+        coefficients = [c for c in select_coefficients(config, s21_min_scale=options.s21_min_scale,
+                                                       s21_min_ratio=options.s21_min_ratio,
+                                                       s21_min_scale2=options.s21_min_scale2) if c.kind == "S21"]
+        emulated21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
+                      if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
+        emulated21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
+        missing = [c.label for c in coefficients if c not in emulated21]
+        if missing:
+            raise ValueError(f"the emulator has no S21m terms for {missing}")
+        first_layer = [Coefficient("S1", ell, j) for j, ell in sorted({(c.j, c.ell) for c in coefficients})]
+        missing = [c.label for c in first_layer if c.label not in emulated]
+        if missing:
+            raise ValueError(f"the emulator has no cumulants for the first-layer {missing}")
+        basis_entries = {(emulated21[i].label, m1, m2): n for n, (i, m1, m2) in enumerate(s21m_entries(emulated21))}
+        entry_index = [basis_entries[coefficients[i].label, m1, m2] for i, m1, m2 in s21m_entries(coefficients)]
+        s21m = load_s21m_dataset(options.data_dir, space, coefficients, q=q0, files=files)
+        files = s21m.files
+        s21m_kwargs = dict(basis=basis, nuisance=nuisance, entry_index=entry_index,
+                           cumulant_index=[emulated.index(c.label) for c in first_layer], shotnoise=s21m.shotnoise,
+                           white_noise=options.s21_white, config=config, window=window)
+        if spec.ap_order and options.ap:  # AP-polynomial terms of the basis, at the trial AP ratios
+            s21m_kwargs.update(ap=ap, first_ap=APPolynomial(s1m_ap_projection(config, first_layer, grid, **lattice)))
+        if unprojected and settings.get("prepared") is not None:  # emulator contracted at load (contract_s21m)
+            s21m_kwargs.update(entry_index=None, ap=ap, s21_projection=settings["prepared"])
+        elif unprojected:  # lambda_2 projected at assembly from the emulated field grids, with AP if --ap
+            from numpy.polynomial.legendre import leggauss
+
+            from wstfast.theory.second_layer import S21mAPProjection, S21mProjection, first_layer_fields
+
+            fields, basis_fields = first_layer_fields(coefficients), first_layer_fields(emulated21)
+            x, _ = leggauss(12)  # the (K, mu_K) grid of S21mBasis
+            s21m_kwargs.update(entry_index=None, ap=ap,
+                               s21_projection=(S21mAPProjection if options.ap else S21mProjection)(
+                                   config, coefficients, fields, np.geomspace(4e-3, 0.12, 24), x[6:],
+                                   boxsize=float(boxsize), nmesh=int(nmesh)),
+                               s21_field_rows=[basis_fields.index(field) for field in fields])
+        layer2 = (load_layer2(options, S1mProjection(config, first_layer, grid, **lattice), coefficients, first_layer, q0,
+                              s21m_kwargs) if getattr(options, "s21_layer2", None) is not None else None)
+        theories.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), coefficients, first_layer, q=q0,
+                                   layer2=layer2, **s21m_kwargs))
+        vectors.append(s21m.vectors)
+        labels += [f"{prefix}S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
+                   for i, m1, m2 in s21m_entries(coefficients)]
+        meta = s21m.metadata
+    if "pk" in options.stats:
+        ells = (0,) if spec.space == "real" else (0, 2, 4)  # real space: the monopole
+        power = load_power_dataset(options.data_dir, space, kmin=options.kmin, kmax=options.kmax, rebin=options.rebin,
+                                   files=files, ells=ells)
+        files = power.files
+        projection = (APPolynomial(multipole_ap_projection(power.edges, grid, ells=ells, **lattice)) if options.ap
+                      else MultipoleProjection(power.edges, grid, ells=ells, **lattice))
+        theories.append(PowerTheory(projection, basis=basis, nuisance=nuisance, shotnoise=power.shotnoise, ap=ap))
+        vectors.append(power.vectors)
+        labels += [f"{prefix}P{ell}_k{k:.4f}" for ell in ells for k in power.k]
+        meta = power.metadata
+    return dict(theories=theories, vectors=np.concatenate(vectors, axis=1), labels=labels, meta=meta, basis=basis,
+                settings=settings, spec=spec, tracer=tracer)
+
+
+def box_entries(box_dir: Path, labels, config: WSTConfig, q: float) -> tuple[np.ndarray, float]:
+    """Box realizations (nbox, ndata) of the S1m / S21m entries ``labels`` (of a fit of ``config``, prefixes ignored),
+    matched by sigma in the box measurements of ``box_dir``/rsd, and the box volume [(Gpc/h)^3]."""
+    files = sorted((Path(box_dir) / "rsd").glob("wst_r*.npz"))
+    first = load_measurement(files[0], q=q)
+    box_config = first["config"]
+
+    def j_box(j):
+        sigma = config.sigma(j)
+        matches = [jb for jb in range(box_config.J + 1) if np.isclose(box_config.sigma(jb), sigma, rtol=1e-6)]
+        if not matches:
+            raise SystemExit(f"no box scale for sigma = {sigma:.2f} Mpc/h in {box_dir}")
+        return matches[0]
+
+    keys = []
+    for label in labels:
+        parts = label.split(":")[-1].split("_")
+        if parts[0] == "S1m":
+            keys.append(("S1m", j_box(int(parts[1][1:])), int(parts[2][1:]), int(parts[3][1:])))
+        elif parts[0] == "S21m":
+            keys.append(("S21m", j_box(int(parts[1][1:])), j_box(int(parts[2][1:])), int(parts[3][1:]),
+                         int(parts[4][1:]), int(parts[5][1:])))
+        else:
+            raise SystemExit(f"survey fits support S1m and S21m only ({label})")
+    vectors = []
+    for path in files:
+        m = load_measurement(path, q=q)
+        vectors.append([m["S1m"][k[1], k[2], k[3]] if k[0] == "S1m"
+                        else m["S2m"][k[1], k[2], k[3], k[4], k[5]] / m["S1m"][k[1], k[3], k[4]] for k in keys])
+    return np.array(vectors), (first["metadata"]["boxsize"] / 1000.0) ** 3
+
+
+def survey_problem(options):
+    """Theories, data, labels and covariance of a survey fit (``survey``): one window per cap, shared parameters."""
+    from wstfast.data import sample_covariance as sample
+    from wstfast.survey import SurveyWindow
+
+    if options.window is None or len(options.window) != len(options.survey):
+        raise SystemExit("a survey fit needs one window file per cap")
+    if options.covariance_data_dir is None and options.covariance_file is None:
+        raise SystemExit("a survey fit needs covariance_data_dir (box realizations) or covariance_file (analytic)")
+    basis = settings = None
+    caps = []
+    for cap, path in zip(options.survey, options.window):
+        window = SurveyWindow.load(path)
+        if window.veff is None:
+            raise SystemExit(f"{path} has no effective volume (rebuild it with dr1_window.py --test products)")
+        problem = build_problem(options, basis=basis, settings=settings, space=cap, window=window, prefix=f"{cap}:")
+        basis, settings = problem["basis"], problem["settings"]
+        caps.append((cap, window, problem))
+    nreal = {p["vectors"].shape[0] for _, _, p in caps}
+    if len(nreal) != 1:
+        raise SystemExit(f"the caps have different numbers of realizations: {nreal}")
+    nreal = nreal.pop()
+    theories = [t for _, _, p in caps for t in p["theories"]]
+    vectors = np.concatenate([p["vectors"] for _, _, p in caps], axis=1)
+    labels = [label for _, _, p in caps for label in p["labels"]]
+    blocks, nsims = [], None
+    if options.covariance_file is not None:  # analytic ln covariance of one survey, in data units through the data mean
+        analytic = np.load(options.covariance_file)
+        index = {str(label): i for i, label in enumerate(analytic["labels"])}
+        missing = [label for label in labels if label not in index]
+        if missing:
+            raise SystemExit(f"{options.covariance_file} has no entries {missing[:5]}...")
+        rows = np.array([index[label] for label in labels])
+        mean = vectors.mean(axis=0)
+        covariance = analytic["lncov"][np.ix_(rows, rows)] * np.outer(mean, mean)
+        covariance /= nreal if options.covariance_of_mean else 1
+        nsims = 10**9  # exact: no Hartlap / Percival factors
+    else:
+        for cap, window, problem in caps:
+            box, vbox = box_entries(options.covariance_data_dir, problem["labels"], options.layer2_config, options.q[0])
+            nsims = box.shape[0]
+            blocks.append(sample(box) * vbox / window.veff / (nreal if options.covariance_of_mean else 1))
+        covariance = np.zeros((len(labels), len(labels)))
+        start = 0
+        for block in blocks:
+            covariance[start:start + len(block), start:start + len(block)] = block
+            start += len(block)
+    if getattr(options, "s21_layer2", None) is not None:  # the template's error is the same in every cap
+        mean = vectors.mean(axis=0)
+        error = np.sqrt(layer2_variance(options, labels, mean))
+        base = np.array([label.split(":", 1)[-1] for label in labels])
+        covariance = covariance + np.where(base[:, None] == base[None, :], np.outer(error, error), 0.0)
+        if options.s21_layer2_marg is not None:
+            for vector in layer2_templates(options, labels, mean):
+                covariance = covariance + options.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    meta = dict(caps[0][2]["meta"], caps=list(options.survey), veff={cap: w.veff for cap, w, _ in caps})
+    combine = None
+    if getattr(options, "combine_caps", False):
+        theories, vectors, labels, covariance, combine = combine_survey_caps(caps, theories, vectors, labels, covariance)
+        meta["combined"] = "GCcomb"
+    return dict(theories=theories, vectors=vectors, labels=labels, meta=meta, basis=basis, settings=settings,
+                spec=caps[0][2]["spec"], tracer=caps[0][2]["tracer"], covariance=covariance, nsims=nsims,
+                combine=combine)
+
+
+def first_layer_entries(base_labels):
+    """For each entry label (without cap prefix), the index of the S1m entry of its first-layer block (S21m_j1_j2_l_m1_m2
+    -> S1m_j1_l_m1), or -1 for S1m entries."""
+    index = {label: i for i, label in enumerate(base_labels)}
+    first = []
+    for label in base_labels:
+        parts = label.split(":")[-1].split("_")
+        if parts[0] == "S21m":
+            key = f"S1m_{parts[1]}_{parts[3]}_{parts[4]}"
+            if key not in index:
+                raise SystemExit(f"combine_caps needs the first-layer S1m entry {key} of {label} in the data vector")
+            first.append(index[key])
+        else:
+            first.append(-1)
+    return np.array(first)
+
+
+def combine_survey_caps(caps, theories, vectors, labels, covariance):
+    """The caps combined as desi-clustering's GCcomb (``calculators.combine_caps``): data vectors per realization,
+    one ``CombinedCaps`` theory, labels prefixed GCcomb:, and the covariance projected with the Jacobian of the
+    combination at the data mean. Returns also ``combine`` = (jacobian (n, n_all), per-cap labels, per-cap data
+    mean) for the extra covariances of ``build_fit``."""
+    base = [label.split(":", 1)[1] for label in labels if label.startswith(f"{caps[0][0]}:")]
+    positions, starts, weights = [], [], []
+    for cap, window, problem in caps:
+        own = {label.split(":", 1)[1]: i for i, label in enumerate(labels) if label.startswith(f"{cap}:")}
+        if set(own) != set(base):
+            raise SystemExit(f"combine_caps: the caps have different data vectors ({cap})")
+        positions.append([own[b] for b in base])  # in the concatenated vector of all caps
+        starts.append(min(own.values()))  # the cap's own vector starts here
+        weights.append(float(np.sum(next(iter(window.s1m.values()))["weight"])))  # the cap's FKP weight sum
+    positions, starts, weights = np.array(positions), np.array(starts), np.array(weights)
+    first = first_layer_entries(base)
+    per_cap = len(theories) // len(caps)
+    combined = np.array([combine_caps(np.stack([v[p] for p in positions]), weights, first) for v in vectors])
+    theory = CombinedCaps(theories, per_cap, positions - starts[:, None], weights, first)  # per-cap positions
+    # Jacobian at the data mean (the S21m weights depend on the S1m means; a second-order effect in the covariance)
+    mean = vectors.mean(axis=0)
+    n, nall = len(base), len(labels)
+    jac = np.zeros((n, nall))
+    for i in range(n):
+        if first[i] < 0:
+            w = weights
+        else:
+            w = weights * np.array([mean[p[first[i]]] for p in positions])
+        w = w / w.sum()
+        for c, p in enumerate(positions):
+            jac[i, p[i]] = w[c]
+    new_labels = [f"GCcomb:{b}" for b in base]
+    print(f"caps combined as GCcomb: weights {dict(zip([c for c, _, _ in caps], np.round(weights / weights.sum(), 3)))}, "
+          f"{n} entries from {nall}", flush=True)
+    return [theory], combined, new_labels, jac @ covariance @ jac.T, (jac, list(labels), mean)
+
+
+def build_fit(options: FitOptions) -> dict:
+    """The likelihood of a fit (``FitOptions``): theories and data (``build_problem``, or ``survey_problem``), the
+    covariance (sample covariance of the realizations, or of ``covariance_data_dir``; scaled to ``volume``; plus the
+    Monte Carlo error of the layer-2 template, its analytically marginalized amplitudes and ``extra_covariance``),
+    the Hartlap-corrected inverse with the Percival factor m1, and the parameters ``fix`` fixed. Returns
+    dict(likelihood, problem, covariance, nsims, m1, ...)."""
+    if options.volume is not None and options.covariance_of_mean:
+        raise SystemExit("volume and covariance_of_mean are exclusive")
+    problem = survey_problem(options) if options.survey else build_problem(options)
+    theories, vectors, labels, meta, tracer = (problem[k] for k in ("theories", "vectors", "labels", "meta", "tracer"))
+    nreal, ndata = vectors.shape
+    nsims = nreal  # realizations of the covariance estimate
+    if options.survey:  # box covariance at each cap's effective volume, with the layer-2 terms (survey_problem)
+        covariance, nsims = problem["covariance"], problem["nsims"]
+    elif options.covariance_data_dir is None:
+        covariance = sample_covariance(vectors, of_mean=options.covariance_of_mean)
+    else:  # one-box covariance of another set; of the mean of this set's nreal boxes with --covariance-of-mean
+        other = dataclasses.replace(options)
+        other.data_dir, other.realizations_like, other.exclude_like = options.covariance_data_dir, None, None
+        cov_vectors = build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"]
+        nsims = cov_vectors.shape[0]
+        covariance = sample_covariance(cov_vectors)
+        if options.covariance_of_mean:
+            covariance = covariance / nreal
+    if options.volume is not None and not options.survey:
+        covariance = covariance * (meta["boxsize"] / 1000.0) ** 3 / options.volume
+    if getattr(options, "s21_layer2", None) is not None and not options.survey:  # Monte Carlo error of the template, a volume-independent theory error
+        covariance = covariance + np.diag(layer2_variance(options, labels, vectors.mean(axis=0)))
+        if options.s21_layer2_marg is not None:  # analytic marginalisation over the template amplitudes
+            for vector in layer2_templates(options, labels, vectors.mean(axis=0)):
+                covariance = covariance + options.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    combine = problem.get("combine") if options.survey else None  # GCcomb: extras on the per-cap labels, then projected
+    all_labels = combine[1] if combine is not None else labels
+    all_mean = combine[2] if combine is not None else vectors.mean(axis=0)
+    for path in options.extra_covariance:  # modelling errors in data units, matched by label
+        extra = np.load(path)
+        index = {str(label): i for i, label in enumerate(extra["labels"])}
+        present = np.array([i for i, label in enumerate(all_labels) if label in index])  # e.g. one cap's entries
+        if not len(present):
+            raise SystemExit(f"{path} has no covariance for any of the data points")
+        rows = np.array([index[all_labels[i]] for i in present])
+        block = extra["fractional" if "fractional" in extra.files else "covariance"][np.ix_(rows, rows)]
+        if "fractional" in extra.files:  # relative errors (e.g. the window calibration): in data units via the mean
+            mean = all_mean[present]
+            block = block * np.outer(mean, mean)
+        if combine is not None:
+            full = np.zeros((len(all_labels), len(all_labels)))
+            full[np.ix_(present, present)] = block
+            covariance += combine[0] @ full @ combine[0].T
+        else:
+            covariance[np.ix_(present, present)] += block
+    print(f"{ndata} data points ({', '.join(options.stats)}), {nreal} realizations")
+
+    theory = theories[0] if len(theories) == 1 else JointTheory(theories)
+    fixed = parse_fixed(options.fix)
+    nparams = len([n for n in get_params(theory).select(varied=True, derived=False).names() if n not in fixed])
+    m1 = 1.0 if options.no_percival else percival_m1(nsims, ndata, nparams)
+    print(f"Hartlap factor {hartlap_factor(nsims, ndata):.4f} ({nsims} realizations, {ndata} data points); "
+          f"Percival m1 {m1:.4f} for {nparams} parameters", flush=True)
+    likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance * m1)
+    fix_parameters(likelihood, fixed)
+    return dict(likelihood=likelihood, problem=problem, covariance=covariance, nsims=int(nsims), m1=m1,
+                nparams=nparams, ndata=int(ndata), nreal=int(nreal))

@@ -91,7 +91,7 @@ def build(vector, model, volume, template, covariance_path, vary=common.COSMOLOG
 
 def template_shapes(path, ds, marg, calibration="all"):
     """Data-vector shapes S21 d0 and S21 R_l d2 of the template pieces at the calibrated c_l (fiducial cosmology), all
-    l together ('global') or one pair per l ('per_l'), as in fit_rsd.py --s21-layer2-marg."""
+    l together ('global') or one pair per l ('per_l'), as in fit.py --s21-layer2-marg."""
     template = json.loads(Path(path).read_text())
     suffix = "" if calibration == "all" else f"_{calibration}"
     c_l = {int(k): max(v, 0.0) for k, v in template[f"pade_c{suffix}"].items()}
