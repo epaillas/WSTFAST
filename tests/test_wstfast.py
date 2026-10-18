@@ -290,6 +290,8 @@ def test_model_spec_validates_and_reads_legacy_settings():
     spec = ModelSpec.from_settings(legacy)
     assert spec == ModelSpec(tracer="biased", ir=True, fog=True, ap_order=3, cubic=True)
     assert ModelSpec.from_settings({"model": spec.to_dict()}) == spec
-    for bad in (dict(tracer="matter", cubic=True), dict(ap_order=2), dict(ap_order=9, fog=True), dict(tracer="halo")):
+    assert ModelSpec.matter(space="real").space == "real"
+    for bad in (dict(tracer="matter", cubic=True), dict(ap_order=2), dict(ap_order=9, fog=True), dict(tracer="halo"),
+                dict(space="real", fog=True), dict(space="real", fog=True, ap_order=1), dict(space="flat")):
         with pytest.raises(ValueError):
             ModelSpec(**bad)

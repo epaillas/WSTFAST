@@ -8,6 +8,7 @@
   coefficients: the pure model code, without the emulator. Also to round-off.
 - ``real``: the real-space matter WSTMatterBasis at the Quijote cosmology and its Assembly at fixed nuisances, the
   reference the f = 0 limit is compared with in step 3 (agreement within the measurement errors, not round-off).
+  ``test_real_space_is_the_f0_limit`` checks the f = 0 limit of the redshift-space basis against it.
 - ``matter_rsd``: the redshift-space MATTER classes (RSDS1Basis cumulants, RSDS21mBasis, the tracer="matter"
   theories), frozen before step 2 deleted them, on the small configurations of test_bias.py: the matter limit of the
   biased code (beta = (1, 1, 0, 0, 0), no shot noise) must reproduce them. Not regenerable from this file.
@@ -238,6 +239,65 @@ def test_real_space_matter_outputs():
     assert current["labels"].tolist() == reference["labels"].tolist()
     for key in ("s1_terms", "s21_terms", "prediction"):
         np.testing.assert_allclose(current[key], reference[key], rtol=RTOL, atol=1e-300, err_msg=key)
+
+
+def real_space_s1(labels, shotnoise=REAL_SHOTNOISE, cs2=REAL_NUISANCE["cs2"], q=0.8):
+    """The real-space limit (``space="real"``: f = 0, matter) of the redshift-space basis at the Quijote cosmology,
+    m-summed for the coefficients ``labels``: the |m| block variances lambda_M and Edgeworth factors E_M of every
+    coefficient, and S1 = (2 lambda)^{q/2} Gamma((n + q) / 2) / Gamma(n / 2) (1 + E) of the multiplet (n = 2l + 1),
+    with lambda and E the multiplicity-weighted means over the blocks (equal when the field is isotropic)."""
+    from desilike import build
+    from scipy.special import gammaln
+
+    from wstfast.calculators import RSDBasis, basis_rows, build_cosmology, tracer_cumulants, tracer_grid
+    from wstfast.data import load_measurement
+    from wstfast.theory.bias import MATTER_BETA
+    from wstfast.theory.first_layer import multiplicity
+    from wstfast.theory.spectrum import S1mProjection, SpectrumGrid
+
+    config = load_measurement(sorted((REAL_DATA / "real").glob("wst_r*.npz"))[0], q=q)["config"]
+    coefficients = _coefficients(config, labels)
+    kmax = 0.4
+    basis = RSDBasis(cosmo=build_cosmology(()), config=config, coefficients=coefficients, kmax=kmax, tracer="matter",
+                     space="real")
+    keys = ("grid_terms", "kappa", "skewness2", "s21m_terms", "dlogA")
+    out = build(basis, output=lambda: {key: getattr(basis, key) for key in keys})({})
+    rows, kappa, skewness, _ = basis_rows(type("Basis", (), out)())
+    projection = S1mProjection(config, coefficients, SpectrumGrid(kmax=kmax))
+    beta = np.asarray(MATTER_BETA)
+    full, tree = tracer_grid(rows, beta, (cs2, 0.0, 0.0), projection.k2mu2, shotnoise, 0.0)
+    lam = np.asarray(projection.matrix @ np.asarray(full).ravel() + shotnoise * projection.shot)
+    lin = np.asarray(projection.matrix @ np.asarray(tree).ravel() + shotnoise * projection.shot)
+    kappa, skew2 = (np.asarray(x) for x in tracer_cumulants(kappa, skewness, beta, shotnoise))
+    blocks, edgeworth, s1, start = [], [], [], 0
+    for i, c in enumerate(coefficients):
+        nb, n, w = c.ell + 1, 2 * c.ell + 1, multiplicity(c.ell)
+        lm, ll = lam[start:start + nb], lin[start:start + nb]
+        start += nb
+        e_block = q * (q - 2) * kappa[i, :nb] / (8 * w * (w + 2) * ll**2)
+        e = np.sum(w * e_block) / n
+        if c.ell == 0:
+            e = e + q * (q - 2) * (q - 4) * skew2[i] / ll[0] ** 3 / (72 * 15)
+        blocks.append(lm)
+        edgeworth.append(e_block)
+        s1.append((2 * np.sum(w * lm) / n) ** (q / 2) * np.exp(gammaln((n + q) / 2) - gammaln(n / 2)) * (1 + e))
+    return blocks, edgeworth, np.array(s1)
+
+
+@pytest.mark.slow
+def test_real_space_is_the_f0_limit():
+    """At f = 0 the |m| blocks share one variance (up to the cubic lattice) and one Edgeworth factor (up to the Monte
+    Carlo error of the cumulants), and the m-summed S1 equals the old real-space model (frozen in the ``real``
+    fixture, cs2 = 0.5) to 2e-3: lattice sums against continuum integrals and the one-loop code (docs/refactor_plan.md,
+    step 3: <= 0.05 sigma of one box at sigma >= 25 Mpc/h)."""
+    reference = _reference("real")
+    labels = [f"S1_j{j}_l{ell}" for j in (6, 7, 8, 9) for ell in (0, 1, 2, 4)]
+    blocks, edgeworth, s1 = real_space_s1(labels)
+    for lam, e in zip(blocks, edgeworth):
+        assert np.ptp(lam) / lam.mean() < 1e-4
+        assert np.ptp(e) < 3e-3
+    old = np.array([reference["prediction"][reference["labels"].tolist().index(label)] for label in labels])
+    np.testing.assert_allclose(s1, old, rtol=2e-3)
 
 
 @pytest.mark.slow

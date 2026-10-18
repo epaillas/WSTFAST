@@ -104,8 +104,8 @@ class ModelSpec:
             raise ValueError(f"unknown tracer {self.tracer!r}")
         if self.space not in ("redshift", "real"):
             raise ValueError(f"unknown space {self.space!r}")
-        if self.space == "real":
-            raise NotImplementedError("real space (the f = 0 limit) is not implemented yet (docs/refactor_plan.md, step 3)")
+        if self.space == "real" and (self.fog or self.ap_order):
+            raise ValueError("real space (f = 0) has no Fingers-of-God or AP terms")
         if self.cubic and self.tracer == "matter":
             raise ValueError("cubic biases need tracer='biased' (they vanish for matter)")
         if not 0 <= int(self.ap_order) <= MAX_AP_ORDER:

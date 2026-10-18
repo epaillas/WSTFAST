@@ -217,13 +217,26 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    classes were frozen as `tests/fixtures/regression_matter_rsd.npz` before deletion. The matter limit reproduces
    them: cumulants and S21m terms to 1e-10, and the P_l + S1m + S21m theories with `tracer="matter"` to 1e-8. A
    matter emulator of the new layout is trained only when a matter fit is needed.
-3. **Real space as f = 0.** Add `space="real"` to the basis and the f = 0 parameter fixing. Gates:
-   - S1m blocks at f = 0 are degenerate in |m| (same lambda) to 1e-10;
-   - at f = 0, the m-summed S1 built from the common block variance (the chi moment with n = 2l + 1, plus the
-     isotropic Edgeworth factor; `s1_rsd` no longer exists) agrees with the old `WSTMatterBasis` S1 to well under the
-     868-box error bar (`tests/fixtures/regression_real.npz`). Expected differences: lattice sums against continuum
-     integrals, and `eft_loop` against `OneLoopMatter`. Quantify them and record them in this file;
-   - the connected noise at f = 0 against the old `ModulusNoise` dN.
+3. **Real space as f = 0.** *Done 2026-10-18.* `ModelSpec(space="real")` (no FoG, no AP). `RSDBasis(space="real")`
+   evaluates the basis at f = 0, and the theories take `space="real"` (`calculators.real_space_limit`: c2, c4 and
+   alpha2 fixed at 0; AP, FoG and ck4 refused). Gates, on the 35 S1 coefficients with sigma >= 17.7 Mpc/h, l = 0-6, at
+   the Quijote cosmology (matter, cs2 = 0.5):
+   - **Blocks:** at f = 0 the |m| block variances of a coefficient agree to <= 7e-5 (relative; l = 1 to 1e-9). The
+     residual is the cubic lattice, which the measurement shares. The block Edgeworth factors E_M agree to <= 3e-3,
+     the Monte Carlo error of the 2^16-point cumulants. (The 1e-10 first planned holds only in the continuum.)
+   - **Against the old real-space S1:** the m-summed S1 from the f = 0 blocks equals the old `WSTMatterBasis` S1
+     (`regression_real.npz`) to <= 2e-3. That is <= 0.05 sigma of one 1 (Gpc/h)^3 box at sigma >= 25 Mpc/h (<= 0.4
+     sigma at the 60 (Gpc/h)^3 of the fits), and <= 0.13 box sigma at 17.7 Mpc/h (l = 6). The largest relative
+     difference, at sigma = 70.7 Mpc/h and l = 0, is the lattice sum at low k, and there the new model is closer to
+     the 868-box mean (-0.017 against +0.028 box sigma). `test_real_space_is_the_f0_limit` checks this on 16
+     coefficients.
+   - **Connected noise:** the f = 0 limit of `connected_noise_rsd` against the old `ModulusNoise` was already a
+     test (`test_real_space_matter_limit`, to 2-3e-3). Its reference module goes in step 6, so freeze it as a fixture
+     there.
+
+   Real-space fits still need a real-space emulator (`train_emulator.py --stat rsd --space real`) and the line-of-sight
+   resolved real-space boxes (D1). The data subdirectories are named `real` / `rsd` while `ModelSpec.space` uses
+   `real` / `redshift`; reconcile them in step 4.
 4. **Calculators and inference.** Build the single `Basis`, `PowerTheory` / `S1Theory` / `S21Theory`,
    `NuisanceParameters` and `inference.build_likelihood`. Turn `fit_rsd.py` into the thin `fit.py`. Prune the
    options listed in section 2. Gate: the halo baseline chain reproduces the paper posterior (same emulator,

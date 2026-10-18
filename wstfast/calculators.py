@@ -240,21 +240,22 @@ class RSDBasis(Calculator):
     of the P_s grid), ``kappa`` and ``skewness2`` (the per-block cumulants of the S1m blocks of ``coefficients``),
     ``s21m_terms`` (the S21m terms of every entry of ``s21_coefficients``) and ``dlogA``. With ``ir``, the grid is BAO
     IR-resummed. Rows are rescaled by powers of A_s / POWER_AMPLITUDE (``layout.amplitude_scalings``) so that a Taylor
-    emulator is nearly exact in logA. ``tracer`` is recorded only (emulator metadata). NumPy (pure_callback).
+    emulator is nearly exact in logA. ``tracer`` is recorded only (emulator metadata). ``space="real"`` evaluates the
+    basis at f = 0 (``ModelSpec``). NumPy (pure_callback).
     """
 
     _is_external = True
 
     def __init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                 s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
+                 s21_coefficients=(), tracer: str = "matter", space: str = "redshift", s21_damping: float | None = None,
                  cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0,
                  s21_projected: bool = True, ap_order: int = 0):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
-                      s21_coefficients=(), tracer: str = "matter", s21_damping: float | None = None,
+                      s21_coefficients=(), tracer: str = "matter", space: str = "redshift", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
                       s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0):
         from .theory.first_layer import S1mBasis
@@ -262,7 +263,7 @@ class RSDBasis(Calculator):
         from .theory.spectrum import SpectrumGrid
 
         #: What the basis includes (validated there); the keyword arguments below are its fields.
-        self.spec = ModelSpec(tracer=tracer, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
+        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
         self.z, self.tracer = float(z), tracer
         #: The kappa columns also hold the trispectrum of the cubic operators (``layout.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
@@ -310,6 +311,8 @@ class RSDBasis(Calculator):
         pk = np.asarray(self.cosmo.get("fourier.pk", of="delta_cb", z=self.z, k=self.klin))
         f = float(self.cosmo.get("fourier.sigma8_z", of="theta_cb", z=self.z)
                   / self.cosmo.get("fourier.sigma8_z", of="delta_cb", z=self.z))
+        if self.spec.space == "real":  # the f = 0 limit: no redshift-space distortions
+            f = 0.0
         ratio = float(self.cosmo.get("params.A_s")) / POWER_AMPLITUDE
         h, r_bao = float(self.cosmo.get("params.h")), float(self.cosmo.get("thermodynamics.rs_drag"))
         from .theory.layout import AP_TERMS, amplitude_scalings, s21m_field_powers
@@ -612,6 +615,21 @@ def _k2_stochastic(enabled):
                                   ref=dict(dist="norm", loc=0.0, scale=1.0), latex=r"\alpha_{k^2}")}
 
 
+def real_space_limit(theory, space: str):
+    """Fix the parameters of ``theory`` that vanish in real space (``space="real"``, the f = 0 limit): the mu^2 and mu^4
+    counterterms and the k^2 mu^2 stochastic term. Real space has no Fingers-of-God, AP or k^4 mu^4 counterterm."""
+    if space not in ("redshift", "real"):
+        raise ValueError(f"unknown space {space!r}")
+    if space == "redshift":
+        return
+    if getattr(theory, "ap", None) is not None or getattr(theory, "fog_params", None) or getattr(theory, "k4_params", None):
+        raise ValueError("real space has no AP, Fingers-of-God or k^4 mu^4 counterterm")
+    for name in ("c2", "c4"):
+        if name in theory.counterterms:
+            theory.counterterms[name].update(value=0.0, fixed=True)
+    theory.bias_params["alpha2"].update(value=0.0, fixed=True)
+
+
 def _rsd_counterterms(prefix, latex):
     return {name: Parameter(f"{name}{prefix}", value=0.0, prior=dict(limits=[-100.0, 100.0]),
                             ref=dict(dist="norm", loc=0.0, scale=2.0), latex=rf"{label}{latex}")
@@ -642,7 +660,7 @@ class RSDPowerTheory(Calculator):
     Biases and stochastic terms: ``BiasParameters`` (fixed at the matter limit with ``tracer="matter"``).
     """
 
-    def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
+    def __init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter", space: str = "redshift",
                  shared_counterterms: bool = False, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.basis = basis
         self.k2_params = _k2_stochastic(k2_stochastic)
@@ -653,8 +671,9 @@ class RSDPowerTheory(Calculator):
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
         self.bias_params = BiasParameters(tracer=tracer).params
+        real_space_limit(self, space)
 
-    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter",
+    def __post_init__(self, projection, basis=None, shotnoise: float = 0.0, ap=None, tracer: str = "matter", space: str = "redshift",
                       shared_counterterms: bool = False, k4_counterterm: bool = False, k2_stochastic: bool = False):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.k2mu2 = jnp.asarray(projection.k2mu2)
@@ -715,7 +734,7 @@ class S1mTheory(Calculator):
     """
 
     def __init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                 cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
+                 cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter", space: str = "redshift",
                  sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False, cubic_biases: str | None = None,
                  kappa_shot: bool = False, fog: str | None = None, window=None):
         self.basis = basis
@@ -727,9 +746,10 @@ class S1mTheory(Calculator):
         self.ap = ap
         self.ap_params = ap.params if ap is not None else {}
         self.ng_params = _ng_amplitudes(ng_amplitude, coefficients)
+        real_space_limit(self, space)
 
     def __post_init__(self, projection, coefficients, q: float = 0.8, basis=None, shotnoise: float = 0.0,
-                      cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter",
+                      cumulant_index=None, correction=None, ng_amplitude=False, ap=None, tracer: str = "matter", space: str = "redshift",
                       sigmas=None, k4_counterterm: bool = False, k2_stochastic: bool = False,
                       cubic_biases: str | None = None, kappa_shot: bool = False, fog: str | None = None, window=None):
         self.projection, self.shotnoise = projection, float(shotnoise)
@@ -840,7 +860,7 @@ class S21mTheory(Calculator):
     """
 
     def __init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
-                 cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
+                 cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", space: str = "redshift", bispectrum_shot: bool = False,
                  noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                  k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                  k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,
@@ -914,9 +934,10 @@ class S21mTheory(Calculator):
             self.noise, self.white_params = {}, {}
             basis_params = get_params(basis)
             self.calibration_params = {str(name): basis_params[str(name)] for name in noise_calibration["params"]}
+        real_space_limit(self, space)
 
     def __post_init__(self, projection, coefficients, first_layer, q: float = 0.8, basis=None, entry_index=None,
-                      cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", bispectrum_shot: bool = False,
+                      cumulant_index=None, shotnoise: float = 0.0, tracer: str = "matter", space: str = "redshift", bispectrum_shot: bool = False,
                       noise_shot: bool = False, full_norm: bool = False, response_amplitude: bool = False,
                       k2_stochastic: bool = False, white_noise: bool = False, config: WSTConfig | None = None,
                       k2_noise: bool = False, noise_correction=None, connected_amplitude: bool = False,

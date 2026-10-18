@@ -121,11 +121,12 @@ def train_rsd(args):
     (counterterms at zero) and S21m (noise amplitudes at zero) against the exact basis at random points."""
     from wstfast.theory.spectrum import MultipoleProjection, S1mProjection, SpectrumGrid
 
+    subdir = "real" if args.space == "real" else "rsd"  # the measurement subdirectory of the space
     if args.config is not None:  # survey: no box measurements; the settings come from the options
         config = wstfast.WSTConfig(**args.config)
         meta = dict(redshift=args.redshift)
     else:
-        first = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0]
+        first = sorted((args.data_dir / subdir).glob("wst_r*.npz"))[0]
         measurement = load_measurement(first, q=0.8 if args.q is None else args.q)
         config, meta = measurement["config"], measurement["metadata"]
     lattice = dict(boxsize=args.lattice[0], nmesh=int(args.lattice[1]))
@@ -147,6 +148,7 @@ def train_rsd(args):
                     s21_projected=not args.s21_unprojected, ap_order=args.ap_order)
     basis = RSDBasis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
                      z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
+                     space=args.space,
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
                      s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected,
                      ap_order=args.ap_order)
@@ -171,8 +173,8 @@ def train_rsd(args):
         kfund = 2 * np.pi / lattice["boxsize"]
         edges = np.arange(0.5, 0.2 / (2 * kfund) + 1.0, 1.0) * 2 * kfund  # bins of two fundamental modes to 0.2
     else:
-        s1m = load_s1m_dataset(args.data_dir, "rsd", coefficients, q=config.q)
-        power = load_power_dataset(args.data_dir, "rsd", kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files,
+        s1m = load_s1m_dataset(args.data_dir, subdir, coefficients, q=config.q)
+        power = load_power_dataset(args.data_dir, subdir, kmax=min(args.kmax, 0.2), rebin=2, files=s1m.files,
                                    ells=(0, 2, 4))
         shotnoise, edges = s1m.shotnoise, power.edges
     grid = SpectrumGrid(kmax=args.kmax)  # the same grid as the basis
@@ -231,7 +233,10 @@ def main():
                         help="rsd, biased tracer: velocity damping of the S21m modulus spectra in units of the linear "
                              "sigma_v (default: the matter value 2; 1 for halos)")
     parser.add_argument("--tracer", choices=("matter", "biased"), default="matter",
-                        help="rsd: biased-tracer basis (bias-monomial coefficients; wstfast.theory.rsd_bias)")
+                        help="rsd: tracer of the theories the basis is for (the basis is the same; wstfast.config.ModelSpec)")
+    parser.add_argument("--space", choices=("redshift", "real"), default=None,
+                        help="rsd: redshift (default) or real space, the basis at f = 0 (measurements in the real/ "
+                             "subdirectory); wst, pk: real only (the default)")
     parser.add_argument("--cubic-biases", action="store_true",
                         help="rsd, biased tracer: also emulate the S1m trispectrum of the cubic operators b3, bG3, bdG2")
     parser.add_argument("--fog", action="store_true",
@@ -260,7 +265,6 @@ def main():
                              "projected lambda_2, so that the projection (and AP) is applied at assembly")
     parser.add_argument("--fiducial", choices=("quijote", "abacus"), default="quijote",
                         help="fiducial (expansion point and fixed parameters); abacus = AbacusSummit c000")
-    parser.add_argument("--space", choices=("real",), default="real", help="the model is real-space only for now")
     parser.add_argument("--q", type=float, default=None, help="WST exponent (default: the measurement's first q)")
     parser.add_argument("--vary", nargs="+", default=["omega_cdm", "logA"], choices=sorted(QUIJOTE_COSMOLOGY))
     parser.add_argument("--bounds", type=json.loads, default={}, help='JSON overrides, e.g. \'{"logA": [2.9, 3.2]}\'')
@@ -276,6 +280,10 @@ def main():
     parser.add_argument("--output", type=Path, default=None,
                         help="default: outputs/emulators/wst_basis_taylor.h5 or outputs/emulators/pk_taylor.h5")
     args = parser.parse_args()
+    if args.space is None:
+        args.space = "redshift" if args.stat == "rsd" else "real"
+    if args.stat != "rsd" and args.space != "real":
+        raise SystemExit(f"--stat {args.stat} is a real-space model")
     setup_logging()
     if args.output is None:
         args.output = Path(f"outputs/emulators/{dict(wst='wst_basis', pk='pk', rsd='rsd_basis' if args.tracer == 'matter' else 'rsd_biased_basis')[args.stat]}_taylor.h5")
