@@ -713,7 +713,12 @@ variance level.**
   tree spectrum (the second layer's) differs from the one-loop one by up to 1.5% (0.8% rms). `_chi_moment` now uses
   12 nodes (exact to 1e-9 at the DR1 eigenvalue ratios); 80 cells per bin are kept (40 would add a 0.085% per-block
   sampling pattern, 0.3-0.5σ per block on the 25-mock mean). The chains run on a Perlmutter GPU node instead
-  (JAX 0.9.1 on A100s in cosmodesi): fit inputs synced to outputs/ there.
+  (JAX 0.9.1 on A100s in cosmodesi): fit inputs synced to outputs/ there. **Measured:** the full joint log-posterior
+  gradient on the Mac is 26 ms with the exact window vs 5.7 ms with the histogram (4.6x, not 20x; 11 vs 1.9 ms for
+  the value); the factor alone is 10.6 ms per cap at 12 nodes (1.0 ms on an A100), but the chain's warmup on the
+  A100 took 503 s against 31 s on the Mac (the rest of the likelihood is many small ops), so the GPU is a net loss
+  and the chains run on the Mac (joint and NGC side by side, `scratchpad/mac_chain.sh`). The slow checkpoints are
+  the sampler's tree depth on the 25x-tightened posterior, not the window.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
