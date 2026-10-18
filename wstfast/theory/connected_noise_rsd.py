@@ -19,7 +19,7 @@ including the cubic operators (b3, bG3, bdG2) that the power spectrum does not s
 velocity-damped on every leg, D(k) = exp(-(f k mu sigma_v)^2 / 2), the Poisson parts are not (as rsd_bias.py).
 
 The terms are evaluated at fixed biases (no monomial expansion), on nodes in u = sigma K and mu_K, with scrambled
-Sobol points importance-sampled on the filters (modulus_noise.LegSampler). The Z kernels depend on directions only,
+Sobol points importance-sampled on the filters (rsd.LegSampler). The Z kernels depend on directions only,
 so for a given (l, u, mu_K) they are shared by every sigma and |m|.
 
 With ``fog=True``, every term also comes with its first-order Fingers-of-God counterterm (``<name>_fog``): the tree
@@ -34,7 +34,7 @@ import numpy as np
 from scipy.special import sph_harm_y
 
 from .bias import cubic_kernel, galaxy_kernel
-from .modulus_noise import LegSampler
+from .rsd import LegSampler
 from .rsd_bias import linear_components
 
 #: Reference wavenumber [h/Mpc] of the Fingers-of-God counterterm of the connected correlators.

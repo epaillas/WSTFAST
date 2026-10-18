@@ -192,8 +192,13 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    - one non-emulated `RSDBasis(tracer="biased", fog=True, ap_order=3)` evaluation.
 
    Save them as regression fixtures in `tests/fixtures/`. Steps 1-4 must reproduce the halo ones to 1e-10.
-1. **Kernels and helpers.** Move all kernels into `eft_loop.py` / `bias.py`. Keep one `wavelet_weight` and one
-   real-harmonics implementation. Pure moves; the fixtures must be unchanged.
+1. **Kernels and helpers.** *Done 2026-10-18, smaller than first planned.* `connected_noise_rsd` already used the
+   `bias.py` kernels. The remaining duplicate kernels (`perturbation.f2_kernel`, `cumulants._f2/_g2/_f3`) and helpers
+   (`wavelet_weight`, `legendre`, `log_weights`) live only in real-space modules that step 6 deletes, so they were
+   not moved. What was done: the surviving stack no longer imports from those modules (`LegSampler` moved to
+   `rsd.py`), `rsd_moduli._harmonic` is replaced by `rsd.spherical_harmonic`, and `covariance.real_harmonics` by
+   `measure.real_harmonics`. The fixtures are unchanged. Still depending on real-space modules:
+   `covariance.py` (`cross_noise`, `ShellCovariance`: the real-space covariance, replaced in step 3/6).
 2. **Collapse matter into biased in redshift space.** Make the `Biased*` classes the only implementation (folded
    into `spectrum.py` / `first_layer.py` / `second_layer.py`). Delete `RSDGrid` / `RSDS1Basis` / `RSDS21mBasis`
    as separate code paths and the `tracer=` branches in `RSDBasis` and the theories. Add `layout.py` and

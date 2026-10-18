@@ -24,7 +24,8 @@ from wstfast.config import QUIJOTE_COSMOLOGY, select_coefficients
 from wstfast.data import load_measurement
 from wstfast.theory.bias import galaxy_kernel, monomial_product, monomials, product_coefficients
 from wstfast.theory.rsd_bias import BiasedModulusSpectraRSD, linear_components, split
-from wstfast.theory.rsd_moduli import SIGMA_V_FACTOR, _harmonic, first_layer_fields
+from wstfast.theory.rsd import spherical_harmonic
+from wstfast.theory.rsd_moduli import SIGMA_V_FACTOR, first_layer_fields
 
 
 def model(fields, kvals, f, klin, pklin, beta, noise, sigma_v_factor=SIGMA_V_FACTOR, c_v=None):

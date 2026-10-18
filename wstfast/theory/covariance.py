@@ -37,8 +37,8 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.fft as sfft
 from numpy.polynomial.legendre import leggauss
-from scipy.special import sph_harm_y
 
+from ..measure import real_harmonics
 from .moduli import legendre
 from .perturbation import log_weights
 
@@ -157,17 +157,6 @@ class ShellCovariance:
         self.lncov = self.delta_part + self.u_part
 
 
-def real_harmonics(ell, theta, phi):
-    """Real spherical harmonics of degree l (m = -l..l), scaled so that sum_m Y^2 = 1 (as ``measure.Lattice``)."""
-    norm = np.sqrt(4 * np.pi / (2 * ell + 1))
-    out = []
-    for m in range(-ell, ell + 1):
-        y = sph_harm_y(ell, abs(m), theta, phi)
-        y = y.real if m == 0 else np.sqrt(2) * (-1) ** m * (y.real if m > 0 else y.imag)
-        out.append(norm * y)
-    return np.array(out)
-
-
 #: Mesh sizes of the 4th-chaos lattices (few distinct sizes: the harmonics are computed once per size and l).
 MESHES = (32, 48, 64, 80, 96, 128, 160, 192, 256)
 
@@ -197,7 +186,7 @@ class HalfLattice:
     def harmonics(self, ell):
         """Real Y_l^m for m = -l..l with sum_m Y^2 = 1, shape (2l + 1, n, n, n // 2 + 1), in ``dtype``."""
         if ell not in self._harmonics:
-            self._harmonics[ell] = real_harmonics(ell, self.theta, self.phi).astype(self.dtype)
+            self._harmonics[ell] = np.array(real_harmonics(ell, self.theta, self.phi)).astype(self.dtype)
         return self._harmonics[ell]
 
     def radial(self, sigma, ell):

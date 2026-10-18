@@ -32,7 +32,8 @@ import numpy as np
 from .bias import galaxy_kernel
 from .covariance import HalfLattice, chaos_covariances, components
 from .rsd_bias import linear_components
-from .rsd_moduli import ModulusSpectraRSD, _harmonic
+from .rsd import spherical_harmonic
+from .rsd_moduli import ModulusSpectraRSD
 
 
 class ModulusCrossRSD(ModulusSpectraRSD):
@@ -76,7 +77,7 @@ class ModulusCrossRSD(ModulusSpectraRSD):
                 cache, kern = {}, []
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
-                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(_harmonic(ell, m, qvec)))
+                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(spherical_harmonic(ell, m, qvec)))
                     kern.append(kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * cache[ell, m])
                 kern = np.array(kern)  # (nf, np)
                 r[:, i, a] = (kern @ (w * long) / 2 + N * z1k * (kern @ w) / 2) / norms

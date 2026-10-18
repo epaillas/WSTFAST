@@ -51,6 +51,7 @@ from scipy.special import gammaln
 
 from ..config import WSTConfig
 from .eft_loop import matter_kernel
+from .rsd import spherical_harmonic
 
 #: Effective velocity dispersion of the modulus spectra, in units of the linear sigma_v.
 SIGMA_V_FACTOR = 2.0
@@ -67,12 +68,6 @@ def s21m_entries(coefficients):
 def first_layer_fields(coefficients):
     """Sorted first-layer fields (j1, l, |m1|) of the S21 ``coefficients``."""
     return sorted({(c.j, c.ell, m1) for c in coefficients for m1 in range(c.ell + 1)})
-
-
-def _harmonic(ell, m, vec):
-    from .rsd import spherical_harmonic
-
-    return spherical_harmonic(ell, m, vec)
 
 
 class ModulusSpectraRSD:
@@ -100,7 +95,7 @@ class ModulusSpectraRSD:
         self.mup = X.ravel()
         self.weights = ((p**3 * np.gradient(np.log(p)))[:, None, None] * wx[None, :, None]
                         * (2 * np.pi / nphi) / (2 * np.pi) ** 3 * np.ones_like(P)).ravel()
-        self.harmonics = {(ell, m): _harmonic(ell, m, self.pvec) for _, ell, m in self.fields}
+        self.harmonics = {(ell, m): spherical_harmonic(ell, m, self.pvec) for _, ell, m in self.fields}
 
     def window(self, k):
         """Mass-assignment window of a first-layer leg of wavenumber ``k`` (1 without ``cellsize``)."""
@@ -138,7 +133,7 @@ class ModulusSpectraRSD:
                 cache = {}
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
-                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(_harmonic(ell, m, qvec)))
+                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(spherical_harmonic(ell, m, qvec)))
                     kernel = (kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * self.window(qn)
                               * cache[ell, m])
                     r = np.sum(long * kernel) / (2 * norms[index])

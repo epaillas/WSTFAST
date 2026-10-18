@@ -164,7 +164,7 @@ def test_tree_trispectrum_is_symmetric_and_f3_conserves_momentum():
 def test_leg_sampler_integrates_gaussian():
     import jax.numpy as jnp
 
-    from wstfast.theory.modulus_noise import LegSampler
+    from wstfast.theory.rsd import LegSampler
 
     # Legs u1, u2, u1 + u2 - U, u1, u2: the integrand exp(-sum |leg|^2 / 2) = exp(-(v.M v - 2 b.v + U^2) / 2)
     # per Cartesian component, with M = [[3, 1], [1, 3]] and b = (U, U) for the z component only.
@@ -263,7 +263,8 @@ def test_ap_projection_matches_fixed_matrix_and_remaps_modes():
 
 def test_block_pair_kernels_sum_to_isotropic_kernel():
     from wstfast.theory.moduli import legendre
-    from wstfast.theory.rsd_moduli import _harmonic, s21m_entries
+    from wstfast.theory.rsd import spherical_harmonic
+    from wstfast.theory.rsd_moduli import s21m_entries
     from wstfast.config import Coefficient
 
     rng = np.random.default_rng(3)
@@ -271,7 +272,7 @@ def test_block_pair_kernels_sum_to_isotropic_kernel():
     cos = np.sum(p * q, axis=1) / np.linalg.norm(p, axis=1) / np.linalg.norm(q, axis=1)
     for ell in (1, 2, 3, 4):
         blocks = sum(4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
-                     * np.real(_harmonic(ell, m, p) * np.conj(_harmonic(ell, m, q))) for m in range(ell + 1))
+                     * np.real(spherical_harmonic(ell, m, p) * np.conj(spherical_harmonic(ell, m, q))) for m in range(ell + 1))
         np.testing.assert_allclose(blocks, np.asarray(legendre(ell, cos)), atol=1e-12)
     entries = s21m_entries([Coefficient("S21", 2, 5, 9), Coefficient("S21", 1, 6, 9)])
     assert len(entries) == 9 + 4 and entries[0] == (0, 0, 0) and entries[-1] == (1, 1, 1)

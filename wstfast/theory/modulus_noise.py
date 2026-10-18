@@ -29,13 +29,12 @@ the filters omit the mass-assignment window.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.stats import norm, qmc
 
 from .cumulants import _EPS, ZeroLagCumulants, _dot, _f2, tree_trispectrum
 from .moduli import ModulusClustering, legendre
+from .rsd import LegSampler
 
 #: Nodes in u = sigma K; the second layer of a pair with sigma_j2 >= 2 sigma_j1 probes u <~ 3.
 UNODES = np.array([0.02, 0.1, 0.25, 0.45, 0.7, 0.95, 1.2, 1.5, 1.8, 2.2, 2.6, 3.0])
@@ -46,39 +45,6 @@ def tree_bispectrum(k1, k2, k3, pk):
     power = [pk(jnp.sqrt(jnp.maximum(_dot(x, x), _EPS))) for x in (k1, k2, k3)]
     return 2 * (_f2(k1, k2) * power[0] * power[1] + _f2(k2, k3) * power[1] * power[2]
                 + _f2(k3, k1) * power[2] * power[0])
-
-
-class LegSampler:
-    """Quasi-Monte Carlo points for int prod_i d^3u_i / (2 pi)^3 f(legs), with legs = A v + c U zhat.
-
-    v holds the free vectors; the points are Gaussian, matched to exp(-sum_legs |leg|^2 / 2) and widened by
-    ``scale2`` for the (sigma k)^l factors of the filters.
-    """
-
-    def __init__(self, A, c, scale2, npoints, seed):
-        self.A, self.c = np.asarray(A, "f8"), np.asarray(c, "f8")
-        nfree = self.A.shape[1]
-        precision = self.A.T @ self.A
-        covariance = np.linalg.inv(precision) * scale2
-        self.mean = -np.linalg.solve(precision, self.A.T @ self.c)  # per unit U, along z
-        z = norm.ppf(qmc.Sobol(d=3 * nfree, scramble=True, seed=seed).random(npoints)).reshape(npoints, nfree, 3)
-        self.dv = np.einsum("ij,njc->nic", np.linalg.cholesky(covariance), z)
-        quad = np.einsum("nic,ij,njc->n", self.dv, np.linalg.inv(covariance), self.dv)
-        log_density = -0.5 * quad - 1.5 * nfree * np.log(2 * np.pi) - 1.5 * np.linalg.slogdet(covariance)[1]
-        self.weights = np.exp(-log_density) / npoints / (2 * np.pi) ** (3 * nfree)
-        self.nfree = nfree
-
-    def legs(self, unode):
-        zhat = jnp.array([0.0, 0.0, 1.0])
-        v = jnp.asarray(self.dv) + jnp.asarray(self.mean)[None, :, None] * unode * zhat
-        A, c = jnp.asarray(self.A), jnp.asarray(self.c)
-        return [jnp.einsum("j,njc->nc", A[i], v) + c[i] * unode * zhat for i in range(A.shape[0])]
-
-    def integrate(self, integrand, unodes, sigma):
-        """int prod d^3k_i / (2 pi)^3 of integrand(legs) at every node, with k = u / sigma."""
-        def one(unode):
-            return jnp.sum(jnp.asarray(self.weights) * integrand(self.legs(unode))) / sigma ** (3 * self.nfree)
-        return jax.lax.map(one, jnp.asarray(unodes))
 
 
 class ModulusNoise:

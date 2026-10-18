@@ -46,15 +46,48 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.polynomial.legendre import leggauss
 from scipy.special import gammaln, sph_harm_y
+from scipy.stats import norm, qmc
 
 from ..config import WSTConfig
 from .eft_loop import LinearSpectrum, Quadrature, loop_integrals, matter_kernel
-from .modulus_noise import LegSampler
 
 #: Columns of each |m| block: linear, one-loop, counterterms mu^0, mu^2, mu^4 (k^2 P_L) and shot noise.
 BLOCK_TERMS = ("linear", "loop", "ct0", "ct2", "ct4", "shotnoise")
 
 _T = np.exp(np.linspace(-25.0, 25.0, 1501))  # t * mean(lambda) grid of the moment integrals
+
+
+class LegSampler:
+    """Quasi-Monte Carlo points for int prod_i d^3u_i / (2 pi)^3 f(legs), with legs = A v + c U zhat.
+
+    v holds the free vectors; the points are Gaussian, matched to exp(-sum_legs |leg|^2 / 2) and widened by
+    ``scale2`` for the (sigma k)^l factors of the filters.
+    """
+
+    def __init__(self, A, c, scale2, npoints, seed):
+        self.A, self.c = np.asarray(A, "f8"), np.asarray(c, "f8")
+        nfree = self.A.shape[1]
+        precision = self.A.T @ self.A
+        covariance = np.linalg.inv(precision) * scale2
+        self.mean = -np.linalg.solve(precision, self.A.T @ self.c)  # per unit U, along z
+        z = norm.ppf(qmc.Sobol(d=3 * nfree, scramble=True, seed=seed).random(npoints)).reshape(npoints, nfree, 3)
+        self.dv = np.einsum("ij,njc->nic", np.linalg.cholesky(covariance), z)
+        quad = np.einsum("nic,ij,njc->n", self.dv, np.linalg.inv(covariance), self.dv)
+        log_density = -0.5 * quad - 1.5 * nfree * np.log(2 * np.pi) - 1.5 * np.linalg.slogdet(covariance)[1]
+        self.weights = np.exp(-log_density) / npoints / (2 * np.pi) ** (3 * nfree)
+        self.nfree = nfree
+
+    def legs(self, unode):
+        zhat = jnp.array([0.0, 0.0, 1.0])
+        v = jnp.asarray(self.dv) + jnp.asarray(self.mean)[None, :, None] * unode * zhat
+        A, c = jnp.asarray(self.A), jnp.asarray(self.c)
+        return [jnp.einsum("j,njc->nc", A[i], v) + c[i] * unode * zhat for i in range(A.shape[0])]
+
+    def integrate(self, integrand, unodes, sigma):
+        """int prod d^3k_i / (2 pi)^3 of integrand(legs) at every node, with k = u / sigma."""
+        def one(unode):
+            return jnp.sum(jnp.asarray(self.weights) * integrand(self.legs(unode))) / sigma ** (3 * self.nfree)
+        return jax.lax.map(one, jnp.asarray(unodes))
 
 
 def _laplace(eigenvalues, multiplicities):
