@@ -737,6 +737,11 @@ variance level.**
   h 0.684 ± 0.012 (+0.9σ), b₁ 1.856 ± 0.055, α₀ 0.52 ± 0.22, c_v 0.79 ± 0.18; χ² 233 / 83 at the best fit. This
   is the baseline result of the exact window on the 25-mock mean: h recovered (the histogram window's +3.8σ is
   gone); ω_cdm +1.2σ from SGC. Triangle: `abacus_N25_exactpca_exp_hrecal_GCcomb_triangle.png`.
+- **Paper (2026-10-18, local):** the NGC Abacus chain is in paper/main_v2.tex as the end-to-end test of the footprint
+  subsection (paragraph + Fig. `survey_abacus.pdf`, `scripts/paper/survey.py --abacus`, macros
+  `numbers_survey_abacus.tex`: pulls −0.3 / −0.1 / +0.4σ at 35 (Gpc/h)³, χ² 206/114; the histogram-window NGC
+  profile's h = 0.698 is +1.8σ away), with SGC and the GCcomb combination deferred to the DESI analysis; the section
+  intro, Discussion and Conclusions mention it.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.
