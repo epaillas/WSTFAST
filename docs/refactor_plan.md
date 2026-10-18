@@ -259,7 +259,20 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    Gates: halo fixtures unchanged to 1e-10 through the new command line; matter fixture unchanged; and the end-to-end
    profile of `fit_halo_baseline.sh --volume 60` reproduces `outputs/inference/rsd/fullap_ap_V60` (chi^2 19.253
    against 19.252, best fit equal to the optimizer tolerance).
-5. **Real-space data and fits** (per D1). Measure, train the real-space emulator, rerun the Sec. IV fits and
+5. **Real-space data and fits** (per D1). *In progress (2026-10-18).* The 868 line-of-sight-resolved real-space boxes
+   are measured (`J9_..._los/real`). The real-space emulator `outputs/emulators/real_matter_basis_taylor_4p_ir.h5`
+   (`--space real --tracer matter --ir`, 4 parameters, S1 >= 12.5 Mpc/h, S21 sigma_j1 >= 12.5, ratio 2.8) validates
+   to 3.5e-4 (S1m), 1.4e-3 (S21m) and 6.6e-3 (P_0). First fits (`outputs/inference/real/`, no layer-2 template):
+   - S1m alone is unbiased to V = 64 (<= 0.5 sigma, chi^2 13 for 57 dof);
+   - S1m + S21m with sigma_j1 >= 17.6 is unbiased in 2 parameters (<= 0.8 sigma at V = 64), but chi^2 = 495 for 191 dof
+     at V = 64 (329 with W_j). The residuals are positive in every S21m group, grow with l, and are largest at
+     sigma_j1 = 17.7;
+   - sigma_j1 = 12.5 (the old baseline) fails (+2.9 sigma at V = 8), and so does the 4-parameter conservative fit at
+     V = 60 (n_s +1.3 sigma, chi^2 460);
+   - the missing ingredient is the m-resolved second-layer non-Gaussianity of real-space matter (the old m-summed
+     model had a template; template_rsd.json exists for halos only).
+
+   Original plan for this step: Measure, train the real-space emulator, rerun the Sec. IV fits and
    figures (`scripts/paper/` moves onto the new API), and update the paper text and numbers. This is the only
    step that changes published numbers.
 6. **Delete the old stack.** Remove `model.py`, `perturbation.py`, `cumulants.py`, `moduli.py`,
