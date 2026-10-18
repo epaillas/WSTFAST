@@ -272,6 +272,19 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    - the missing ingredient is the m-resolved second-layer non-Gaussianity of real-space matter (the old m-summed
      model had a template; template_rsd.json exists for halos only).
 
+   With the real-space matter template (`outputs/layer2/template_real.json`, 6c35f33: 100 PT seeds, c_l calibrated on
+   the adjacent pairs, held-out residual 0.17 single-box sigma at j6->j9, 0.4-0.5 at sigma_j1 = 17.7 and ~0.9 at 12.5)
+   plus W_j, i.e. the halo-baseline recipe:
+   - conservative (S1m >= 25 + S21m sigma_j1 >= 17.6, 222 points): chi^2 = 133 for 189 dof at V = 64, with
+     omega_cdm +0.13 sigma and lnA +0.21 sigma (old m-summed conservative: -0.34, +0.39). With 4 parameters at V = 60:
+     omega_cdm -0.7, lnA +0.7, n_s +1.05, h -0.2 sigma, chi^2 126 for 187. Errors at V = 60: sigma(omega_cdm) 0.0038,
+     sigma(lnA) 0.027, sigma(n_s) 0.020, sigma(h) 0.0060, against P_0 (k <= 0.1, same model) 0.0032, 0.028, 0.018,
+     0.0064;
+   - baseline (sigma_j1 >= 12.5, 384 points), template only: unbiased at V = 64 (-0.03, +0.09 sigma) but chi^2 = 780
+     for 339 dof, so sigma_j1 = 12.5 is not described even with the template;
+   - template without W: conservative chi^2 222 at V = 64 (omega_cdm -0.5, lnA +0.56 sigma).
+   Open: which vector becomes the Sec. IV baseline. The paper text is untouched.
+
    Original plan for this step: Measure, train the real-space emulator, rerun the Sec. IV fits and
    figures (`scripts/paper/` moves onto the new API), and update the paper text and numbers. This is the only
    step that changes published numbers.
