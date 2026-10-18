@@ -471,3 +471,20 @@ def test_exact_window_spectrum_basis_matches_svd_form(tmp_path):
         reference = s1m_exact_factor(*svd.s1m_exact_arrays(keys)[:2], pgrid, 1.0, box_noise, two, 0.8)
         got = s1m_exact_factor(*loaded.s1m_exact_arrays(keys)[:2], pgrid, 1.0, box_noise, two, 0.8)
         np.testing.assert_allclose(got, reference, rtol=1e-5)
+
+
+def test_combine_caps_is_the_union_estimator():
+    """combine_caps: S1m entries are the FKP-weighted mean of the caps, S21m entries the union's S2m over S1m."""
+    from wstfast.calculators import combine_caps
+
+    rng = np.random.default_rng(0)
+    w = np.array([3.0, 1.0])
+    s1 = rng.uniform(1, 2, (2, 3))  # three S1m blocks per cap
+    s2 = rng.uniform(1, 2, (2, 2))  # two S2m entries, first-layer blocks 0 and 2
+    first = np.array([-1, -1, -1, 0, 2])
+    vectors = np.concatenate([s1, s2 / s1[:, [0, 2]]], axis=1)  # S21m = S2m / S1m of the block
+    got = combine_caps(vectors, w, first)
+    expected_s1 = (w[:, None] * s1).sum(0) / w.sum()
+    expected_s21 = (w[:, None] * s2).sum(0) / (w[:, None] * s1[:, [0, 2]]).sum(0)
+    np.testing.assert_allclose(got[:3], expected_s1)
+    np.testing.assert_allclose(got[3:], expected_s21)

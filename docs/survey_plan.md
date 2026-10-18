@@ -719,6 +719,15 @@ variance level.**
   A100 took 503 s against 31 s on the Mac (the rest of the likelihood is many small ops), so the GPU is a net loss
   and the chains run on the Mac (joint and NGC side by side, `scratchpad/mac_chain.sh`). The slow checkpoints are
   the sampler's tree depth on the 25x-tightened posterior, not the window.
+- **GCcomb convention (2026-10-18).** desi-clustering never fits NGC and SGC as separate observables: `combine_stats`
+  (lsstypes `sum`) averages the caps' spectra with their FKP normalisations as weights, and the window matrices and
+  covariances the same way, so the GCcomb spectrum is the estimator on the union of the footprints. The WST estimator
+  combines identically (weighted means over cells): `fit_rsd.py --survey NGC SGC --combine-caps` now fits one
+  GCcomb vector: S1m entries = the Σw-weighted mean of the caps (W_c = the cap's FKP weight sum, from the window
+  file), S21m entries = the mean weighted by W_c × S1m_c of their first-layer block (the union's S2m over its S1m);
+  the theory is `calculators.CombinedCaps` over the per-cap theories (each cap keeps its own window), the analytic and
+  extra covariances are projected with the Jacobian at the data mean. The likelihood cost is that of the joint fit
+  (both caps' windows are still evaluated); the data vector is half as long.
 - **Residual factor:** on top of the exact window, the per-block ratio of the 827 Gaussian mocks to its prediction
   (≤ 0.2%, second order in the spectrum) can be carried as δ (`delta_res_<cap>.npz`); the Abacus fits are run with
   δ = 1 and with it.

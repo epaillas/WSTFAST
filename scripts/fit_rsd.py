@@ -34,7 +34,8 @@ import numpy as np
 import wstfast.theory  # noqa: F401  (enables JAX double precision)
 from desilike import build, get_params, setup_logging
 from desilike.base import Posterior
-from wstfast.calculators import APGeometry, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood
+from wstfast.calculators import (APGeometry, CombinedCaps, JointTheory, RSDPowerTheory, S1mTheory, S21mTheory, WSTLikelihood,
+                                 combine_caps)
 from wstfast.config import QUIJOTE_COSMOLOGY, Coefficient, WSTConfig, select_coefficients
 from wstfast.data import (chi_squared, hartlap_factor, load_measurement, load_power_dataset, load_s1m_dataset,
                           load_s21m_dataset, percival_m1, sample_covariance)
@@ -70,6 +71,10 @@ def parse_args(argv=None):
                              "measure), one survey.SurveyWindow each (--window); shared parameters, the covariance from "
                              "the --covariance-data-dir boxes scaled to each cap's effective volume")
     parser.add_argument("--window", type=Path, nargs="+", default=None, help="survey: window file of each cap")
+    parser.add_argument("--combine-caps", action="store_true",
+                        help="survey: fit the caps combined as desi-clustering's GCcomb (calculators.combine_caps: the "
+                             "FKP-weighted mean of the caps' vectors, the S21m ratios weighted by their first-layer "
+                             "S1m) instead of concatenating them; the covariances are projected the same way")
     parser.add_argument("--covariance-file", type=Path, default=None,
                         help="survey: analytic covariance (analytic_covariance_rsd_wst.py --survey: labels, lncov of one "
                              "survey) instead of the --covariance-data-dir boxes; no Hartlap / Percival factors")
@@ -608,8 +613,66 @@ def survey_problem(args):
             for vector in layer2_templates(args, labels, mean):
                 covariance = covariance + args.s21_layer2_marg_width**2 * np.outer(vector, vector)
     meta = dict(caps[0][2]["meta"], caps=list(args.survey), veff={cap: w.veff for cap, w, _ in caps})
+    combine = None
+    if getattr(args, "combine_caps", False):
+        theories, vectors, labels, covariance, combine = combine_survey_caps(caps, theories, vectors, labels, covariance)
+        meta["combined"] = "GCcomb"
     return dict(theories=theories, vectors=vectors, labels=labels, meta=meta, basis=basis, settings=settings,
-                tracer=caps[0][2]["tracer"], covariance=covariance, nsims=nsims)
+                tracer=caps[0][2]["tracer"], covariance=covariance, nsims=nsims, combine=combine)
+
+
+def first_layer_entries(base_labels):
+    """For each entry label (without cap prefix), the index of the S1m entry of its first-layer block (S21m_j1_j2_l_m1_m2
+    -> S1m_j1_l_m1), or -1 for S1m entries."""
+    index = {label: i for i, label in enumerate(base_labels)}
+    first = []
+    for label in base_labels:
+        parts = label.split(":")[-1].split("_")
+        if parts[0] == "S21m":
+            key = f"S1m_{parts[1]}_{parts[3]}_{parts[4]}"
+            if key not in index:
+                raise SystemExit(f"--combine-caps needs the first-layer S1m entry {key} of {label} in the data vector")
+            first.append(index[key])
+        else:
+            first.append(-1)
+    return np.array(first)
+
+
+def combine_survey_caps(caps, theories, vectors, labels, covariance):
+    """The caps combined as desi-clustering's GCcomb (``calculators.combine_caps``): data vectors per realization,
+    one ``CombinedCaps`` theory, labels prefixed GCcomb:, and the covariance projected with the Jacobian of the
+    combination at the data mean. Returns also ``combine`` = (jacobian (n, n_all), per-cap labels, per-cap data
+    mean) for the extra covariances of ``main``."""
+    base = [label.split(":", 1)[1] for label in labels if label.startswith(f"{caps[0][0]}:")]
+    positions, starts, weights = [], [], []
+    for cap, window, problem in caps:
+        own = {label.split(":", 1)[1]: i for i, label in enumerate(labels) if label.startswith(f"{cap}:")}
+        if set(own) != set(base):
+            raise SystemExit(f"--combine-caps: the caps have different data vectors ({cap})")
+        positions.append([own[b] for b in base])  # in the concatenated vector of all caps
+        starts.append(min(own.values()))  # the cap's own vector starts here
+        weights.append(float(np.sum(next(iter(window.s1m.values()))["weight"])))  # the cap's FKP weight sum
+    positions, starts, weights = np.array(positions), np.array(starts), np.array(weights)
+    first = first_layer_entries(base)
+    per_cap = len(theories) // len(caps)
+    combined = np.array([combine_caps(np.stack([v[p] for p in positions]), weights, first) for v in vectors])
+    theory = CombinedCaps(theories, per_cap, positions - starts[:, None], weights, first)  # per-cap positions
+    # Jacobian at the data mean (the S21m weights depend on the S1m means; a second-order effect in the covariance)
+    mean = vectors.mean(axis=0)
+    n, nall = len(base), len(labels)
+    jac = np.zeros((n, nall))
+    for i in range(n):
+        if first[i] < 0:
+            w = weights
+        else:
+            w = weights * np.array([mean[p[first[i]]] for p in positions])
+        w = w / w.sum()
+        for c, p in enumerate(positions):
+            jac[i, p[i]] = w[c]
+    new_labels = [f"GCcomb:{b}" for b in base]
+    print(f"caps combined as GCcomb: weights {dict(zip([c for c, _, _ in caps], np.round(weights / weights.sum(), 3)))}, "
+          f"{n} entries from {nall}", flush=True)
+    return [theory], combined, new_labels, jac @ covariance @ jac.T, (jac, list(labels), mean)
 
 
 def main():
@@ -644,18 +707,26 @@ def main():
         if args.s21_layer2_marg is not None:  # analytic marginalisation over the template amplitudes
             for vector in layer2_templates(args, labels, vectors.mean(axis=0)):
                 covariance = covariance + args.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    combine = problem.get("combine") if args.survey else None  # GCcomb: extras on the per-cap labels, then projected
+    all_labels = combine[1] if combine is not None else labels
+    all_mean = combine[2] if combine is not None else vectors.mean(axis=0)
     for path in args.extra_covariance:  # modelling errors in data units, matched by label
         extra = np.load(path)
         index = {str(label): i for i, label in enumerate(extra["labels"])}
-        present = np.array([i for i, label in enumerate(labels) if label in index])  # e.g. one cap's entries
+        present = np.array([i for i, label in enumerate(all_labels) if label in index])  # e.g. one cap's entries
         if not len(present):
             raise SystemExit(f"{path} has no covariance for any of the data points")
-        rows = np.array([index[labels[i]] for i in present])
+        rows = np.array([index[all_labels[i]] for i in present])
         block = extra["fractional" if "fractional" in extra.files else "covariance"][np.ix_(rows, rows)]
         if "fractional" in extra.files:  # relative errors (e.g. the window calibration): in data units via the mean
-            mean = vectors.mean(axis=0)[present]
+            mean = all_mean[present]
             block = block * np.outer(mean, mean)
-        covariance[np.ix_(present, present)] += block
+        if combine is not None:
+            full = np.zeros((len(all_labels), len(all_labels)))
+            full[np.ix_(present, present)] = block
+            covariance += combine[0] @ full @ combine[0].T
+        else:
+            covariance[np.ix_(present, present)] += block
     print(f"{ndata} data points ({', '.join(args.stats)}), {nreal} realizations")
 
     theory = theories[0] if len(theories) == 1 else JointTheory(theories)

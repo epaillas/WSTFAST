@@ -1318,6 +1318,55 @@ class JointTheory(Calculator):
         return obj
 
 
+def combine_caps(vectors, weights, first, xp=np):
+    """GCcomb-style combination of the caps of a survey data vector (desi-clustering's convention for NGC + SGC):
+    ``vectors`` (ncap, n) the caps' vectors on the same entries, ``weights`` (ncap,) W_c = the FKP weight sum of each
+    cap, ``first`` (n,) the entry of the first-layer S1m block of each S21m entry (-1 for S1m entries). S1m entries
+    are the W_c-weighted mean of the caps (the estimator on the union of the footprints, whose moments are weighted
+    sums over cells); S21m entries, ratios S2m / S1m, the mean weighted by W_c x S1m_c of their first-layer block, so
+    that the combined S21m is the union's S2m over the union's S1m. NumPy or JAX."""
+    first = np.asarray(first)
+    select = np.zeros((len(first), len(first)))  # S21m entry <- its first-layer S1m entry (a matmul, not a gather:
+    select[np.arange(len(first))[first >= 0], first[first >= 0]] = 1.0  # gathers are slow in the reverse pass)
+    scale = xp.where(first[None, :] >= 0, vectors @ xp.asarray(select).T, 1.0)
+    w = xp.asarray(weights)[:, None] * scale
+    return xp.sum(w * vectors, axis=0) / xp.sum(w, axis=0)
+
+
+class CombinedCaps(Calculator):
+    """The caps' theories combined as ``combine_caps``: ``theories`` the caps' theories (``caps`` of them per cap,
+    concatenated per cap as JointTheory does), ``positions`` (ncap, n) the position of each combined entry in each
+    cap's vector, ``weights`` (ncap,) and ``first`` (n,) as in ``combine_caps``."""
+
+    def __init__(self, theories, caps: int, positions, weights, first):
+        self.theories = list(theories)
+        self.caps = int(caps)
+        positions = np.asarray(positions)
+        n = positions.shape[1]
+        #: Per cap, the (n, len) 0/1 matrix selecting its entries in the combined order (a matmul, not a gather).
+        self.select = [np.zeros((n, int(p.max()) + 1)) for p in positions]
+        for sel, p in zip(self.select, positions):
+            sel[np.arange(n), p] = 1.0
+        self.weights = np.asarray(weights, dtype=float)
+        self.first = np.asarray(first)
+
+    def __call__(self):
+        per_cap = [jnp.concatenate([t.flattheory for t in self.theories[i:i + self.caps]])
+                   for i in range(0, len(self.theories), self.caps)]
+        vectors = jnp.stack([jnp.asarray(sel) @ v[:sel.shape[1]] for v, sel in zip(per_cap, self.select)])
+        self.flattheory = combine_caps(vectors, self.weights, self.first, xp=jnp)
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
 class WSTLikelihood(GaussianLikelihood):
     """Gaussian likelihood of a data vector (WST or P(k)) with a fixed covariance."""
 
