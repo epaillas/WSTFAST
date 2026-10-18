@@ -14,10 +14,15 @@ The biases and alpha0 are the best fit of the halo baseline (scripts/layer2/halo
 first-layer field U_{j1,l,|m1|} and second-layer scale j2 the deficit S2m / S2m_G - 1 (exact <|Y_|m2||^2> of the same
 box) is measured at eps = 0, +-0.3, +-0.5 (delta_1 and the noise flipped together), and fitted as d0 + d2 eps^2 + d4 eps^4:
 d0 is the Gaussian (Kaiser + shot noise) value, d2 the tree-level gravitational term. Per-seed results are cached in
-outputs/feasibility/second_layer_rsd/seed_*.json (with --only, in second_layer_rsd_<pairs>/). Example:
+outputs/feasibility/second_layer_rsd/seed_*.json (with --only, in second_layer_rsd_<pairs>/).
+
+--tracer matter --space real gives the matter limit in real space (b1 = 1, every other bias and alpha0 zero, f = 0: no
+redshift-space map), with the Poisson noise of the Quijote particles V / N and every pair sigma_j1 >= 12.5 Mpc/h,
+sigma_j2 / sigma_j1 >= 2 (j1 = 4-7), cached in outputs/feasibility/second_layer_matter_real/. Example:
 
     python scripts/feasibility/second_layer_rsd.py --seeds 0-39 --workers 3
     CUDA_VISIBLE_DEVICES=0 python scripts/feasibility/second_layer_rsd.py --seeds 40-79 --device cuda   # one GPU
+    python scripts/feasibility/second_layer_rsd.py --tracer matter --space real --seeds 0-99 --device cuda
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import json
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -40,33 +46,43 @@ from wstfast.config import QUIJOTE_COSMOLOGY, WSTConfig  # noqa: E402
 from wstfast.measure import Lattice, _irfft, _moments, _rfft, wavelet_modulus  # noqa: E402
 
 DATA = ROOT / "data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"
+MATTER_DATA = ROOT / "data/quijote/fiducial/z0.5/J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los"
 CACHE = ROOT / "outputs/feasibility/second_layer_rsd"
 #: Best-fit biases of the halo baseline (outputs/inference/rsd/paper_c_wst_nsfixed_V25), shared with the cluster.
 BIASES = ROOT / "scripts/layer2/halo_template_biases.json"
 BOXSIZE, NMESH, Z, Q = 1000.0, 256, 0.5, 0.8
 EPS = (0.0, 0.3, 0.5)
 J1S = (4, 5, 6)  # sigma_j1 = 12.5, 17.7, 25 Mpc/h
+MATTER_J1S = (4, 5, 6, 7)  # + 35.4 Mpc/h (the adjacent pair 35.4 -> 70.7)
+#: Biases of the matter limit (no shot-noise offset: the noise is the particles' V / N).
+MATTER = dict(b1=1.0, b2=0.0, bG2=0.0, bGamma3=0.0, b3=0.0, bG3=0.0, bdG2=0.0, alpha0=0.0)
 
 
-def config():
-    path = sorted((DATA / "rsd").glob("wst_r*.npz"))[0]
+def cache_dir(tracer="halo", space="rsd"):
+    return CACHE if (tracer, space) == ("halo", "rsd") else CACHE.with_name(f"second_layer_{tracer}_{space}")
+
+
+def config(tracer="halo", space="rsd"):
+    path = sorted(((MATTER_DATA if tracer == "matter" else DATA) / space).glob("wst_r*.npz"))[0]
     meta = json.loads(str(np.load(path)["metadata"]))
     return WSTConfig(**meta["config"]), meta
 
 
-def pairs(cfg, only=None):
-    """(j1, j2, l): sigma_j1 in J1S, sigma_j2 / sigma_j1 >= 2, sigma_j2 <= 70.7 Mpc/h (the halo data reach); or only
+def pairs(cfg, only=None, j1s=J1S):
+    """(j1, j2, l): sigma_j1 in ``j1s``, sigma_j2 / sigma_j1 >= 2, sigma_j2 <= 70.7 Mpc/h (the data reach); or only
     the (j1, j2) pairs of ``only``."""
     if only:
         return [(j1, j2, ell) for ell in range(1, 5) for j1, j2 in only]
-    return [(j1, j2, ell) for ell in range(1, 5) for j1 in J1S for j2 in range(j1 + 2, cfg.J + 1)]
+    return [(j1, j2, ell) for ell in range(1, 5) for j1 in j1s for j2 in range(j1 + 2, cfg.J + 1)]
 
 
 def biases(path=BIASES):
     """Biases of the template (a JSON of b1, b2, bG2, bGamma3, db3, dbG3, dbdG2, alpha0, or a fit summary.json with
-    them under 'bestfit'); cubic ones from the relation plus offsets (bias.cubic_priors)."""
+    them under 'bestfit'); cubic ones from the relation plus offsets (bias.cubic_priors); path None: the matter limit."""
     from wstfast.theory.bias import cubic_priors
 
+    if path is None:
+        return dict(MATTER)
     best = json.loads(Path(path).read_text())
     best = best.get("bestfit", best)
     b3, bg3, bdg2 = cubic_priors(best["b1"], best["b2"]) + np.array([best["db3"], best["dbG3"], best["dbdG2"]])
@@ -189,24 +205,24 @@ def torch_context(device):
     return dict(device=device, lattice=TorchLattice(NMESH, device=device))
 
 
-def run_seed(seed, only=None, cache=CACHE, context=None, bias_path=BIASES):
+def run_seed(seed, only=None, cache=CACHE, context=None, bias_path=BIASES, tracer="halo", space="rsd"):
     from cosmoprimo import Cosmology
 
     path = cache / f"seed_{seed:04d}.json"
     if path.exists():
         return seed, json.loads(path.read_text())
     t0 = time.time()
-    cfg, meta = config()
+    cfg, meta = config(tracer, space)
     cosmo = Cosmology(engine="class", m_ncdm=0.0, **QUIJOTE_COSMOLOGY)
     klin = np.geomspace(1e-4, 10.0, 1024)
     pklin = cosmo.get_fourier().pk_interpolator(of="delta_m")(klin, z=Z)
-    f = float(cosmo.growth_rate(Z))
+    f = float(cosmo.growth_rate(Z)) if space == "rsd" else 0.0
     pk = lambda x: np.exp(np.interp(np.log(x), np.log(klin), np.log(pklin)))  # noqa: E731
     lattice = Lattice(NMESH)
-    todo = pairs(cfg, only)
+    todo = pairs(cfg, only, MATTER_J1S if tracer == "matter" else J1S)
     harmonics = {ell: lattice.harmonics(ell) for ell in range(1, 5)} if context is None else None
     window = cic_window(lattice)
-    b = biases(bias_path)
+    b = biases(None if tracer == "matter" else bias_path)
     spt = SPTFields(lattice, pk, BOXSIZE, seed=20_000 + seed)
     fields = HaloRSDFields(spt, f, b)
     shot = (1 + b["alpha0"]) * BOXSIZE**3 / meta["nparticles"]
@@ -230,7 +246,7 @@ def run_seed(seed, only=None, cache=CACHE, context=None, bias_path=BIASES):
     for key in curve[0]:
         d0, d2, _ = np.linalg.solve(design, [c[key] for c in curve])
         result["gauss"][key], result["tree"][key] = float(d0), float(d2)
-    result["meta"] = dict(f=f, shot=shot, biases={k: float(v) for k, v in b.items()})
+    result["meta"] = dict(tracer=tracer, space=space, f=f, shot=shot, biases={k: float(v) for k, v in b.items()})
     cache.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result))
     print(f"seed {seed} done in {time.time() - t0:.0f} s (fields {t1 - t0:.0f} s, WST {time.time() - t1:.0f} s)", flush=True)
@@ -249,21 +265,26 @@ def main():
     parser.add_argument("--only", nargs="+", default=None, metavar="J1,J2",
                         help="measure only these (j1, j2) pairs, cached separately (e.g. 6,9: the halo data vector)")
     parser.add_argument("--biases", type=Path, default=BIASES, help="JSON of the template biases (see biases())")
+    parser.add_argument("--tracer", choices=("halo", "matter"), default="halo",
+                        help="matter: b1 = 1, other biases and alpha0 zero (--biases ignored), j1 = 4-7")
+    parser.add_argument("--space", choices=("rsd", "real"), default="rsd", help="real: f = 0 (no redshift-space map)")
     parser.add_argument("--device", default=None,
                         help="measure with torch on this device (cuda, cpu, auto), one process looping over the seeds; "
                              "default: NumPy / SciPy with --workers processes")
     args = parser.parse_args()
     seeds = parse_seeds(args.seeds)
     only = [tuple(int(x) for x in p.split(",")) for p in args.only] if args.only else None
-    cache = CACHE if only is None else CACHE.with_name(CACHE.name + "_" + "_".join(f"{a}{b}" for a, b in only))
+    cache = cache_dir(args.tracer, args.space)
+    if only is not None:
+        cache = cache.with_name(cache.name + "_" + "_".join(f"{a}{b}" for a, b in only))
+    setup = dict(bias_path=args.biases, tracer=args.tracer, space=args.space)
     if args.device is not None:
         context = torch_context(args.device)
         for seed in seeds:
-            run_seed(seed, only, cache, context, args.biases)
+            run_seed(seed, only, cache, context, **setup)
     else:
-        n = len(seeds)
         with ProcessPoolExecutor(args.workers) as pool:
-            for seed, _ in pool.map(run_seed, seeds, [only] * n, [cache] * n, [None] * n, [args.biases] * n):
+            for _ in pool.map(partial(run_seed, only=only, cache=cache, **setup), seeds):
                 pass
     print("done")
 
