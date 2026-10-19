@@ -237,6 +237,19 @@ def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=N
                       metadata=metadata, files=[str(path) for path in files])
 
 
+def load_band_dataset(data_dir: Path, space: str, coefficients, files=None) -> WSTDataset:
+    """The m-summed first-order coefficients at q = 2 of the S1 ``coefficients``: the band powers <|X|^2> of the
+    wavelet filters (``theory.spectrum.BandProjection``)."""
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    measurements = [load_measurement(path, q=2.0) for path in files]
+    vectors = np.array([[m["S1"][c.j, c.ell] for c in coefficients] for m in measurements])
+    metadata = common_metadata([m["metadata"] for m in measurements], files)
+    return WSTDataset(vectors=vectors, coefficients=list(coefficients), config=measurements[0]["config"],
+                      metadata=metadata, files=[str(path) for path in files])
+
+
 def load_s21m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
     """Line-of-sight-resolved S21m = S2m(j1, j2, l, |m1|, |m2|) / S1m(j1, l, |m1|) of the S21 ``coefficients``
     (coefficient-major, then |m1|, then |m2|; ``wstfast.theory.second_layer.s21m_entries``)."""

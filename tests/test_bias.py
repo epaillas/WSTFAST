@@ -204,3 +204,54 @@ def test_real_space_theories_fix_the_anisotropic_terms():
     assert {"c0_pk", "b1", "alpha0"} <= set(varied) and not {"c2_pk", "c4_pk", "alpha2"} & set(varied)
     with pytest.raises(ValueError):
         S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, nuisance=matter, ap=APGeometry(basis, 0.5))
+
+
+def test_band_powers_are_the_q2_first_layer():
+    """The band powers (PowerTheory on a BandProjection) equal the sum over |m| of the S1m blocks at q = 2, where the
+    Edgeworth factor vanishes; and the compression of real-space labels groups the equally distributed blocks."""
+    from desilike import build
+
+    from wstfast.calculators import Basis, JointTheory, NuisanceParameters, PowerTheory, S1mTheory, build_cosmology
+    from wstfast.config import ModelSpec
+    from wstfast.inference import m_compression
+    from wstfast.theory.spectrum import BandProjection, S1mProjection, SpectrumGrid
+
+    s1 = [c for c in select_coefficients(SUPERSET, s1_min_scale=35.0) if c.kind == "S1" and c.ell <= 2][:4]
+    grid = SpectrumGrid(kmax=0.2)
+    basis = Basis(cosmo=build_cosmology(("omega_cdm",)), config=SUPERSET, coefficients=s1, kmax=0.2, npoints=2**10,
+                  tracer="matter", space="real")
+    nuisance = NuisanceParameters(ModelSpec.matter(space="real"))
+    bands = BandProjection(SUPERSET, s1, grid)
+    assert np.all(bands.support < 1e-3)
+    theory = JointTheory([PowerTheory(bands, basis=basis, nuisance=nuisance, shotnoise=7.45, counterterms=""),
+                          S1mTheory(S1mProjection(SUPERSET, s1, grid), s1, basis=basis, nuisance=nuisance, q=2.0,
+                                    shotnoise=7.45)])
+    out = np.asarray(build(theory)({"omega_cdm": 0.125, "c0": 2.0}))
+    band, blocks = out[:len(s1)], out[len(s1):]
+    start, summed = 0, []
+    for c in s1:
+        summed.append(blocks[start:start + c.ell + 1].sum())
+        start += c.ell + 1
+    np.testing.assert_allclose(band, summed, rtol=1e-12)
+    labels = ["S1m_j6_l2_m0", "S1m_j6_l2_m1", "S1m_j6_l2_m2", "S21m_j6_j9_l1_m0_m1", "S21m_j6_j9_l1_m1_m1", "S1q2_j4_l3"]
+    matrix, names = m_compression(labels)
+    assert names == ["S1m_j6_l2_m0", "S1m_j6_l2_m1+", "S21m_j6_j9_l1_m0_m1+", "S21m_j6_j9_l1_m1+_m1+", "S1q2_j4_l3"]
+    np.testing.assert_allclose(matrix @ np.arange(1.0, 7.0), [1.0, 2.5, 4.0, 5.0, 6.0])
+
+
+def test_band_compression_keeps_leading_components():
+    """band_compression keeps the principal components of the band block above the cut, in standardized units, and
+    passes the other entries through."""
+    from wstfast.inference import band_compression
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(500, 2))
+    bands = np.column_stack([x[:, 0], x[:, 0] + 1e-9 * x[:, 1], 2 * x[:, 0] - x[:, 1]])  # rank 2 (numerically)
+    vectors = np.column_stack([rng.normal(size=500), bands])
+    labels = ["S1m_j6_l0_m0", "S1q2_j5_l0", "S1q2_j5_l1", "S1q2_j5_l2"]
+    matrix, names = band_compression(vectors, labels, 1e-6)
+    assert names == ["S1m_j6_l0_m0", "S1q2_pc0", "S1q2_pc1"]
+    compressed = vectors @ matrix.T
+    assert np.allclose(compressed[:, 0], vectors[:, 0])
+    assert np.linalg.matrix_rank(np.cov(compressed, rowvar=False)) == 3
+    assert band_compression(vectors, labels[:1], 1e-6)[0] is None

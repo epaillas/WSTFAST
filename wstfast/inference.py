@@ -15,15 +15,15 @@ from pathlib import Path
 import numpy as np
 from desilike import build, get_params
 
-from .calculators import (APGeometry, CombinedCaps, JointTheory, LegacyPowerTheory, NuisanceParameters, PowerBasis,
-                          PowerTheory, S1mTheory, S21mTheory, WSTBasis, WSTLikelihood, WSTTheory, build_cosmology,
-                          combine_caps)
+from .calculators import (APGeometry, CombinedCaps, JointTheory, LegacyPowerTheory, LinearCompression,
+                          NuisanceParameters, PowerBasis, PowerTheory, S1mTheory, S21mTheory, WSTBasis, WSTLikelihood,
+                          WSTTheory, build_cosmology, combine_caps)
 from .config import QUIJOTE_COSMOLOGY, Coefficient, ModelSpec, WSTConfig, select_coefficients
-from .data import (PowerDataset, WSTDataset, chi_squared, hartlap_factor, load_measurement, load_power_dataset,
-                   load_s1m_dataset, load_s21m_dataset, percival_m1, sample_covariance)
+from .data import (PowerDataset, WSTDataset, chi_squared, hartlap_factor, load_band_dataset, load_measurement,
+                   load_power_dataset, load_s1m_dataset, load_s21m_dataset, percival_m1, sample_covariance)
 from .theory.power import LatticeBinning, default_knodes
-from .theory.spectrum import (APPolynomial, MultipoleProjection, S1mProjection, SpectrumGrid, multipole_ap_projection,
-                              s1m_ap_projection)
+from .theory.spectrum import (APPolynomial, BandProjection, MultipoleProjection, S1mProjection, SpectrumGrid,
+                              multipole_ap_projection, s1m_ap_projection)
 
 
 def covariance_for(dataset: WSTDataset, kind: str = "auto", of_mean: bool = False) -> tuple[np.ndarray, str]:
@@ -430,7 +430,9 @@ class FitOptions:
 
     The model is that of the emulator (its ``ModelSpec``: tracer, real or redshift space, Fingers-of-God, AP order,
     cubic biases); these options select the data, the nuisance priors and the covariance. Data: ``stats`` among
-    "pk", "s1m", "s21m" from the box measurements under ``data_dir`` (subdirectory ``rsd``, or ``real`` for a real-space
+    "pk", "s1m", "s21m" and "band" (the m-summed first-order coefficients at q = 2, the band powers of the wavelet
+    filters, on their own scale cut ``band_min_scale`` and multipoles ``band_ells``; they need only the spectrum, so
+    they reach smaller scales than S1m at q < 2) from the box measurements under ``data_dir`` (subdirectory ``rsd``, or ``real`` for a real-space
     emulator), with the scale cuts ``s1_min_scale``, ``s1_ells``, ``s21_min_scale``, ``s21_min_scale2``,
     ``s21_min_ratio`` and ``kmin``, ``kmax``, ``rebin`` of P(k); several exponents ``q`` concatenate the S1m vectors.
     Survey fits: ``survey`` (caps), ``window`` (one ``survey.SurveyWindow`` file per cap), ``combine_caps``.
@@ -445,6 +447,18 @@ class FitOptions:
     s21_min_scale: float = 17.6
     s21_min_scale2: float = 70.0
     s21_min_ratio: float = 2.8
+    band_min_scale: float = 12.5
+    #: Largest sigma_j of the band powers: below the S1m cut, a block never carries both exponents (their ratio would
+    #: measure the Edgeworth factor to a precision the model does not have).
+    band_max_scale: float = 1e9
+    band_ells: tuple = (0, 1, 2, 3, 4)
+    #: Counterterm of the band powers: "shared" (the S1m c0, the same spectrum) or "separate" (its own, c0_band).
+    band_counterterm: str = "shared"
+    #: The band powers are smooth functionals of the spectrum, numerically low-rank on the lattice: their sample
+    #: correlation has eigenvalues down to the rounding floor (1e-14). ``band_cut`` keeps the principal components of the
+    #: band block with eigenvalue (of the correlation) above it (``band_compression``); the dropped directions demand a
+    #: model accuracy far beyond the emulator's (sqrt of the eigenvalue, relative).
+    band_cut: float = 1e-4
     kmin: float = 0.0
     kmax: float = 0.12
     rebin: int = 2
@@ -486,6 +500,9 @@ class FitOptions:
     cubic_biases: str | None = None
     #: Alcock-Paczynski distortions of the trial cosmology (redshift space).
     ap: bool = False
+    #: Real space: average the |m| blocks of S1m and S21m within their equally distributed classes (``m_compression``),
+    #: so that the data vector is as short as the isotropic field allows (the Hartlap and Percival factors shrink).
+    compress_m: bool = False
     #: The configuration of the data (set by build_problem; the layer-2 template is re-keyed to it).
     layer2_config: WSTConfig | None = None
 
@@ -508,6 +525,26 @@ def load_basis(path: Path, vary, prepare=None):
     basis = emulator.to_calculator()
     _bound_to_emulator(basis, _fix_unvaried(basis, settings, vary, path))
     return basis, settings
+
+
+def exact_basis(settings: dict, vary):
+    """The exact (CLASS) ``Basis`` an emulator with ``settings`` was trained on, varying ``vary`` (which may include
+    parameters no emulator has, e.g. ``m_ncdm``); about 20 s per cosmology."""
+    from .calculators import Basis, build_cosmology
+
+    config = WSTConfig(**settings["config"])
+    coefficients = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"])
+                    if c.kind == "S1" and c.label in settings["coefficients"]]
+    s21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
+           if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
+    s21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
+    return Basis(cosmo=build_cosmology(tuple(vary), fiducial=settings.get("fiducial", "quijote")), config=config,
+                 coefficients=coefficients, z=settings["z"], kmax=settings["kmax"], ir=settings["ir"],
+                 s21_coefficients=s21, tracer=settings.get("tracer", "matter"),
+                 space=ModelSpec.from_settings(settings).space, s21_damping=settings.get("s21_damping"),
+                 cubic_biases=settings.get("cubic_biases", False), fog=settings.get("fog", False),
+                 s21_lattice=tuple(settings.get("lattice", (1000.0, 256))), s21_cellsize=settings.get("s21_cellsize", 0.0),
+                 s21_projected=settings.get("s21_projected", True), ap_order=settings.get("ap_order", 0))
 
 
 def s21m_selection(options, config, settings):
@@ -812,6 +849,30 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         labels += [f"{prefix}S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
         meta = s21m.metadata
+    if "band" in options.stats:
+        coefficients = [c for c in select_coefficients(config, s1_min_scale=options.band_min_scale,
+                                                       s1_ells=options.band_ells)
+                        if c.kind == "S1" and config.sigma(c.j) <= options.band_max_scale + 1e-6]
+        if "s1m" in options.stats and config.sigma(min(c.j for c in coefficients)) < options.s1_min_scale - 1e-6 \
+                and options.band_max_scale >= options.s1_min_scale:
+            raise SystemExit("the band powers overlap the S1m scales: set band_max_scale below s1_min_scale (a block "
+                             "with both exponents measures the Edgeworth factor beyond the model's accuracy)")
+        if options.ap:
+            raise SystemExit("the band powers have no AP projection yet")
+        projection = BandProjection(config, coefficients, grid, **lattice)
+        lost = [(c.label, s) for c, s in zip(coefficients, projection.support) if s > 0.01]
+        if lost:
+            raise SystemExit("bands beyond the emulator's grid (kmax = %.2f): " % grid.k[-1]
+                             + ", ".join(f"{label} ({100 * s:.0f}%)" for label, s in lost))
+        if options.band_counterterm not in ("shared", "separate"):
+            raise SystemExit(f"unknown band_counterterm {options.band_counterterm!r}")
+        band = load_band_dataset(options.data_dir, space, coefficients, files=files)
+        files = band.files
+        theories.append(PowerTheory(projection, basis=basis, nuisance=nuisance, shotnoise=band.shotnoise,
+                                    counterterms="" if options.band_counterterm == "shared" else "_band"))
+        vectors.append(band.vectors)
+        labels += [f"{prefix}S1q2_j{c.j}_l{c.ell}" for c in coefficients]
+        meta = band.metadata
     if "pk" in options.stats:
         ells = (0,) if spec.space == "real" else (0, 2, 4)  # real space: the monopole
         power = load_power_dataset(options.data_dir, space, kmin=options.kmin, kmax=options.kmax, rebin=options.rebin,
@@ -978,17 +1039,118 @@ def combine_survey_caps(caps, theories, vectors, labels, covariance):
     return [theory], combined, new_labels, jac @ covariance @ jac.T, (jac, list(labels), mean)
 
 
+def m_compression(labels):
+    """Compression of a real-space data vector: the |m| blocks of S1m and the (|m1|, |m2|) entries of S21m averaged within
+    the classes that an isotropic field makes equally distributed (blocks of the same number of components: m = 0, or
+    |m| >= 1; for S21m the four combinations of the two layers). Returns the matrix A (ncompressed, n) and the labels
+    of the compressed entries (``m1+`` for the |m| >= 1 class). Other entries pass through."""
+    groups, order = {}, []
+    for i, label in enumerate(labels):
+        prefix, _, base = label.rpartition(":")
+        parts = base.split("_")
+        if parts[0] in ("S1m", "S21m"):
+            key = "_".join(parts[:-1 if parts[0] == "S1m" else -2]
+                           + [("m0" if int(m[1:]) == 0 else "m1+") for m in parts[-1 if parts[0] == "S1m" else -2:]])
+        else:
+            key = base
+        key = f"{prefix}:{key}" if prefix else key
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(i)
+    matrix = np.zeros((len(order), len(labels)))
+    for row, key in enumerate(order):
+        matrix[row, groups[key]] = 1.0 / len(groups[key])
+    return matrix, order
+
+
+def band_compression(vectors, labels, cut: float):
+    """Compression of the band-power entries (labels ``S1q2_*``) onto the principal components of their sample
+    correlation with eigenvalue above ``cut`` (standardized units); the other entries pass through. Returns the matrix
+    A (ncompressed, n) and the labels (``S1q2_pc{i}``, by decreasing eigenvalue), or (None, labels) when no entry is a
+    band or none is dropped."""
+    band = np.array([label.rpartition(":")[-1].startswith("S1q2_") for label in labels])
+    if not band.any():
+        return None, list(labels)
+    values = vectors[:, band]
+    std = values.std(axis=0, ddof=1)
+    eigenvalues, eigenvectors = np.linalg.eigh(np.corrcoef(values, rowvar=False))
+    keep = np.flatnonzero(eigenvalues > cut)[::-1]  # decreasing eigenvalue
+    if len(keep) == band.sum():
+        return None, list(labels)
+    prefix = labels[np.flatnonzero(band)[0]].rpartition(":")[0]
+    prefix = f"{prefix}:" if prefix else ""
+    rows, out = [], []
+    first = True
+    for i, label in enumerate(labels):
+        if not band[i]:
+            row = np.zeros(len(labels))
+            row[i] = 1.0
+            rows.append(row)
+            out.append(label)
+        elif first:  # the components, at the position of the first band entry
+            first = False
+            for n, k in enumerate(keep):
+                row = np.zeros(len(labels))
+                row[band] = eigenvectors[:, k] / std
+                rows.append(row)
+                out.append(f"{prefix}S1q2_pc{n}")
+    print(f"band powers: {len(keep)} of {band.sum()} principal components kept (correlation eigenvalues > {cut:g})",
+          flush=True)
+    return np.array(rows), out
+
+
+def covariance_terms(options: FitOptions, labels, mean, n: int) -> np.ndarray:
+    """Volume-independent terms added to the covariance (n, n): the Monte Carlo error of the layer-2 template, its
+    analytically marginalized amplitudes, and the ``extra_covariance`` files (modelling errors, matched by label)."""
+    out = np.zeros((n, n))
+    if options.s21_layer2 is not None:
+        out += np.diag(layer2_variance(options, labels, mean))
+        if options.s21_layer2_marg is not None:
+            for vector in layer2_templates(options, labels, mean):
+                out += options.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    for path in options.extra_covariance:
+        extra = np.load(path)
+        index = {str(label): i for i, label in enumerate(extra["labels"])}
+        present = np.array([i for i, label in enumerate(labels) if label in index])  # e.g. one cap's entries
+        if not len(present):
+            raise SystemExit(f"{path} has no covariance for any of the data points")
+        rows = np.array([index[labels[i]] for i in present])
+        block = extra["fractional" if "fractional" in extra.files else "covariance"][np.ix_(rows, rows)]
+        if "fractional" in extra.files:  # relative errors (e.g. the window calibration): in data units via the mean
+            block = block * np.outer(mean[present], mean[present])
+        out[np.ix_(present, present)] += block
+    return out
+
+
 def build_fit(options: FitOptions) -> dict:
     """The likelihood of a fit (``FitOptions``): theories and data (``build_problem``, or ``survey_problem``), the
-    covariance (sample covariance of the realizations, or of ``covariance_data_dir``; scaled to ``volume``; plus the
-    Monte Carlo error of the layer-2 template, its analytically marginalized amplitudes and ``extra_covariance``),
-    the Hartlap-corrected inverse with the Percival factor m1, and the parameters ``fix`` fixed. Returns
-    dict(likelihood, problem, covariance, nsims, m1, ...)."""
+    covariance (sample covariance of the realizations, or of ``covariance_data_dir``; scaled to ``volume``; plus
+    ``covariance_terms``), the Hartlap-corrected inverse with the Percival factor m1, and the parameters ``fix`` fixed.
+    With ``compress_m`` and ``band_cut`` the data, theory and covariance are compressed by ``m_compression`` and
+    ``band_compression``. Returns
+    dict(likelihood, theory, labels, problem, covariance, nsims, m1, ...)."""
     if options.volume is not None and options.covariance_of_mean:
         raise SystemExit("volume and covariance_of_mean are exclusive")
+    if options.compress_m and options.survey:
+        raise SystemExit("compress_m is for box fits in real space")
     problem = survey_problem(options) if options.survey else build_problem(options)
     theories, vectors, labels, meta, tracer = (problem[k] for k in ("theories", "vectors", "labels", "meta", "tracer"))
-    nreal, ndata = vectors.shape
+    theory = theories[0] if len(theories) == 1 else JointTheory(theories)
+    nreal = vectors.shape[0]
+    mean = vectors.mean(axis=0)
+    compression = None
+    if options.compress_m:
+        compression, labels = m_compression(labels)
+        vectors = vectors @ compression.T
+    if options.band_cut > 0 and not options.survey:
+        cut, labels = band_compression(vectors, labels, options.band_cut)
+        if cut is not None:
+            vectors = vectors @ cut.T
+            compression = cut if compression is None else cut @ compression
+    if compression is not None:
+        theory = LinearCompression(theory, compression)
+    ndata = vectors.shape[1]
     nsims = nreal  # realizations of the covariance estimate
     if options.survey:  # box covariance at each cap's effective volume, with the layer-2 terms (survey_problem)
         covariance, nsims = problem["covariance"], problem["nsims"]
@@ -998,40 +1160,27 @@ def build_fit(options: FitOptions) -> dict:
         other = dataclasses.replace(options)
         other.data_dir, other.realizations_like, other.exclude_like = options.covariance_data_dir, None, None
         cov_vectors = build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"]
+        if compression is not None:
+            cov_vectors = cov_vectors @ compression.T
         nsims = cov_vectors.shape[0]
         covariance = sample_covariance(cov_vectors)
         if options.covariance_of_mean:
             covariance = covariance / nreal
     if options.volume is not None and not options.survey:
         covariance = covariance * (meta["boxsize"] / 1000.0) ** 3 / options.volume
-    if getattr(options, "s21_layer2", None) is not None and not options.survey:  # Monte Carlo error of the template, a volume-independent theory error
-        covariance = covariance + np.diag(layer2_variance(options, labels, vectors.mean(axis=0)))
-        if options.s21_layer2_marg is not None:  # analytic marginalisation over the template amplitudes
-            for vector in layer2_templates(options, labels, vectors.mean(axis=0)):
-                covariance = covariance + options.s21_layer2_marg_width**2 * np.outer(vector, vector)
-    combine = problem.get("combine") if options.survey else None  # GCcomb: extras on the per-cap labels, then projected
-    all_labels = combine[1] if combine is not None else labels
-    all_mean = combine[2] if combine is not None else vectors.mean(axis=0)
-    for path in options.extra_covariance:  # modelling errors in data units, matched by label
-        extra = np.load(path)
-        index = {str(label): i for i, label in enumerate(extra["labels"])}
-        present = np.array([i for i, label in enumerate(all_labels) if label in index])  # e.g. one cap's entries
-        if not len(present):
-            raise SystemExit(f"{path} has no covariance for any of the data points")
-        rows = np.array([index[all_labels[i]] for i in present])
-        block = extra["fractional" if "fractional" in extra.files else "covariance"][np.ix_(rows, rows)]
-        if "fractional" in extra.files:  # relative errors (e.g. the window calibration): in data units via the mean
-            mean = all_mean[present]
-            block = block * np.outer(mean, mean)
+    if options.survey:  # the layer-2 terms are in the survey covariance; the extras on the per-cap labels, then combined
+        combine = problem.get("combine")
         if combine is not None:
-            full = np.zeros((len(all_labels), len(all_labels)))
-            full[np.ix_(present, present)] = block
-            covariance += combine[0] @ full @ combine[0].T
+            full = covariance_terms(dataclasses.replace(options, s21_layer2=None), combine[1], combine[2], len(combine[1]))
+            covariance = covariance + combine[0] @ full @ combine[0].T
         else:
-            covariance[np.ix_(present, present)] += block
+            covariance = covariance + covariance_terms(dataclasses.replace(options, s21_layer2=None), labels, mean,
+                                                       ndata)
+    else:  # on the uncompressed entries (the template is keyed by them), then compressed
+        terms = covariance_terms(options, problem["labels"], mean, len(problem["labels"]))
+        covariance = covariance + (compression @ terms @ compression.T if compression is not None else terms)
     print(f"{ndata} data points ({', '.join(options.stats)}), {nreal} realizations")
 
-    theory = theories[0] if len(theories) == 1 else JointTheory(theories)
     fixed = parse_fixed(options.fix)
     nparams = len([n for n in get_params(theory).select(varied=True, derived=False).names() if n not in fixed])
     m1 = 1.0 if options.no_percival else percival_m1(nsims, ndata, nparams)
@@ -1039,5 +1188,5 @@ def build_fit(options: FitOptions) -> dict:
           f"Percival m1 {m1:.4f} for {nparams} parameters", flush=True)
     likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance * m1)
     fix_parameters(likelihood, fixed)
-    return dict(likelihood=likelihood, problem=problem, covariance=covariance, nsims=int(nsims), m1=m1,
-                nparams=nparams, ndata=int(ndata), nreal=int(nreal))
+    return dict(likelihood=likelihood, theory=theory, labels=list(labels), problem=problem, covariance=covariance,
+                nsims=int(nsims), m1=m1, nparams=nparams, ndata=int(ndata), nreal=int(nreal))

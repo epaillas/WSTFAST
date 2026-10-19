@@ -29,12 +29,13 @@ from .theory.power import LatticeBinning, matter_power_terms
 
 #: Prior ranges used when cosmological parameters are varied.
 COSMOLOGY_PRIORS = {"h": (0.5, 0.9), "omega_cdm": (0.08, 0.16), "logA": (2.5, 3.6),
-                    "omega_b": (0.015, 0.03), "n_s": (0.85, 1.1)}
+                    "omega_b": (0.015, 0.03), "n_s": (0.85, 1.1), "m_ncdm": (0.0, 1.0)}
 
 
 def build_cosmology(varied=("omega_cdm", "logA"), engine="class", fiducial: str = "quijote") -> CosmoprimoCosmology:
     """Fiducial cosmology, Quijote (massless neutrinos) or AbacusSummit c000 (``fiducial="abacus"``: one 0.06 eV
-    neutrino); only ``varied`` parameters are free."""
+    neutrino); only ``varied`` parameters are free. ``m_ncdm`` [eV] (one massive neutrino) may be varied, but no
+    emulator includes it: use the exact basis."""
     if fiducial not in ("quijote", "abacus"):
         raise ValueError(f"unknown fiducial {fiducial!r}")
     values, m_ncdm = (QUIJOTE_COSMOLOGY, 0.0) if fiducial == "quijote" else (ABACUS_COSMOLOGY, ABACUS_M_NCDM)
@@ -44,11 +45,14 @@ def build_cosmology(varied=("omega_cdm", "logA"), engine="class", fiducial: str 
         if name in varied:
             params[name].update(prior=dict(limits=list(COSMOLOGY_PRIORS[name])),
                                 ref=dict(dist="norm", loc=value, scale=params[name].ref.std()))
-    params["m_ncdm"].update(value=m_ncdm, fixed=True)
+    params["m_ncdm"].update(value=m_ncdm, fixed="m_ncdm" not in varied)
+    if "m_ncdm" in varied:
+        params["m_ncdm"].update(prior=dict(limits=list(COSMOLOGY_PRIORS["m_ncdm"])),
+                                ref=dict(dist="norm", loc=m_ncdm, scale=0.02))
     params["tau_reio"].update(fixed=True)
-    unknown = set(varied) - set(QUIJOTE_COSMOLOGY)
+    unknown = set(varied) - set(QUIJOTE_COSMOLOGY) - {"m_ncdm"}
     if unknown:
-        raise ValueError(f"cannot vary {sorted(unknown)}; choose among {sorted(QUIJOTE_COSMOLOGY)}")
+        raise ValueError(f"cannot vary {sorted(unknown)}; choose among {sorted(QUIJOTE_COSMOLOGY) + ['m_ncdm']}")
     return CosmoprimoCosmology(engine=engine, fiducial="DESI", params=params)
 
 
@@ -513,7 +517,7 @@ class NuisanceParameters:
         return params
 
     def counterterms(self, suffix: str = "") -> dict:
-        latex = r"^{P}" if suffix else ""
+        latex = {"": "", "_pk": r"^{P}"}.get(suffix, rf"^{{\rm {suffix.strip('_')}}}")
         params = {name: Parameter(f"{name}{suffix}", value=0.0, prior=dict(limits=list(self.COUNTERTERM_LIMITS)),
                                   ref=dict(dist="norm", loc=0.0, scale=2.0), latex=rf"{label}{latex}")
                   for name, label in (("c0", "c_0"), ("c2", "c_2"), ("c4", "c_4"))}
@@ -672,20 +676,23 @@ class PowerTheory(Calculator):
     """P(k) multipoles of a tracer, lattice-averaged: projection.matrix @ P_s grid + V/N projection.shot (real space:
     the monopole of ``ModelSpec(space="real")``).
 
-    Counterterms ``c0_pk``, ``c2_pk``, ``c4_pk`` [(Mpc/h)^2], biases and stochastic terms from ``nuisance``
-    (``NuisanceParameters``). With ``ap`` (see ``APGeometry``), ``projection`` is an ``APPolynomial`` and the AP
-    distortions of the trial cosmology are applied.
+    Counterterms ``c0_pk``, ``c2_pk``, ``c4_pk`` [(Mpc/h)^2] (``counterterms`` is their suffix: "" shares the S1m
+    ones), biases and stochastic terms from ``nuisance`` (``NuisanceParameters``). With ``ap`` (see ``APGeometry``),
+    ``projection`` is an ``APPolynomial`` and the AP distortions of the trial cosmology are applied. With a
+    ``spectrum.BandProjection``, the prediction is the band powers S1(q = 2) of the first layer.
     """
 
-    def __init__(self, projection, basis=None, nuisance=None, shotnoise: float = 0.0, ap=None):
+    def __init__(self, projection, basis=None, nuisance=None, shotnoise: float = 0.0, ap=None,
+                 counterterms: str = "_pk"):
         self.basis = basis
         self.ap = ap
         _check(self, nuisance)
-        self.counterterms = nuisance.counterterms("_pk")
+        self.counterterms = nuisance.counterterms(counterterms)
         self.ap_params = ap.params if ap is not None else {}
         self.bias_params = nuisance.bias()
 
-    def __post_init__(self, projection, basis=None, nuisance=None, shotnoise: float = 0.0, ap=None):
+    def __post_init__(self, projection, basis=None, nuisance=None, shotnoise: float = 0.0, ap=None,
+                      counterterms: str = "_pk"):
         self.projection, self.shotnoise = projection, float(shotnoise)
         self.k2mu2 = jnp.asarray(projection.k2mu2)
         if ap is None:
@@ -1067,6 +1074,30 @@ class JointTheory(Calculator):
 
     def __call__(self):
         self.flattheory = jnp.concatenate([theory.flattheory for theory in self.theories])
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
+class LinearCompression(Calculator):
+    """A fixed linear map of a theory's prediction, d' = A d: the data vector compressed as its measurements are
+    (``inference.m_compression``: the |m| blocks of an isotropic field averaged within their equally distributed classes)."""
+
+    def __init__(self, theory, matrix):
+        self.theory = theory
+
+    def __post_init__(self, theory, matrix):
+        self.matrix = jnp.asarray(matrix, dtype="f8")
+
+    def __call__(self):
+        self.flattheory = self.matrix @ self.theory.flattheory
         return self.flattheory
 
     def tree_flatten(self):

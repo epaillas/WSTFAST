@@ -19,6 +19,17 @@ correction delta_b (docs/survey_plan.md section 8): the model and covariance are
 volumes, and the error of delta_b calibrated on N mocks, Cov(ratio) / N per cap, is propagated to the marginalised
 parameters. It prints the rms parameter shift in units of the parameter errors for each N of ``--ncal``.
 
+With ``--neutrino M`` (fiducial sum of neutrino masses [eV], one massive species), it instead forecasts sigma(M_nu) for
+the halo baseline (scripts/fit_halo_baseline.sh without AP; ``--fit-args`` adds or overrides fit.py arguments) plus
+P_l, with the exact (CLASS) basis of ``--emulator``'s settings: no emulator varies m_ncdm. omega_cdm, logA, n_s, h,
+omega_b and m_ncdm are varied, the nuisances marginalised with their priors; the layer-2 template uncertainty enters
+the covariance as in the fit. Two prior sets: LSS only (BBN omega_b) and Planck-like (logA, n_s, omega_b). The
+Jacobian (6 x 2 exact basis calls, ~4 min) is cached next to ``--output``:
+
+    python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
+        --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic.h5 --neutrino 0.06 --volume 25 \\
+        --output outputs/fisher/neutrino_V25.json
+
 Example (halos):
 
     python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
@@ -42,9 +53,19 @@ from wstfast.config import QUIJOTE_COSMOLOGY
 from wstfast.data import load_measurement
 
 COSMOLOGY = ("omega_cdm", "logA", "n_s", "h")
-STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "b1": 0.02, "b2": 0.05, "bG2": 0.05,
+STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "omega_b": 0.0005, "m_ncdm": 0.02, "b1": 0.02, "b2": 0.05, "bG2": 0.05,
          "bGamma3": 0.05, "alpha0": 0.02, "alpha2": 1.0, "a_ng": 0.01}
 DEFAULT_STEP = {"c": 1.0, "noise": 0.01}
+#: The cosmology of the neutrino forecast, and its prior sets (Gaussian sigmas): BBN omega_b alone, and Planck 2018
+#: (TT,TE,EE+lowE+lensing) on the primordial parameters and omega_b.
+NEUTRINO = ("omega_cdm", "logA", "n_s", "h", "omega_b", "m_ncdm")
+NEUTRINO_PRIORS = {"LSS only (BBN omega_b)": {"omega_b": 0.00037},
+                   "Planck-like (logA, n_s, omega_b)": {"logA": 0.014, "n_s": 0.0042, "omega_b": 0.00015}}
+#: The halo baseline of scripts/fit_halo_baseline.sh, without AP (no emulator has m_ncdm, and the AP background is
+#: massless), with P_l to k <= 0.12 h/Mpc.
+BASELINE = ["--stats", "pk", "s1m", "s21m", "--kmax", "0.12", "--s21-min-scale", "25", "--s21-white",
+            "--cubic-biases", "relation", "--s21-layer2", "outputs/layer2/template_rsd.json", "--s21-layer2-c", "halo",
+            "--s21-layer2-marg", "per_l"]
 
 
 def load_fit():
@@ -64,18 +85,25 @@ def parse_args():
                         help="smallest S1m sigma values to compare [Mpc/h]")
     parser.add_argument("--qs", type=float, nargs="+", default=[0.5, 0.8, 1.0], help="S1m exponents (0.8 first-class)")
     parser.add_argument("--fiducial", type=Path, nargs="*",
-                        default=[Path("outputs/inference/rsd/halos_bias_only_V60_s1m/summary.json"),
-                                 Path("outputs/inference/rsd/halos_bias_only_V60_pk/summary.json")],
+                        default=None,
                         help="fit summaries whose best fits set the nuisance values (later files take precedence)")
     parser.add_argument("--output", type=Path, default=Path("outputs/fisher/rsd.json"))
     parser.add_argument("--fit-args", default="", help="window mode: further fit.py arguments (the fit to size)")
     parser.add_argument("--window-ratios", type=Path, nargs="*", default=None,
                         help="window mode: npz per cap (s1m (nmock, J+1, L+1, L+1), s21m (nmock, nentry), s21m_keys, "
                              "sigma, veff) of measured / window-model ratios of fiducial survey mocks")
+    parser.add_argument("--neutrino", type=float, default=None,
+                        help="neutrino mode: fiducial sum of neutrino masses [eV]")
     parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
     parser.add_argument("--ncal", type=int, nargs="+", default=[100, 300, 1000, 3000, 10000],
                         help="window mode: numbers of calibration mocks to size")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fiducial is None:  # neutrino mode: the no-AP baseline fits (WST nuisances take precedence)
+        args.fiducial = ([Path("outputs/inference/rsd/fast_pk_noap_V60/summary.json"),
+                          Path("outputs/inference/rsd/fast_noap_V60/summary.json")] if args.neutrino is not None else
+                         [Path("outputs/inference/rsd/halos_bias_only_V60_s1m/summary.json"),
+                          Path("outputs/inference/rsd/halos_bias_only_V60_pk/summary.json")])
+    return args
 
 
 def step_of(name):
@@ -191,11 +219,89 @@ def window_calibration(args, fr):
     print(f"wrote {args.output}")
 
 
+def neutrino_forecast(args, fr):
+    """sigma(M_nu) of P_l, the WST (S1m + S21m) and both, from exact derivatives (module docstring)."""
+    import shlex
+
+    fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator),
+                                         "--output-dir", "unused", *BASELINE] + shlex.split(args.fit_args)))
+    settings = json.loads(args.emulator.with_suffix(".json").read_text())
+    basis = inference.exact_basis(settings, NEUTRINO)
+    problem = inference.build_problem(fit, basis=basis, settings=settings)
+    theory = JointTheory(problem["theories"])
+    labels, vectors = problem["labels"], problem["vectors"]
+    params = get_params(theory).select(varied=True, derived=False)
+    names = params.names()
+    fiducial = {name: float(params[name].value) for name in names}
+    for path in args.fiducial:
+        if path.exists():
+            best = json.loads(path.read_text())["bestfit"]
+            fiducial.update({name: float(value) for name, value in best.items() if name in names})
+    fiducial.update({name: QUIJOTE_COSMOLOGY[name] for name in NEUTRINO if name in QUIJOTE_COSMOLOGY})
+    fiducial.update(m_ncdm=args.neutrino, **{name: 0.0 for name in names if name.startswith("noise")})
+    cache = args.output.with_suffix(".jacobian.npz")
+    if cache.exists() and list(np.load(cache)["names"]) == names and list(np.load(cache)["labels"]) == labels:
+        jacobian = np.load(cache)["jacobian"]
+    else:
+        model = build(theory)
+        jacobian = np.zeros((len(names), len(labels)))
+        for i, name in enumerate(names):
+            h = step_of(name)
+            lo = max(fiducial[name] - h, 0.0) if name == "m_ncdm" else fiducial[name] - h  # M_nu >= 0
+            up = np.asarray(model({**fiducial, name: fiducial[name] + h}))
+            down = np.asarray(model({**fiducial, name: lo}))
+            jacobian[i] = (up - down) / (fiducial[name] + h - lo)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache, names=names, labels=labels, jacobian=jacobian)
+    nreal = len(vectors)
+    mean = vectors.mean(axis=0)
+    raw = np.cov(vectors, rowvar=False, ddof=1) / args.volume  # boxes of 1 (Gpc/h)^3
+    theory_cov = np.diag(inference.layer2_variance(fit, labels, mean))  # volume-independent, as in the fit
+    for vector in inference.layer2_templates(fit, labels, mean):
+        theory_cov += fit.s21_layer2_marg_width**2 * np.outer(vector, vector)
+    nuisance = np.array([np.inf if name in NEUTRINO else prior_sigma(params[name]) for name in names])
+    cases = {f"P_l (k <= {fit.kmax})": ("P",), "WST (S1m + S21m)": ("S1m", "S21m"), "P_l + WST": ("P", "S1m", "S21m")}
+    cosmo_names = [name for name in NEUTRINO if name in names]
+    results = {}
+    for prior_label, cosmo_priors in NEUTRINO_PRIORS.items():
+        for case, kinds in cases.items():
+            rows = np.array([n for n, label in enumerate(labels) if label.split("_")[0].startswith(kinds)])
+            hartlap = (nreal - len(rows) - 2.0) / (nreal - 1.0)
+            cov = raw[np.ix_(rows, rows)] / hartlap + theory_cov[np.ix_(rows, rows)]
+            jac = jacobian[:, rows]
+            cols = [i for i, name in enumerate(names) if name in NEUTRINO or np.any(jac[i] != 0)]
+            prior = np.array([cosmo_priors.get(names[i], nuisance[i]) for i in cols])
+            fisher = jac[cols] @ np.linalg.solve(cov, jac[cols].T) + np.diag(1.0 / prior**2)
+            inverse = np.linalg.inv(fisher)
+            idx = [cols.index(names.index(name)) for name in cosmo_names]
+            sub = inverse[np.ix_(idx, idx)]
+            sigma = np.sqrt(np.diag(sub))
+            corr = sub / np.outer(sigma, sigma)
+            m = cosmo_names.index("m_ncdm")
+            results.setdefault(prior_label, {})[case] = dict(
+                ndata=int(len(rows)), sigma=dict(zip(cosmo_names, sigma.tolist())),
+                corr_mnu=dict(zip(cosmo_names, corr[m].tolist())))
+    width = max(len(case) for case in cases) + 2
+    for prior_label, by_case in results.items():
+        print(f"\n{prior_label}: V = {args.volume} (Gpc/h)^3, M_nu = {args.neutrino} eV, nuisances marginalised")
+        print(f"{'case':{width}s}{'n':>5s}" + "".join(f"{name:>11s}" for name in cosmo_names)
+              + f"{'r(Mnu,logA)':>13s}{'r(Mnu,wcdm)':>13s}")
+        for case, result in by_case.items():
+            print(f"{case:{width}s}{result['ndata']:>5d}" + "".join(f"{result['sigma'][n]:>11.5f}" for n in cosmo_names)
+                  + f"{result['corr_mnu']['logA']:>13.3f}{result['corr_mnu']['omega_cdm']:>13.3f}")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(dict(volume=args.volume, fiducial=fiducial, fit_args=BASELINE + [args.fit_args],
+                                           priors=NEUTRINO_PRIORS, results=results, nrealizations=nreal), indent=2))
+    print(f"\nwrote {args.output}")
+
+
 def main():
     args = parse_args()
     fr = load_fit()
     if args.window_ratios:
         return window_calibration(args, fr)
+    if args.neutrino is not None:
+        return neutrino_forecast(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
     # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit.py's default cuts.

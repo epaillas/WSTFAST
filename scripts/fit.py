@@ -42,7 +42,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--emulator", type=Path, required=True, help="emulated Basis (train_emulator.py --stat rsd)")
     parser.add_argument("--data-dir", type=Path, default=defaults.data_dir)
-    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m"), default=list(defaults.stats))
+    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m", "band"), default=list(defaults.stats),
+                        help="band: the m-summed first-order coefficients at q = 2 (the band powers of the wavelet "
+                             "filters), on their own cuts --band-min-scale / --band-ells")
     parser.add_argument("--q", type=float, nargs="+", default=list(defaults.q),
                         help="S1m exponent(s): several values concatenate the S1m data vectors (shared nuisances, joint "
                              "covariance); S21m uses the first")
@@ -54,6 +56,19 @@ def parse_args(argv=None):
                         help="smallest sigma_j2 [Mpc/h] of S21m")
     parser.add_argument("--s21-min-ratio", type=float, default=defaults.s21_min_ratio,
                         help="smallest sigma_j2 / sigma_j1 of S21m")
+    parser.add_argument("--band-min-scale", type=float, default=defaults.band_min_scale,
+                        help="smallest sigma_j [Mpc/h] of the band powers (every band must lie within the emulator's kmax)")
+    parser.add_argument("--band-max-scale", type=float, default=defaults.band_max_scale,
+                        help="largest sigma_j of the band powers (keep them below --s1-min-scale when S1m is fitted too)")
+    parser.add_argument("--band-ells", type=int, nargs="+", default=list(defaults.band_ells))
+    parser.add_argument("--band-counterterm", choices=("shared", "separate"), default=defaults.band_counterterm,
+                        help="counterterm of the band powers: the S1m c0 (the same spectrum) or its own c0_band")
+    parser.add_argument("--band-cut", type=float, default=defaults.band_cut,
+                        help="keep the principal components of the band powers with correlation eigenvalue above this "
+                             "(the bands are numerically low-rank; 0: none)")
+    parser.add_argument("--compress-m", action="store_true",
+                        help="real space: average the |m| blocks of S1m and S21m within their equally distributed "
+                             "classes (inference.m_compression); shorter data vector, smaller Hartlap and Percival factors")
     parser.add_argument("--kmin", type=float, default=defaults.kmin)
     parser.add_argument("--kmax", type=float, default=defaults.kmax)
     parser.add_argument("--rebin", type=int, default=defaults.rebin, help="P(k) bins of rebin x k_f")
@@ -170,7 +185,7 @@ def main():
     options_out = {key: (str(value) if isinstance(value, Path) else list(value) if isinstance(value, tuple) else value)
                    for key, value in dataclasses.asdict(options).items() if key != "layer2_config"}
     summary = dict(options_out, bestfit=best, chi2=chi2, ndata=ndata, nvaried=len(varied),
-                   nrealizations=fit["nreal"], labels=problem["labels"], model=problem["spec"].to_dict(),
+                   nrealizations=fit["nreal"], labels=fit["labels"], model=problem["spec"].to_dict(),
                    tracer=problem["tracer"], sampler=args.sampler, hartlap_factor=hartlap_factor(fit["nsims"], ndata),
                    percival_m1=fit["m1"], nsims=fit["nsims"], shotnoise=meta["boxsize"] ** 3 / meta["nparticles"],
                    normalized_residual=(residual / np.sqrt(np.diag(covariance))).tolist())

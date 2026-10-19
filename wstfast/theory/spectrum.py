@@ -191,6 +191,34 @@ class S1mProjection:
         self.matrix, self.shot = np.array(rows), np.array(shot)
 
 
+class BandProjection:
+    """Linear map from the P_s grid to the m-summed first-layer variances n s^2 = sum_M n_M lambda_M of the selected
+    S1 coefficients: the band powers of the wavelet filters, which are the first-order coefficients at q = 2,
+    S1(q = 2) = <|X|^2>, exactly (no Edgeworth factor: it carries q (q - 2)). ``matrix`` (ncoef, nk * nmu) and ``shot``
+    (ncoef,) as ``S1mProjection``, whose block rows these are the sums of (sum_m c_l^2 |Y_lm|^2 = 1). ``support`` is the
+    fraction of each band (the weight w_{j l}(k) k^2 of the continuum integral) beyond the grid's kmax, which the lattice
+    sum leaves out.
+    """
+
+    def __init__(self, config: WSTConfig, coefficients, grid: SpectrumGrid, boxsize: float = 1000.0, nmesh: int = 256,
+                 window: str | None = "cic"):
+        from scipy.special import gammaincc
+
+        modes = lattice_modes(boxsize, nmesh, grid.k[-1], window)
+        interp = grid_interpolation(grid, modes["k"], modes["mu"])
+        self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2
+        rows, shot, support = [], [], []
+        for c in coefficients:
+            sigma = config.sigma(c.j)
+            radial = (sigma * modes["k"]) ** (2 * c.ell) * np.exp(-((sigma * modes["k"]) ** 2))
+            weight = modes["weight"] * radial
+            rows.append(interp.T @ (weight * modes["window2"]))
+            shot.append(np.sum(weight * modes["noise"]))
+            support.append(float(gammaincc(c.ell + 1.5, (sigma * grid.k[-1]) ** 2)))
+        self.matrix, self.shot, self.support = np.array(rows), np.array(shot), np.array(support)
+        self.coefficients = list(coefficients)
+
+
 class MultipoleProjection:
     """Linear map from the P_s grid to the binned multipoles (as ``measure.PowerMultipoles`` estimates them):
     P_ell(b) = mean over the modes of bin b of (2 ell + 1) L_ell(mu) [W^2 P_s(k, mu) + (V/N) aliased noise]."""
