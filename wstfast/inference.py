@@ -1074,12 +1074,23 @@ def m_compression(labels):
     return matrix, order
 
 
-def band_compression(vectors, labels, cut: float):
-    """Compression of the band-power entries (labels ``S1q2_*``) onto the principal components of their sample
-    correlation with eigenvalue above ``cut`` (standardized units); the other entries pass through. Returns the matrix
-    A (ncompressed, n) and the labels (``S1q2_pc{i}``, by decreasing eigenvalue), or (None, labels) when no entry is a
-    band or none is dropped."""
-    band = np.array([label.rpartition(":")[-1].startswith("S1q2_") for label in labels])
+def band_entries(labels, q=(0.8,)) -> np.ndarray:
+    """Mask of the band-power entries: the ``S1q2_*`` labels and the S1m blocks measured at q = 2 (the exponent of an
+    S1m label is its ``q{value}:`` prefix of a multi-q fit, else ``q[0]``)."""
+    out = []
+    for label in labels:
+        prefix, _, name = label.rpartition(":")
+        exponent = float(prefix.rpartition("q")[-1]) if prefix.rpartition("q")[-1].replace(".", "").isdigit() else q[0]
+        out.append(name.startswith("S1q2_") or (name.startswith("S1m_") and abs(exponent - 2.0) < 1e-9))
+    return np.array(out, dtype=bool)
+
+
+def band_compression(vectors, labels, cut: float, band=None):
+    """Compression of the band-power entries (``band`` mask, default ``band_entries(labels)``: the ``S1q2_*`` labels)
+    onto the principal components of their sample correlation with eigenvalue above ``cut`` (standardized units); the
+    other entries pass through. Returns the matrix A (ncompressed, n) and the labels (``S1q2_pc{i}``, by decreasing
+    eigenvalue), or (None, labels) when no entry is a band or none is dropped."""
+    band = band_entries(labels) if band is None else np.asarray(band, dtype=bool)
     if not band.any():
         return None, list(labels)
     values = vectors[:, band]
@@ -1154,7 +1165,7 @@ def build_fit(options: FitOptions) -> dict:
         compression, labels = m_compression(labels)
         vectors = vectors @ compression.T
     if options.band_cut > 0 and not options.survey:
-        cut, labels = band_compression(vectors, labels, options.band_cut)
+        cut, labels = band_compression(vectors, labels, options.band_cut, band=band_entries(labels, options.q))
         if cut is not None:
             vectors = vectors @ cut.T
             compression = cut if compression is None else cut @ compression
