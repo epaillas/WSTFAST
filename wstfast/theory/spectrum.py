@@ -425,10 +425,13 @@ class APProjection:
         return self._evaluate(jnp.asarray(rows), qpar, qperp, jnp.asarray(shotnoise, dtype="f8"))
 
 
-def s1m_ap_projection(config: WSTConfig, coefficients, grid: SpectrumGrid, kmax: float = 0.27, boxsize: float = 1000.0,
-                      nmesh: int = 256, window: str | None = "cic") -> APProjection:
-    """APProjection of the S1m block variances (observed-frame filters; modes with k <= kmax)."""
-    modes = lattice_modes(boxsize, nmesh, kmax, window)
+def s1m_ap_projection(config: WSTConfig, coefficients, grid: SpectrumGrid, kmax: float | None = None,
+                      boxsize: float = 1000.0, nmesh: int = 256, window: str | None = "cic") -> APProjection:
+    """APProjection of the S1m block variances (observed-frame filters; modes with k <= kmax, by default the grid's
+    kmax, the same modes as ``S1mProjection``: a smaller cutoff drops a tail of the bands at every q, 0.17% of the
+    sigma = 12.5, l = 2 band at 0.27, far above their measurement errors; the modes a stretch carries beyond the grid
+    read its last row, ``APProjection.interpolate``, a tail of 2e-4 at most)."""
+    modes = lattice_modes(boxsize, nmesh, grid.k[-1] if kmax is None else kmax, window)
     theta = np.arccos(np.clip(modes["mu"], -1, 1))
     weights, noise = [], []
     for c in coefficients:
