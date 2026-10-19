@@ -290,6 +290,10 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    k = 0.1 on omega_cdm (0.0038 against 0.0032). For l = 1 the tree response (Eq. response_rsd, no 2 F2 P P term)
    misses the change of sign at K sigma ~ 2. The analytic-covariance section, the Delta N appendix and two discussion
    paragraphs still describe the m-summed matter model.
+   Revised 2026-10-18: the Sec. IV baseline varies omega_cdm, logA and h (n_s fixed), as for halos. The posterior panel
+   is at V = 60 (WST baseline against P_0 to k = 0.1, 0.2), and the sigma_j1 = 12.5 vector appears only in the shift
+   panel. In 3 parameters the baseline stays within 0.22 sigma up to V = 64, and the sigma_j1 = 12.5 vector is biased by
+   +0.6 sigma at V = 1 and +1.8 sigma at V = 64, with no gain in the errors.
 
    Original plan for this step: Measure, train the real-space emulator, rerun the Sec. IV fits and
    figures (`scripts/paper/` moves onto the new API), and update the paper text and numbers. This is the only
