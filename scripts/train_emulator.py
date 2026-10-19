@@ -130,7 +130,8 @@ def train_rsd(args):
         measurement = load_measurement(first, q=0.8 if args.q is None else args.q)
         config, meta = measurement["config"], measurement["metadata"]
     lattice = dict(boxsize=args.lattice[0], nmesh=int(args.lattice[1]))
-    coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale) if c.kind == "S1"]
+    coefficients = [c for c in select_coefficients(config, s1_min_scale=args.s1_min_scale, s1_ells=args.s1_ells)
+                    if c.kind == "S1"]
     s21 = [] if args.no_s21 else [c for c in select_coefficients(config, s21_min_scale=args.s21_min_scale,
                                                                    s21_min_ratio=args.s21_min_ratio,
                                                                    s21_min_scale2=args.s21_min_scale2)
@@ -142,7 +143,8 @@ def train_rsd(args):
     bounds = {name: tuple(args.bounds.get(name, default_bounds(name, args.fiducial))) for name in args.vary}
     settings = dict(stat="rsd", layout="monomial", config=config.to_dict(), z=meta["redshift"],
                     coefficients=[c.label for c in coefficients],
-                    s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale, kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
+                    s21_coefficients=[c.label for c in s21], s1_min_scale=args.s1_min_scale,
+                    s1_ells=list(args.s1_ells), kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
                     fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,
                     s21_projected=not args.s21_unprojected, ap_order=args.ap_order)
@@ -228,6 +230,8 @@ def main():
     parser.add_argument("--stat", choices=("wst", "pk", "rsd"), default="wst",
                         help="rsd: redshift-space P_s grid + S1m cumulants (data from the _los measurements)")
     parser.add_argument("--s1-min-scale", type=float, default=17.6, help="rsd: smallest sigma_j of the S1m cumulants")
+    parser.add_argument("--s1-ells", type=int, nargs="+", default=[0, 1, 2, 3, 4],
+                        help="rsd: multipoles l of the S1m cumulants (0-6 for the q = 2 band powers at sigma = 17.7)")
     parser.add_argument("--ir", action="store_true", help="rsd: BAO infrared resummation of the P_s grid")
     parser.add_argument("--no-s21", action="store_true", help="rsd: leave out the S21m terms")
     parser.add_argument("--s21-damping", type=float, default=None,

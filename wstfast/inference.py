@@ -444,6 +444,10 @@ class FitOptions:
     q: tuple = (0.8,)
     s1_min_scale: float = 25.0
     s1_ells: tuple = (0, 1, 2, 3, 4)
+    #: Keep only the S1m coefficients whose 84th-percentile wavenumber (of the band weight w_{jl}(k) k^2, a Gamma
+    #: distribution in sigma^2 k^2) lies below this [h/Mpc]: a per-scale multipole cut, e.g. 0.2 keeps sigma = 12.5
+    #: at l <= 2 and sigma >= 17.7 at l <= 6 (the q = 2 bands matched to P_l to k = 0.2).
+    s1_kmax: float | None = None
     s21_min_scale: float = 17.6
     s21_min_scale2: float = 70.0
     s21_min_ratio: float = 2.8
@@ -531,14 +535,21 @@ def load_basis(path: Path, vary, prepare=None):
     return basis, settings
 
 
+def emulated_s1(config: WSTConfig, settings: dict) -> list:
+    """The S1 coefficients an emulator with ``settings`` holds cumulants for, in its order (any multipole up to the
+    configuration's L: the band-power emulators carry l = 5, 6)."""
+    every = {c.label: c for c in select_coefficients(config, s1_min_scale=0.0, s1_ells=range(config.L + 1))
+             if c.kind == "S1"}
+    return [every[label] for label in settings["coefficients"]]
+
+
 def exact_basis(settings: dict, vary):
     """The exact (CLASS) ``Basis`` an emulator with ``settings`` was trained on, varying ``vary`` (which may include
     parameters no emulator has, e.g. ``m_ncdm``); about 20 s per cosmology."""
     from .calculators import Basis, build_cosmology
 
     config = WSTConfig(**settings["config"])
-    coefficients = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"])
-                    if c.kind == "S1" and c.label in settings["coefficients"]]
+    coefficients = emulated_s1(config, settings)
     s21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
            if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
     s21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
@@ -609,7 +620,7 @@ def load_correction(options, config, coefficients, settings):
         labels = list(stored["labels"])
         index = [labels.index(c.label) for c in coefficients]
         return _tile_ap(settings, stored["kappa"][index], stored["skewness2"][index])
-    every = [c for c in select_coefficients(config, s1_min_scale=settings["s1_min_scale"]) if c.kind == "S1"]
+    every = emulated_s1(config, settings)
     fourier = Cosmology(engine="class", m_ncdm=0.0, **QUIJOTE_COSMOLOGY).get_fourier()
     klin = np.geomspace(1e-4, 10.0, 1024)
     pklin = fourier.pk_interpolator(of="delta_m")(klin, z=settings["z"])
@@ -784,6 +795,10 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
     if "s1m" in options.stats:
         coefficients = [c for c in select_coefficients(config, s1_min_scale=options.s1_min_scale, s1_ells=options.s1_ells)
                         if c.kind == "S1"]
+        if options.s1_kmax is not None:
+            coefficients = [c for c in coefficients if band_k84(config, c) <= options.s1_kmax]
+            if not coefficients:
+                raise SystemExit("no S1m coefficient passes --s1-kmax")
         missing = [c.label for c in coefficients if c.label not in emulated]
         if missing:
             raise ValueError(f"the emulator has no cumulants for {missing}")
@@ -858,10 +873,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                                                        s1_ells=options.band_ells)
                         if c.kind == "S1" and config.sigma(c.j) <= options.band_max_scale + 1e-6]
         if options.band_kmax is not None:
-            from scipy.special import gammaincinv
-
-            coefficients = [c for c in coefficients
-                            if np.sqrt(gammaincinv(c.ell + 1.5, 0.84)) / config.sigma(c.j) <= options.band_kmax]
+            coefficients = [c for c in coefficients if band_k84(config, c) <= options.band_kmax]
         if not coefficients:
             raise SystemExit("no band power passes the cuts")
         if "s1m" in options.stats and options.band_max_scale >= options.s1_min_scale:
@@ -1072,6 +1084,14 @@ def m_compression(labels):
     for row, key in enumerate(order):
         matrix[row, groups[key]] = 1.0 / len(groups[key])
     return matrix, order
+
+
+def band_k84(config: WSTConfig, c: Coefficient) -> float:
+    """84th-percentile wavenumber [h/Mpc] of the band weight |psi_{jl}(k)|^2 k^2 of a first-order coefficient (a
+    Gamma(l + 3/2) distribution in sigma_j^2 k^2): the reach of the band, comparable to a kmax of P(k)."""
+    from scipy.special import gammaincinv
+
+    return float(np.sqrt(gammaincinv(c.ell + 1.5, 0.84)) / config.sigma(c.j))
 
 
 def band_entries(labels, q=(0.8,)) -> np.ndarray:

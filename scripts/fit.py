@@ -50,6 +50,9 @@ def parse_args(argv=None):
                              "covariance); S21m uses the first")
     parser.add_argument("--s1-min-scale", type=float, default=defaults.s1_min_scale, help="smallest sigma_j [Mpc/h] of S1m")
     parser.add_argument("--s1-ells", type=int, nargs="+", default=list(defaults.s1_ells))
+    parser.add_argument("--s1-kmax", type=float, default=defaults.s1_kmax,
+                        help="keep the S1m coefficients whose 84th-percentile wavenumber lies below this [h/Mpc] (a "
+                             "per-scale l cut: 0.2 keeps sigma = 12.5 at l <= 2 and sigma >= 17.7 at l <= 6)")
     parser.add_argument("--s21-min-scale", type=float, default=defaults.s21_min_scale,
                         help="smallest sigma_j1 [Mpc/h] of S21m")
     parser.add_argument("--s21-min-scale2", type=float, default=defaults.s21_min_scale2,
