@@ -185,3 +185,36 @@ Consequences for the paper (user to decide):
 - Halos: `S1mTheory` at q = 2 is the m-resolved band power (the Edgeworth factor vanishes identically; checked
   numerically against `BandProjection`), so `--stats s1m --q 2` gives the redshift-space bands with no new code,
   except the PCA cut (`band_compression` keys on `S1q2_*` labels; extend it to the S1m block at q = 2). Not tried.
+
+### Halos in redshift space (2026-10-19, same night)
+
+`S1mTheory` at q = 2 is the m-resolved band power of P_s(k, mu) (the Edgeworth factor vanishes identically), so the
+halo band powers need no new theory: `--stats s1m --q 2.0` with the PCA cut, which now also acts on the S1m block at
+q = 2 (`inference.band_entries`, commit 0d53d48). Data: the 1188 halo boxes (q in {0.5, 0.8, 1, 2} stored). Emulator:
+the no-AP `rsd_biased_basis_taylor_4p_ir_fog_cubic.h5` (sigma >= 17.7, l <= 4; the AP emulator covers only sigma >=
+25), baseline nuisances (cubic relation biases, c_v, template, W), n_s fixed, V = 60. Runs in `outputs/inference/rsd/q2/`.
+
+Two lessons before the numbers. (1) Without the cut the q = 2 block gives chi^2 = 291/44 at V = 1 (38 of 60
+components survive 1e-4), as for matter. (2) The halo posteriors with the q = 2 bands have a flat valley along
+(ln A_s, c_v, alpha_0, c_0): Minuit's Hesse errors at the minimum are meaningless there (0.0086 on ln A_s with a
+"+6 sigma" shift, while the q = 2 block at the baseline's best fit has chi^2 = 11/38 and every entry within 0.7
+sigma). The widths below are profile likelihoods (chi^2 scans with one parameter fixed, `--fix`, parabola fits;
+scratchpad `scan_summary.py`) or chains; the shifts are the scan minima.
+
+| vector (V = 60, no AP, n_s fixed) | sigma(omega_cdm) | sigma(ln A_s) | sigma(h) | shift of the minimum [sigma] | chi^2/dof |
+|---|---|---|---|---|---|
+| Sec. V baseline: S1m(q = 0.8) >= 25 + S21m (chain `paper_cv_wst_nsfixed_V60`) | 0.0027 | 0.048 | 0.0063 | -0.7 / 0.0 / -0.2 | 19.4/83 |
+| P_l to 0.12 (chain) / 0.15 / 0.2 (profiles) | 0.0030 / 0.0026 / 0.0021 | 0.052 / 0.045 / 0.038 | 0.0050 / 0.0044 / 0.0035 | -0.7 / +0.8 / -0.3; -0.7 / +0.9 / -0.5; -0.8 / +1.3 / -0.6 | 2.7/12; 4.7/21; 18.8/33 |
+| S1m(q = 2) >= 25 (l <= 4) + S21m (scans; partial chain 0.0027 / 0.048 / 0.0052) | 0.0028 | 0.054 | 0.0051 | -0.6 / +0.7 / -0.1 | 7.1/61 |
+| S1m(q = 2) >= 17.7 (l <= 4) + S21m (scans) | 0.0025 | 0.044 | 0.0049 | -0.3 / +0.8 / -0.6 | 13.1/70 |
+| S1m(q = 0.8) >= 25 alone, or q = 0.8 + q = 2 on the same blocks | valley; Hesse errors 0.0013 / 0.010 / 0.0035 with +3.5 and +4.3 sigma "shifts" in ln A_s: not usable without S21m | | | | 12.8/44; 23.7/82 |
+
+Reading: the same picture as in real space, one octave lower in reach because the model is. The q = 2 first layer
+at sigma >= 25 reproduces the baseline (both are the P_s(k, mu) information to k ~ 0.11, where P_l to 0.12 sits
+too); at sigma >= 17.7 with l <= 4 (k84 = 0.155) it matches P_l to 0.15 (0.0025 / 0.044 / 0.0049 against 0.0026 /
+0.045 / 0.0044), 10-25% better than the baseline, unbiased. S21m is needed in redshift space: without it the first
+layer alone (at either q) sits in a bias-counterterm valley. Reaching P_l to 0.2 (0.0021 / 0.038 / 0.0035) needs the
+bands at sigma = 17.7 with l = 5, 6 and at sigma = 12.5 (l <= 2), which no halo emulator covers: retrain the no-AP
+(or AP) emulator with S1 at j >= 4 and l <= 6 (~45 min on a Perlmutter node; user's call), then redo the scan to V =
+64 since P_l itself drifts to +1.3 sigma in ln A_s at k = 0.2. NUTS chains of both q = 2 vectors are running
+(`q2_25_s21_chain_V60`, then `q2_17_s21_chain_V60` from its proposal); they converge slowly along the valley.
