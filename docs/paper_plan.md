@@ -218,3 +218,32 @@ bands at sigma = 17.7 with l = 5, 6 and at sigma = 12.5 (l <= 2), which no halo 
 (or AP) emulator with S1 at j >= 4 and l <= 6 (~45 min on a Perlmutter node; user's call), then redo the scan to V =
 64 since P_l itself drifts to +1.3 sigma in ln A_s at k = 0.2. NUTS chains of both q = 2 vectors are running
 (`q2_25_s21_chain_V60`, then `q2_17_s21_chain_V60` from its proposal); they converge slowly along the valley.
+
+### Does the WST add to P_l for halos in redshift space? (2026-10-19)
+
+Same question as in real space, V = 60, no AP, n_s fixed, 1188 boxes; widths from chi^2 scans with one parameter fixed
+(Minuit's Hesse errors are unreliable whenever the first layer is in the vector: they gave 0.036 on ln A_s for P_l +
+baseline, the scan 0.046), shifts of the scan minima in sigma; runs in `outputs/inference/rsd/q2/pk015_*`, `pk02_*`.
+
+| vector | sigma(omega_cdm) | sigma(ln A_s) | sigma(h) | shift of the ln A_s minimum |
+|---|---|---|---|---|
+| P_l to 0.15 | 0.0028 | 0.045 | 0.0044 | +0.9 |
+| P_l to 0.15 + S21m | -- | 0.048 | -- | +0.4 |
+| P_l to 0.15 + S1m(q = 0.8) >= 25 (no S21m) | -- | 0.049 | -- | +0.1 |
+| P_l to 0.15 + Sec. V baseline (q = 0.8 >= 25 + S21m) | 0.0026 | 0.046 | 0.0043 | 0.0 |
+| P_l to 0.15 + S1m(q = 2) >= 25 + S21m | -- | 0.047 | -- | +0.5 |
+| P_l to 0.15 + S1m(q = 2) >= 17.7 + S21m | -- | 0.043 | -- | +0.8 |
+| P_l to 0.2 | 0.0024 | 0.039 | 0.0040 | +1.4 |
+| P_l to 0.2 + Sec. V baseline | -- | 0.036 | -- | +0.5 |
+
+Reading: nothing in the WST adds to P_l at the same reach for (omega_cdm, ln A_s, h). S21m alone, the q = 0.8 first
+layer alone and the full baseline leave P_l to 0.15 where it is (differences of a few percent either way are the
+Hartlap/Percival cost and scan noise); the q = 2 bands at sigma >= 17.7 give 5% on ln A_s, which is their slightly
+larger reach (k84 = 0.155 at l = 4) and the m-resolved angular weighting. On top of P_l to 0.2 the baseline gives
+8% on ln A_s and pulls the minimum from +1.4 to +0.5 sigma, i.e. it anchors the amplitude where P_l's one-loop model
+starts to drift, not new information. The joint WST + P_l(0.12) gain reported in Sec. V (omega_cdm 0.0030 -> 0.0026,
+ln A_s 0.052 -> 0.047) is the first layer's reach beyond k = 0.12, not non-Gaussian information. The real-space
+conclusion therefore carries over: for these three parameters the WST is a filtered two-point function, and the
+second layer and the q < 2 moments bring nothing measurable at perturbative scales. The halo WST's competitiveness
+with P_l comes from its first layer; the gain beyond P_l at k = 0.2 would have to come from the bands at sigma = 12.5
+and l = 5, 6 (emulator in training) and from checking which of the two stays unbiased there.
