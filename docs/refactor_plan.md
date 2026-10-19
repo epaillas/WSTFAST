@@ -283,7 +283,13 @@ Each step lands as its own commit on `main`, with the test suite green. Steps 0-
    - baseline (sigma_j1 >= 12.5, 384 points), template only: unbiased at V = 64 (-0.03, +0.09 sigma) but chi^2 = 780
      for 339 dof, so sigma_j1 = 12.5 is not described even with the template;
    - template without W: conservative chi^2 222 at V = 64 (omega_cdm -0.5, lnA +0.56 sigma).
-   Open: which vector becomes the Sec. IV baseline. The paper text is untouched.
+   Decided 2026-10-18: the Sec. IV baseline is S1m >= 25 + S21m sigma_j1 >= 17.6 with the template and W. A draft of
+   Sec. IV is in paper/main_v4.tex (untracked, with paper/figures/real_*.pdf and paper/generated/numbers_real.tex from
+   scripts/paper/real_space.py). In that draft the baseline stays within 0.2 sigma up to V = 64 (chi^2 133 for 189 dof),
+   and the extended vector is biased by +1 sigma at V = 1. At V = 60 with 4 parameters, the WST does not beat P_0 to
+   k = 0.1 on omega_cdm (0.0038 against 0.0032). For l = 1 the tree response (Eq. response_rsd, no 2 F2 P P term)
+   misses the change of sign at K sigma ~ 2. The analytic-covariance section, the Delta N appendix and two discussion
+   paragraphs still describe the m-summed matter model.
 
    Original plan for this step: Measure, train the real-space emulator, rerun the Sec. IV fits and
    figures (`scripts/paper/` moves onto the new API), and update the paper text and numbers. This is the only
