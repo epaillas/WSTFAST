@@ -30,6 +30,20 @@ Jacobian (6 x 2 exact basis calls, ~4 min) is cached next to ``--output``:
         --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic.h5 --neutrino 0.06 --volume 25 \\
         --output outputs/fisher/neutrino_V25.json
 
+With ``--layer2-info``, it instead asks how much the halo second layer carries when its non-Gaussian part (the
+layer-2 template) is modelled rather than marginalised: each case of ``LAYER2_CASES`` is a fit.py vector (``build_fit``:
+its covariance with Hartlap and Percival, the template's Monte Carlo error and, with ``--s21-layer2-marg``, the
+analytically marginalised template amplitudes), the Jacobian is taken by central differences of the emulated model at
+the Quijote cosmology and the nuisances of ``--fiducial``, the nuisances are marginalised with their Gaussian priors
+(flat ones add nothing), for vary = (omega_cdm, logA, h) and with n_s. The S21m-alone cases are also split by l and by
+sigma_2, and the bands and P_l are also given with b2 and bG2 known (the ceiling of what breaking the bias degeneracies
+could add). ``--fit-args`` adds fit.py arguments to every case:
+
+    python scripts/fisher_rsd.py --layer2-info --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \
+        --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_bands12.h5 --volume 60 \
+        --fiducial outputs/inference/rsd/q2/pk02_V60/summary.json outputs/inference/rsd/q2/q2_12k18_s21_V60/summary.json \
+        --output outputs/fisher/layer2_info_V60.json
+
 Example (halos):
 
     python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
@@ -54,7 +68,8 @@ from wstfast.data import load_measurement
 
 COSMOLOGY = ("omega_cdm", "logA", "n_s", "h")
 STEPS = {"omega_cdm": 0.002, "logA": 0.01, "n_s": 0.005, "h": 0.005, "omega_b": 0.0005, "m_ncdm": 0.02, "b1": 0.02, "b2": 0.05, "bG2": 0.05,
-         "bGamma3": 0.05, "alpha0": 0.02, "alpha2": 1.0, "a_ng": 0.01}
+         "bGamma3": 0.05, "alpha0": 0.02, "alpha2": 1.0, "a_ng": 0.01, "c_v": 0.2, "db3": 0.01, "dbG3": 0.01,
+         "dbdG2": 0.01}
 DEFAULT_STEP = {"c": 1.0, "noise": 0.01}
 #: The cosmology of the neutrino forecast, and its prior sets (Gaussian sigmas): BBN omega_b alone, and Planck 2018
 #: (TT,TE,EE+lowE+lensing) on the primordial parameters and omega_b.
@@ -66,6 +81,25 @@ NEUTRINO_PRIORS = {"LSS only (BBN omega_b)": {"omega_b": 0.00037},
 BASELINE = ["--stats", "pk", "s1m", "s21m", "--kmax", "0.12", "--s21-min-scale", "25", "--s21-white",
             "--cubic-biases", "relation", "--s21-layer2", "outputs/layer2/template_rsd.json", "--s21-layer2-c", "halo",
             "--s21-layer2-marg", "per_l"]
+
+#: The halo q = 2 vector of docs/paper_plan.md (bands to k84 = 0.18 + S21m, `q2_12k18_s21_V60`) and its pieces, for
+#: --layer2-info. "marg" marginalises the template amplitudes per l (width 1, as fitted), "w0.1" with width 0.1, "model"
+#: keeps them at the template (only its Monte Carlo error enters the covariance), "exact" also drops that error.
+L2_BANDS = ["--q", "2.0", "--s1-min-scale", "12.5", "--s1-ells", "0", "1", "2", "3", "4", "5", "6", "--s1-kmax", "0.18"]
+L2_S21 = ["--s21-min-scale", "25", "--s21-white", "--s21-layer2", "outputs/layer2/template_rsd.json",
+          "--s21-layer2-c", "halo"]
+L2_TREATMENTS = {"marg": ["--s21-layer2-marg", "per_l"],
+                 "w0.1": ["--s21-layer2-marg", "per_l", "--s21-layer2-marg-width", "0.1"], "model": [], "exact": []}
+LAYER2_CASES = {
+    **{f"(a/b) bands + S21m [{t}]": (["--stats", "s1m", "s21m"] + L2_BANDS + L2_S21 + extra, t)
+       for t, extra in L2_TREATMENTS.items()},
+    "(c) bands alone": (["--stats", "s1m"] + L2_BANDS, None),
+    **{f"(d) S21m alone [{t}]": (["--stats", "s21m"] + L2_S21 + extra, t) for t, extra in L2_TREATMENTS.items()},
+    "(e) P_l to 0.2": (["--stats", "pk", "--kmax", "0.2"], None),
+    **{f"(f) P_l to 0.2 + S21m [{t}]": (["--stats", "pk", "s21m", "--kmax", "0.2"] + L2_S21 + extra, t)
+       for t, extra in L2_TREATMENTS.items() if t != "w0.1"},
+}
+L2_REPORT = ("omega_cdm", "logA", "n_s", "h", "b1", "b2", "bG2")
 
 
 def load_fit():
@@ -92,6 +126,8 @@ def parse_args():
     parser.add_argument("--window-ratios", type=Path, nargs="*", default=None,
                         help="window mode: npz per cap (s1m (nmock, J+1, L+1, L+1), s21m (nmock, nentry), s21m_keys, "
                              "sigma, veff) of measured / window-model ratios of fiducial survey mocks")
+    parser.add_argument("--layer2-info", action="store_true",
+                        help="layer-2 mode: information of the modelled vs marginalised halo second layer")
     parser.add_argument("--neutrino", type=float, default=None,
                         help="neutrino mode: fiducial sum of neutrino masses [eV]")
     parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
@@ -219,6 +255,75 @@ def window_calibration(args, fr):
     print(f"wrote {args.output}")
 
 
+def layer2_information(args, fr):
+    """Fisher errors of the LAYER2_CASES with the template amplitudes marginalised or modelled (module docstring)."""
+    import shlex
+
+    from wstfast.data import hartlap_factor, precision_matrix
+
+    fiducial_files = [json.loads(path.read_text())["bestfit"] for path in args.fiducial if path.exists()]
+    results = {}
+    for ns in (False, True):
+        vary = ["omega_cdm", "logA", "n_s", "h"] if ns else ["omega_cdm", "logA", "h"]
+        for case, (case_args, treatment) in LAYER2_CASES.items():
+            fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator),
+                                                "--output-dir", "unused", "--volume", str(args.volume), "--vary", *vary,
+                                                *case_args] + shlex.split(args.fit_args)))
+            built = inference.build_fit(fit)
+            theory, labels = built["theory"], built["labels"]
+            params = get_params(theory).select(varied=True, derived=False)
+            names = params.names()
+            fiducial = {name: float(params[name].value) for name in names}
+            for best in fiducial_files:
+                fiducial.update({n: float(v) for n, v in best.items() if n in names and n not in COSMOLOGY})
+            fiducial.update({n: QUIJOTE_COSMOLOGY[n] for n in COSMOLOGY if n in names})
+            fiducial.update({n: 0.0 for n in names if n.startswith("noise")})
+            model = build(theory)
+            jacobian = np.array([(np.asarray(model({**fiducial, n: fiducial[n] + step_of(n)}))
+                                  - np.asarray(model({**fiducial, n: fiducial[n] - step_of(n)}))) / (2 * step_of(n))
+                                 for n in names])
+            covariance = np.array(built["covariance"])
+            if treatment == "exact":  # without the template's Monte Carlo error (S21m rows pass the compressions as is)
+                mean = built["problem"]["vectors"].mean(axis=0)
+                variance = dict(zip(built["problem"]["labels"],
+                                    inference.layer2_variance(fit, built["problem"]["labels"], mean)))
+                covariance -= np.diag([variance.get(label, 0.0) for label in labels])
+            prior = np.array([prior_sigma(params[n]) if params[n].prior.dist == "norm" else np.inf for n in names])
+            hartlap = hartlap_factor(built["nsims"], len(labels))
+
+            def errors(rows, known=()):
+                cov = covariance[np.ix_(rows, rows)] * hartlap_factor(built["nsims"], len(rows)) / hartlap
+                jac = jacobian[:, rows]
+                cols = [i for i, n in enumerate(names)
+                        if n not in known and (n in COSMOLOGY or np.any(jac[i] != 0))]
+                fisher = (jac[cols] @ precision_matrix(cov * built["m1"]) @ jac[cols].T
+                          + np.diag(1.0 / prior[cols] ** 2))
+                inverse = np.linalg.inv(fisher)
+                return {names[i]: float(np.sqrt(inverse[k, k])) for k, i in enumerate(cols) if names[i] in L2_REPORT}
+
+            key = ("[n_s free] " if ns else "") + case
+            results[key] = dict(ndata=len(labels), nparams=len(names), sigma=errors(np.arange(len(labels))))
+            print(f"{key:44s} n={len(labels):4d} np={len(names):3d} | "
+                  + " ".join(f"{p} {results[key]['sigma'].get(p, np.nan):.4f}" for p in L2_REPORT), flush=True)
+            subsets = {}
+            if case.startswith(("(c)", "(e)")):
+                subsets["b2, bG2 known"] = (np.arange(len(labels)), ("b2", "bG2"))
+            if case.startswith("(d)"):  # where the S21m information sits: per l and per sigma_2 (sigma_1 = 25 only)
+                parts = [label.split("_") for label in labels]
+                for at in (3, 2):
+                    for value in sorted({p[at] for p in parts}):
+                        subsets[value] = (np.array([n for n, p in enumerate(parts) if p[at] == value]), ())
+            for value, (rows, known) in subsets.items():
+                sub = f"{key} {value}"
+                results[sub] = dict(ndata=len(rows), sigma=errors(rows, known))
+                print(f"  {sub:42s} n={len(rows):4d} | "
+                      + " ".join(f"{p} {results[sub]['sigma'].get(p, np.nan):.4f}" for p in L2_REPORT), flush=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(dict(volume=args.volume, emulator=str(args.emulator), fit_args=args.fit_args,
+                                           cases={k: v[0] for k, v in LAYER2_CASES.items()}, results=results), indent=2))
+    print(f"wrote {args.output}")
+
+
 def neutrino_forecast(args, fr):
     """sigma(M_nu) of P_l, the WST (S1m + S21m) and both, from exact derivatives (module docstring)."""
     import shlex
@@ -302,6 +407,8 @@ def main():
         return window_calibration(args, fr)
     if args.neutrino is not None:
         return neutrino_forecast(args, fr)
+    if args.layer2_info:
+        return layer2_information(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
     # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit.py's default cuts.

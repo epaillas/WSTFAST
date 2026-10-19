@@ -325,3 +325,63 @@ Consequence: the halo WST, through its q = 2 first layer (m-resolved band powers
 its own reach stops at k84 = 0.18; pushing the bands to 0.2 buys 10-18% at the price of a 1.5 sigma bias in h, a model
 limit, not an emulator one. With AP the picture is the same (omega_cdm shift +1.4 -> +0.8, widths unchanged). The
 baseline choice (k84 = 0.18 vs P_l to 0.2, with or without the q = 0.8 layer) is the user's.
+
+### Does modelling the halo second layer (instead of marginalising it) beat P_l to 0.2? (2026-10-19, evening)
+
+Question: the halo WST (bands to k84 = 0.18 + S21m, `q2_12k18_s21_V60`) only ties P_l to 0.2; is the bispectrum-like
+information of S21m lost to the per-l marginalisation of the layer-2 template amplitudes, and does the rest sit in
+n_s and the biases, which the scans never vary? Fisher at V = 60 from the fit's own likelihood (`build_fit`: sample
+covariance with Hartlap and Percival, template Monte Carlo error, marginalised amplitudes), central differences of
+the bands12 emulator at the Quijote cosmology and the `pk02_V60` / `q2_12k18_s21_V60` best-fit nuisances, nuisances
+marginalised with their Gaussian priors: `scripts/fisher_rsd.py --layer2-info` (new mode, `LAYER2_CASES`; output
+`outputs/fisher/layer2_info_V60.json`). Template treatments: **marg** = amplitudes per l with width 1 (as fitted),
+**w0.1** = width 0.1, **model** = amplitudes fixed at the template (only its Monte Carlo error in the covariance),
+**exact** = also without that error (a perfectly known template). The Fisher errors reproduce the scans (row a:
+0.0022 / 0.042 / 0.0038 against 0.0023 / 0.042 / 0.0038; P_l: 0.0023 / 0.040 / 0.0038 against 0.0024 / 0.039 / 0.0040).
+
+| vector | n | omega_cdm | ln A_s | h | b1 | b2 | bG2 | n_s free: omega_cdm / ln A_s / n_s / h | b2 / bG2 |
+|---|---|---|---|---|---|---|---|---|---|
+| (a) bands + S21m, marg | 126 | 0.0022 | 0.0421 | 0.0038 | 0.047 | 0.25 | 0.121 | 0.0047 / 0.0687 / 0.0286 / 0.0058 | 0.25 / 0.126 |
+| (b) bands + S21m, w0.1 | 126 | 0.0022 | 0.0420 | 0.0038 | 0.047 | 0.25 | 0.120 | 0.0047 / 0.0686 / 0.0285 / 0.0058 | 0.25 / 0.124 |
+| (b) bands + S21m, model | 126 | 0.0022 | 0.0420 | 0.0038 | 0.047 | 0.25 | 0.120 | 0.0047 / 0.0686 / 0.0285 / 0.0058 | 0.25 / 0.124 |
+| (b) bands + S21m, exact | 126 | 0.0022 | 0.0420 | 0.0038 | 0.047 | 0.24 | 0.119 | 0.0047 / 0.0686 / 0.0285 / 0.0058 | 0.25 / 0.123 |
+| (c) bands alone | 72 | 0.0023 | 0.0420 | 0.0041 | 0.048 | 0.62 | 0.321 | 0.0051 / 0.0774 / 0.0360 / 0.0059 | 0.71 / 0.324 |
+| (c) bands alone, b2 and bG2 known | 72 | 0.0021 | 0.0412 | 0.0037 | 0.045 | -- | -- | 0.0047 / 0.0702 / 0.0287 / 0.0058 | -- |
+| (d) S21m alone, marg | 54 | 0.0352 | 0.322 | 0.149 | 0.48 | 0.63 | 0.264 | 0.079 / 0.85 / 0.54 / 0.158 | 0.63 / 0.279 |
+| (d) S21m alone, w0.1 | 54 | 0.0319 | 0.289 | 0.130 | 0.48 | 0.60 | 0.252 | 0.072 / 0.75 / 0.49 / 0.138 | 0.61 / 0.274 |
+| (d) S21m alone, model | 54 | 0.0319 | 0.288 | 0.130 | 0.48 | 0.60 | 0.252 | 0.071 / 0.74 / 0.49 / 0.138 | 0.61 / 0.274 |
+| (d) S21m alone, exact | 54 | 0.0288 | 0.265 | 0.116 | 0.46 | 0.57 | 0.240 | 0.061 / 0.64 / 0.42 / 0.123 | 0.59 / 0.269 |
+| (e) P_l to 0.2 | 48 | 0.0023 | 0.0397 | 0.0038 | 0.046 | 0.57 | 0.321 | 0.0046 / 0.0670 / 0.0321 / 0.0056 | 0.59 / 0.322 |
+| (e) P_l to 0.2, b2 and bG2 known | 48 | 0.0020 | 0.0362 | 0.0033 | 0.037 | -- | -- | 0.0046 / 0.0668 / 0.0298 / 0.0056 | -- |
+| P_l to 0.2 + S21m, marg | 102 | 0.0021 | 0.0384 | 0.0035 | 0.041 | 0.25 | 0.121 | 0.0046 / 0.0672 / 0.0298 / 0.0057 | 0.26 / 0.125 |
+| P_l to 0.2 + S21m, model | 102 | 0.0021 | 0.0383 | 0.0035 | 0.041 | 0.25 | 0.118 | 0.0046 / 0.0671 / 0.0298 / 0.0057 | 0.25 / 0.122 |
+
+Where S21m's information sits: the vector is a single scale pair (sigma_1 = 25, sigma_2 = 70.7) with l = 1-4. No
+single l constrains anything (l = 1, 2 are fully degenerate with the noise and white amplitudes; l = 4, the best,
+gives 0.39 / 0.76 / 0.42 on omega_cdm / ln A_s / h, l = 3 0.20 / 4.0 / 2.0); the information of S21m alone is in the
+combination of the multipoles, ten times better than any of them.
+
+Reading:
+
+- **The template marginalisation is not where the information goes.** Fixing the template amplitudes (or even
+  removing the template's Monte Carlo error) changes the cosmology errors of bands + S21m by less than 0.5% and those
+  of b2 / bG2 by 1-3%, with or without n_s. Only for S21m alone does it matter (10% from marg to model, another 10%
+  from the template error), and S21m alone is 14 / 7 / 32 times weaker than the bands on omega_cdm / ln A_s / h.
+- **S21m's information is bias information.** On top of the bands it shrinks b2 from 0.62 to 0.25 and bG2 from 0.32
+  to 0.12 (factor 2.5), and leaves b1 and the three cosmological parameters where they are (n_s fixed: omega_cdm
+  0.0023 -> 0.0022, h 0.0041 -> 0.0038). That is the ceiling: knowing b2 and bG2 exactly would give the bands only
+  0.0021 / 0.041 / 0.0037. With n_s free the bias information becomes n_s information: 0.036 -> 0.0286, exactly the
+  0.0287 of the bands with b2 and bG2 known, so S21m saturates what bias-breaking can give the bands.
+- **Against P_l to 0.2.** n_s fixed: no, for any treatment (0.0022 / 0.042 / 0.0038 against 0.0023 / 0.040 / 0.0038;
+  ln A_s stays 6% behind). n_s free: the WST beats P_l alone on n_s by 11% (0.0286 against 0.0321) and ties
+  omega_cdm, ln A_s, h (within 2-4%, in P_l's favour), but this already holds with the template marginalised, and it
+  is S21m's bias information, which P_l takes just as well: P_l + S21m reaches n_s 0.0298 (= P_l with b2, bG2 known).
+  The WST-only vector is then 4% ahead of P_l + S21m on n_s and 1-2% behind on the rest.
+
+Answer: modelling the second layer instead of marginalising it would not make the WST beat P_l to 0.2 for
+omega_cdm, ln A_s or h, and changes nothing for n_s either; the 11% n_s gain over P_l alone exists already and comes
+from S21m pinning b2 and bG2. Caveat: "modelled" here means the calibrated template with its amplitudes fixed; its
+cosmology dependence enters only through R_l(s_lin^2), so a layer-2 model whose non-Gaussian part itself scales with
+the cosmology and the biases (a bispectrum prediction rather than a fitted correction) is not tested. Since what S21m
+carries on top of either two-point vector is bias information and no single multipole constrains cosmology, there is
+no sign that it would change the conclusion; a broader S21m vector (sigma_1 < 25, more sigma_2) is the place to look.
