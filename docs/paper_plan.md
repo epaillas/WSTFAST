@@ -100,9 +100,16 @@ k84 = 0.18. Code: `--stats band` (`spectrum.BandProjection`, `PowerTheory`, `inf
 
 Three traps, all hit on the way:
 
-1. **Overlap.** A block carrying both q = 0.8 and q = 2 turns their ratio into a 1e-4 measurement of the Edgeworth
-   factor, which the model has to 3e-3: chi^2 ~ 4e5. The bands must sit below the q = 0.8 first layer
-   (`band_max_scale < s1_min_scale`, guarded in `build_problem`) or replace it.
+1. **Overlap (retracted).** The first fits with q = 0.8 and q = 2 on the same blocks exploded (chi^2 ~ 4e5), which
+   was blamed on their ratio measuring the Edgeworth factor beyond the model's accuracy; the cause was trap 2. With
+   the PCA cut the overlap is harmless: S1m(q = 0.8) >= 25 + S1(q = 2) >= 25 fits at V = 1 / 8 / 64 (chi^2 0.1 /
+   0.8 / 6.7 for 42 dof, shifts <= 0.4 sigma), and S1m(q = 0.8) >= 25 on top of bands12k gives chi^2 0.1 / 0.9 /
+   7.0 (46 dof) with omega_cdm 0.0 / ln A_s -0.5 / h +0.6 sigma at V = 64. It just adds nothing: Fisher at V = 60
+   0.0018 / 0.0131 / 0.0044 for S1(q = 2) >= 25 alone and 0.0018 / 0.0133 / 0.0045 with q = 0.8 added (separate
+   c_0: 0.0019 / 0.0133 / 0.0045); bands12k 0.0008 / 0.0077 / 0.0022 alone, 0.0008 / 0.0079 / 0.0023 with q = 0.8,
+   0.0008 / 0.0081 / 0.0024 with q = 0.8 and S21m. The reduced moments of the filtered field (the Edgeworth factor)
+   depend on the local slope, which the bands already fix, not on the amplitude. `build_problem` now prints a
+   notice instead of refusing the overlap (2026-10-19).
 2. **Numerical low rank.** The bands are smooth functionals of the same P-hat, so on the lattice their sample
    correlation has eigenvalues decaying geometrically to the float32 floor (1e-14): exact linear relations across
    boxes (checked on disjoint halves) and a garbage inverse (chi^2 = 6067/30 at V = 1). `band_compression` keeps the
@@ -170,7 +177,7 @@ Consequences for the paper (user to decide):
 
 - The real-space baseline can be the q = 2 first layer (bands12k, or bands17 + the sigma = 12.5, l <= 2 bands) plus
   S21m with the template: the WST alone then matches P_0 to k = 0.2 and the explicit WST + P(k) combination is not
-  needed. The q = 0.8 first layer should go (lossy, and it cannot coexist with q = 2 on the same block).
+  needed. The q = 0.8 first layer should go: it is a lossy copy of q = 2 and adds nothing on top of it.
 - The honest message is that the second layer adds nothing measurable for (omega_cdm, ln A_s, h) in real-space
   matter; the first layer at q = 2 is the whole story there. Whatever the WST gains over P(k) has to come from the
   halo/redshift-space analysis (bias, FoG, n_s) -- which is the paper's subject anyway.

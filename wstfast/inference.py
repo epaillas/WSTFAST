@@ -864,10 +864,9 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                             if np.sqrt(gammaincinv(c.ell + 1.5, 0.84)) / config.sigma(c.j) <= options.band_kmax]
         if not coefficients:
             raise SystemExit("no band power passes the cuts")
-        if "s1m" in options.stats and config.sigma(min(c.j for c in coefficients)) < options.s1_min_scale - 1e-6 \
-                and options.band_max_scale >= options.s1_min_scale:
-            raise SystemExit("the band powers overlap the S1m scales: set band_max_scale below s1_min_scale (a block "
-                             "with both exponents measures the Edgeworth factor beyond the model's accuracy)")
+        if "s1m" in options.stats and options.band_max_scale >= options.s1_min_scale:
+            print("band powers and S1m on the same blocks: their ratio measures the Edgeworth factor, which carries no "
+                  "cosmological information in real-space matter (sigma >= 25 fits to V = 64 with the PCA cut)")
         if options.ap:
             raise SystemExit("the band powers have no AP projection yet")
         projection = BandProjection(config, coefficients, grid, **lattice)
