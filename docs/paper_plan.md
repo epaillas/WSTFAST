@@ -247,3 +247,81 @@ conclusion therefore carries over: for these three parameters the WST is a filte
 second layer and the q < 2 moments bring nothing measurable at perturbative scales. The halo WST's competitiveness
 with P_l comes from its first layer; the gain beyond P_l at k = 0.2 would have to come from the bands at sigma = 12.5
 and l = 5, 6 (emulator in training) and from checking which of the two stays unbiased there.
+
+### Halo band powers to k ~ 0.2: the bands12 emulator (2026-10-19, afternoon)
+
+Follow-up of the previous subsection: the q = 2 first layer reaches P_l to 0.2 only with the bands at sigma = 17.7, l =
+5, 6 and at sigma = 12.5, l <= 2, which no halo emulator covered. New emulator
+`outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_bands12.h5` (git-ignored; copies here and on Perlmutter):
+the ap3_base settings (S21 of the baseline, cubic biases, fog, ir, kmax 0.3, ap_order 3, the same bounds, 369 Taylor
+nodes) with S1 at j >= 4 (sigma >= 12.5) and l <= 6 (`train_emulator.py --s1-min-scale 12.5 --s1-ells 0 1 2 3 4 5 6`,
+new option; commit b279657), 42 first-layer coefficients against 20. Trained in 56 min of one Perlmutter CPU node
+(64 then 32 MPI ranks, single-process fit from the checkpoint; the per-node cost is that of ap3_base, the first-layer
+cumulants are not the bottleneck). Validation at 2 random points (`.validation.json`): S1m max 1.8e-4 / median 1.2e-4
+relative (ap3_base: 3.5e-5 / 2.7e-5; the new blocks are the hardest), P_l 5.7e-3 / 3.3e-3 and S21m 2.5e-4 / 1.4e-4
+(identical to ap3_base: its P_s grid equals that of ap3_base to the bit at 6 points of the box and differs from the
+no-AP fog_cubic emulator by 1.2e-4, so P_l to 0.2 fitted with it reproduces the `pk02` profiles to 0.02 sigma and the
+P_l references need no rerun; `pk02_b12*`).
+
+Data vector (`fit.py --stats s1m s21m --q 2.0 --s1-min-scale 12.5 --s1-ells 0 1 2 3 4 5 6 --s1-kmax 0.2`, the new
+per-scale multipole cut on the 84th-percentile wavenumber of the band, `inference.band_k84`, shared with the band
+powers): sigma = 12.5 at l <= 2 plus sigma >= 17.7 at l <= 6 = 38 S1 coefficients, 146 m-resolved entries, 75 principal
+components kept by the PCA cut (1e-4), plus the 54 S21m entries of the baseline (sigma_1 = 25 -> 70.7, white term,
+template per l): 129 data points, 31 parameters, the baseline nuisances, n_s fixed. Runs in `outputs/inference/rsd/q2/`:
+`q2_12k_s21[_ap]_V{60,64}` (profiles) and the scans `q2_12k_s21[_ap]_{logA,omega,h}<value>_V{60,64}`; the reach
+ladder `q2_12k{15,18}_s21[_ap]_*` (the same vector with `--s1-kmax` 0.15 / 0.18); the P_l references `pk02[_ap]_*`,
+`pk015_*`, `pk018_*` (no-AP emulator; scans at V = 60 and 64 for both AP settings at 0.2). Scan launchers and the
+parabola summary: `halo_bands12.sh`, `scan_chunk.sh`, `scan_summary.py` in the emulator session's scratchpad (the
+pattern of the previous subsection).
+
+**AP bug found on the way (fixed, commit 9e67ad0).** The first AP fit landed at chi^2 = 198 against 60 without AP, and
+the AP model differed from the no-AP one at alpha = 1, where the AP polynomial is exact. Cause: `s1m_ap_projection`
+summed the lattice modes to k = 0.27 (so that the stretched modes stay on the P_s grid) while `S1mProjection` sums them
+to the grid's 0.3; the sigma = 12.5, l = 2 band keeps 0.17% of its weight between the two (1e-14 for the baseline's
+sigma >= 25, which is why the paper's AP fits never saw it), two orders of magnitude above its error at V = 60. The AP
+projection now takes the grid's kmax (the modes a stretch carries beyond the grid read its last row, a tail of 2e-4
+at most): identical chi^2 at alpha = 1, 60.2 against 59.6 at the no-AP best fit. The paper's AP baseline is unchanged.
+
+Results (widths from chi^2 scans with one parameter fixed, parabola fits; shifts of the scan minima from the truth
+in sigma; n_s fixed; P_l to 0.2 rerun with AP and scanned at V = 60 and 64 for both settings):
+
+| vector | AP | V | sigma(omega_cdm) | sigma(ln A_s) | sigma(h) | shifts omega_cdm / ln A_s / h | chi^2/dof |
+|---|---|---|---|---|---|---|---|
+| P_l to 0.2 | no | 60 | 0.0024 | 0.039 | 0.0040 | -0.9 / +1.4 / -0.7 | 18.8/33 |
+| P_l to 0.2 | no | 64 | 0.0024 | 0.038 | 0.0039 | -1.0 / +1.4 / -0.8 | 20.0/33 |
+| P_l to 0.2 | yes | 60 | 0.0024 | 0.039 | 0.0038 | -1.2 / +1.5 / -0.5 | 18.1/33 |
+| P_l to 0.2 | yes | 64 | 0.0023 | 0.038 | 0.0037 | -1.3 / +1.6 / -0.5 | 19.2/33 |
+| bands to k84 = 0.2 + S21m | no | 60 | 0.0020 | 0.035 | 0.0033 | +1.4 / -0.3 / +1.5 | 59.6/98 |
+| bands to k84 = 0.2 + S21m | no | 64 | 0.0019 | 0.034 | 0.0032 | +1.4 / -0.3 / +1.5 | 63.4/98 |
+| bands to k84 = 0.2 + S21m | yes | 60 | 0.0020 | 0.035 | 0.0034 | +0.8 / 0.0 / +1.5 | 59.7/98 |
+| bands to k84 = 0.2 + S21m | yes | 64 | 0.0019 | 0.034 | 0.0033 | +0.8 / 0.0 / +1.5 | 63.5/98 |
+| bands to k84 = 0.18 + S21m | no | 60 | 0.0023 | 0.042 | 0.0038 | +0.6 / +0.8 / +0.9 | 23.7/95 |
+| bands to k84 = 0.18 + S21m | yes | 60 | 0.0023 | 0.042 | 0.0039 | +0.4 / +0.9 / +0.9 | 23.5/95 |
+
+Reach ladder (no AP, V = 60; the same vector with `--s1-kmax` 0.15 / 0.18 / 0.2, against P_l to the same kmax):
+
+| reach | bands + S21m: sigma (shift) omega_cdm / h | chi^2/dof | P_l: sigma (shift) omega_cdm / h | chi^2/dof |
+|---|---|---|---|---|
+| 0.15 (sigma = 12.5 at l = 0, 17.7 at l <= 3) | 0.0026 (-0.3) / 0.0047 (-0.4) | 12.5/89 | 0.0028 (-0.4) / 0.0046 (-0.4) | 4.7/21 |
+| 0.18 (+ 12.5 at l = 1, 17.7 at l = 4, 5) | 0.0023 (+0.6) / 0.0038 (+0.9) | 23.7/95 | 0.0027 (-0.1) / 0.0043 (+0.1) | 9.9/27 |
+| 0.2 (+ 12.5 at l = 2, 17.7 at l = 6) | 0.0020 (+1.4) / 0.0033 (+1.5) | 59.6/98 | 0.0024 (-0.9) / 0.0040 (-0.7) | 18.8/33 |
+
+**Answer: not to k84 = 0.2; yes to k84 = 0.18.** The full vector (sigma = 12.5 at l <= 2 plus sigma >= 17.7 at l <= 6)
+is 10-18% tighter than P_l to 0.2 in all three parameters, but it is biased: the minima sit at +1.4 sigma in omega_cdm
+and +1.5 in h without AP (+0.8 and +1.5 with AP; ln A_s is fine), at V = 60 and 64 alike, and the last two blocks
+(sigma = 12.5, l = 2, k84 = 0.184, and sigma = 17.7, l = 6, k84 = 0.180) raise chi^2 by 36 for 3 more principal
+components. The best-fit residuals locate it: the m = 0 entries of the sigma = 12.5-25 bands at l >= 2 sit 0.3-0.6%
+above the model (+2 to +3.8 sigma at V = 60; sigma = 12.5, l = 2, m = 0 is the worst), the large-scale blocks
+(sigma >= 35) 0.4-0.6% below, so the fit raises omega_cdm and h to push power to small scales -- the one-loop + c_0
+model of P_s(k, mu) running out at k ~ 0.2 along the line of sight, where the bands weight the spectrum differently
+from the Legendre multipoles (P_l to 0.2 drifts the other way, -0.9 / +1.4 / -0.7). The emulator is not the cause
+(S1m validation 1.8e-4, at most 0.15 of the V = 60 error of the smallest-scale entries). Cut at k84 = 0.18 the bands
+stay within 1 sigma (+0.6 / +0.8 / +0.9, chi^2 23.7/95) and are as tight as P_l to 0.2: 0.0023 / 0.042 / 0.0038
+against 0.0024 / 0.039 / 0.0040 (omega_cdm and h equal or 5% tighter, ln A_s 7% wider); with AP 0.0023 / 0.042 /
+0.0039 and shifts +0.4 / +0.9 / +0.9 (V = 64 not run for this cut: from 60 to 64 the shifts only grow by 3%). At
+k84 = 0.15 bands and P_l agree to 5% and are both unbiased.
+
+Consequence: the halo WST, through its q = 2 first layer (m-resolved band powers) plus S21m, matches P_l to k = 0.2 when
+its own reach stops at k84 = 0.18; pushing the bands to 0.2 buys 10-18% at the price of a 1.5 sigma bias in h, a model
+limit, not an emulator one. With AP the picture is the same (omega_cdm shift +1.4 -> +0.8, widths unchanged). The
+baseline choice (k84 = 0.18 vs P_l to 0.2, with or without the q = 0.8 layer) is the user's.
