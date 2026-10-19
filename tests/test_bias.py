@@ -237,6 +237,11 @@ def test_band_powers_are_the_q2_first_layer():
     matrix, names = m_compression(labels)
     assert names == ["S1m_j6_l2_m0", "S1m_j6_l2_m1+", "S21m_j6_j9_l1_m0_m1+", "S21m_j6_j9_l1_m1+_m1+", "S1q2_j4_l3"]
     np.testing.assert_allclose(matrix @ np.arange(1.0, 7.0), [1.0, 2.5, 4.0, 5.0, 6.0])
+    fields = [(6, 2, 0), (6, 2, 1), (6, 2, 2), (5, 1, 1)]
+    assert [p.name for p in nuisance.noise(fields).values()] == ["noise_j6_l2_m0", "noise_j6_l2_m1", "noise_j6_l2_m2",
+                                                                 "noise_j5_l1_m1"]
+    tied = NuisanceParameters(ModelSpec.matter(space="real"), tie_m=True).noise(fields)
+    assert [p.name for p in tied.values()] == ["noise_j6_l2_m0", "noise_j6_l2_m1+", "noise_j6_l2_m1+", "noise_j5_l1_m1+"]
 
 
 def test_band_compression_keeps_leading_components():

@@ -488,12 +488,12 @@ class NuisanceParameters:
     #: Flat prior of the counterterms c0, c2, c4 [(Mpc/h)^2].
     COUNTERTERM_LIMITS = [-100.0, 100.0]
 
-    def __init__(self, spec: ModelSpec, cubic: str | None = None):
+    def __init__(self, spec: ModelSpec, cubic: str | None = None, tie_m: bool = False):
         if cubic not in (None, "zero", "relation"):
             raise ValueError(f"unknown cubic biases {cubic!r}")
         if cubic is not None and not spec.cubic:
             raise ValueError("cubic biases need a basis with the cubic-operator trispectrum (ModelSpec(cubic=True))")
-        self.spec, self.cubic = spec, cubic
+        self.spec, self.cubic, self.tie_m = spec, cubic, tie_m
 
     def bias(self) -> dict:
         from .theory.bias import CUBIC_NAMES
@@ -532,11 +532,15 @@ class NuisanceParameters:
         return {"c_v": Parameter("c_v", value=0.0, prior=dict(limits=[-5.0, 15.0]),
                                  ref=dict(dist="norm", loc=0.5, scale=0.2), latex=r"c_v")}
 
-    @staticmethod
-    def noise(fields) -> dict:
-        return {key: Parameter(f"noise_j{key[0]}_l{key[1]}_m{key[2]}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
-                               ref=dict(dist="norm", loc=0.0, scale=0.05), latex=rf"a_{{N,{key[0]},{key[1]},{key[2]}}}")
-                for key in fields}
+    def noise(self, fields) -> dict:
+        """With ``tie_m`` (real-space data compressed by ``inference.m_compression``, which only keeps the average of
+        the |m| >= 1 blocks) the fields with |m| >= 1 of a scale and order share one amplitude ``..._m1+``."""
+        params = {}
+        for key in fields:
+            m = "1+" if self.tie_m and key[2] >= 1 else str(key[2])
+            params[key] = Parameter(f"noise_j{key[0]}_l{key[1]}_m{m}", value=0.0, prior=dict(limits=[-1.0, 5.0]),
+                                    ref=dict(dist="norm", loc=0.0, scale=0.05), latex=rf"a_{{N,{key[0]},{key[1]},{m}}}")
+        return params
 
     @staticmethod
     def white(scales) -> dict:

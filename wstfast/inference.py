@@ -452,6 +452,9 @@ class FitOptions:
     #: measure the Edgeworth factor to a precision the model does not have).
     band_max_scale: float = 1e9
     band_ells: tuple = (0, 1, 2, 3, 4)
+    #: Keep only the bands whose 84th-percentile wavenumber (of the weight w_{jl}(k) k^2, a Gamma distribution in
+    #: sigma^2 k^2) lies below this [h/Mpc]: the k range of the band vector, comparable to a kmax of P(k).
+    band_kmax: float | None = None
     #: Counterterm of the band powers: "shared" (the S1m c0, the same spectrum) or "separate" (its own, c0_band).
     band_counterterm: str = "shared"
     #: The band powers are smooth functionals of the spectrum, numerically low-rank on the lattice: their sample
@@ -500,7 +503,8 @@ class FitOptions:
     cubic_biases: str | None = None
     #: Alcock-Paczynski distortions of the trial cosmology (redshift space).
     ap: bool = False
-    #: Real space: average the |m| blocks of S1m and S21m within their equally distributed classes (``m_compression``),
+    #: Real space: average the |m| blocks of S1m and S21m within their equally distributed classes (``m_compression``;
+    #: the noise amplitudes of the |m| >= 1 first-layer fields are then tied, ``NuisanceParameters(tie_m=True)``),
     #: so that the data vector is as short as the isotropic field allows (the Hartlap and Percival factors shrink).
     compress_m: bool = False
     #: The configuration of the data (set by build_problem; the layer-2 template is re-keyed to it).
@@ -760,7 +764,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         raise SystemExit(f"cubic biases need an emulator trained with --cubic-biases ({options.emulator} is not)")
     if options.ap and spec.space == "real":
         raise SystemExit("real space has no AP distortions")
-    nuisance = NuisanceParameters(spec, cubic=options.cubic_biases)
+    nuisance = NuisanceParameters(spec, cubic=options.cubic_biases, tie_m=options.compress_m)
     grid = SpectrumGrid(kmax=settings["kmax"])
     emulated = settings["coefficients"]
     boxsize, nmesh = settings.get("lattice", [1000.0, 256])  # the periodic lattice the emulator describes
@@ -853,6 +857,13 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         coefficients = [c for c in select_coefficients(config, s1_min_scale=options.band_min_scale,
                                                        s1_ells=options.band_ells)
                         if c.kind == "S1" and config.sigma(c.j) <= options.band_max_scale + 1e-6]
+        if options.band_kmax is not None:
+            from scipy.special import gammaincinv
+
+            coefficients = [c for c in coefficients
+                            if np.sqrt(gammaincinv(c.ell + 1.5, 0.84)) / config.sigma(c.j) <= options.band_kmax]
+        if not coefficients:
+            raise SystemExit("no band power passes the cuts")
         if "s1m" in options.stats and config.sigma(min(c.j for c in coefficients)) < options.s1_min_scale - 1e-6 \
                 and options.band_max_scale >= options.s1_min_scale:
             raise SystemExit("the band powers overlap the S1m scales: set band_max_scale below s1_min_scale (a block "

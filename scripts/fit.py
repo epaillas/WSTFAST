@@ -61,6 +61,8 @@ def parse_args(argv=None):
     parser.add_argument("--band-max-scale", type=float, default=defaults.band_max_scale,
                         help="largest sigma_j of the band powers (keep them below --s1-min-scale when S1m is fitted too)")
     parser.add_argument("--band-ells", type=int, nargs="+", default=list(defaults.band_ells))
+    parser.add_argument("--band-kmax", type=float, default=None,
+                        help="keep the bands whose 84th-percentile wavenumber lies below this [h/Mpc]")
     parser.add_argument("--band-counterterm", choices=("shared", "separate"), default=defaults.band_counterterm,
                         help="counterterm of the band powers: the S1m c0 (the same spectrum) or its own c0_band")
     parser.add_argument("--band-cut", type=float, default=defaults.band_cut,
