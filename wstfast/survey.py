@@ -476,7 +476,8 @@ class SurveySpectra:
                               compute_smooth2_spectrum_window)
 
         sbin = BinMesh2CorrelationPoles(self.mattrs, edges={}, ells=list(range(0, 9, 2)))
-        xi = compute_mesh2_correlation(RealMeshField(self.wu, attrs=self.mattrs), RealMeshField(self.wd, attrs=self.mattrs),
+        xi = compute_mesh2_correlation(RealMeshField(self.wu.astype(np.float64), attrs=self.mattrs),
+                                       RealMeshField(self.wd.astype(np.float64), attrs=self.mattrs),
                                        bin=sbin, los=self.los).clone(norm=[self.norm] * len(sbin.ells))
         return compute_smooth2_spectrum_window(xi, edgesin=np.asarray(edgesin), ellsin=tuple(ellsin), bin=self.bin)
 
