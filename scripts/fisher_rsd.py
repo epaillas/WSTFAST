@@ -195,6 +195,12 @@ def parse_args():
                         help="response mode: what the modulus cross-spectra P_Ud add to P_l to 0.2")
     parser.add_argument("--response-oneloop", action="store_true",
                         help="response mode: what a one-loop WST model could add to the proposed P(k) + WST baseline")
+    parser.add_argument("--response-x", type=float, nargs="+", default=[0.75, 1.0],
+                        help="response mode: reaches k <= x / sigma of the modulus cross-spectra")
+    parser.add_argument("--response-ells", type=int, nargs="+", default=[0, 2],
+                        help="response mode: multipoles of the modulus cross-spectra (stored: 0, 2, 4)")
+    parser.add_argument("--response-scales", type=int, nargs="+", default=[4, 5, 6],
+                        help="response mode: j of the modulus fields (4 = 12.5, 5 = 17.7, 6 = 25, 7 = 35.4 Mpc/h)")
     parser.add_argument("--response-gate", action="store_true",
                         help="response mode: linear recovery of the Quijote derivative steps by P_l + X")
     parser.add_argument("--neutrino", type=float, default=None,
@@ -588,6 +594,7 @@ def response_gate(args, forecast, details, merge, tree_q):
 
     from wstfast.data import load_power_dataset, precision_matrix
 
+    sigma = lambda j: 3.125 * 2 ** (j / 2)  # noqa: E731
     root = args.data_dir.parent.parent.parent  # data/quijote
     name = args.data_dir.name
 
@@ -614,10 +621,13 @@ def response_gate(args, forecast, details, merge, tree_q):
 
     sets = {tag: vectors(tag) for tag in ("Om_p", "Om_m", "s8_p", "s8_m")}
     out = {}
-    for label, spec in {"P_l to 0.2": ((), 0.75, (), False),
-                        "P_l + X (validated, k <= 0.75/sigma, c+e)": ((4, 5, 6), 0.75, ("c", "e"), True),
-                        "P_l + X (validated, k <= 0.75/sigma, e)": ((4, 5, 6), 0.75, ("e",), True),
-                        "P_l + X (sigma 17.7/25 only, c+e)": ((5, 6), 0.75, ("c", "e"), True)}.items():
+    specs = {"P_l to 0.2": ((), args.response_x[0], (), False)}
+    for x in args.response_x:
+        for scales in ((4, 5, 6), (5, 6), (4,)):
+            if all(j in args.response_scales for j in scales):
+                specs[f"P_l + X (sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, c+e, validated)"] = \
+                    (scales, x, ("c", "e"), True)
+    for label, spec in specs.items():
         errors, _ = forecast(vary, *spec)
         J, names, prior, cov = details["full"], details["names"], details["prior"], details["cov"]
         P = precision_matrix(cov)
@@ -627,7 +637,8 @@ def response_gate(args, forecast, details, merge, tree_q):
             (plp, Xp, fp), (plm, Xm, fm) = sets[pair[0]], sets[pair[1]]
             assert fp == fm
             def full_vector(pl, X):
-                parts = [pl] + [X[:, RESPONSE_FIELDS[a][0], RESPONSE_FIELDS[a][1], RESPONSE_FIELDS[a][2]][:, [0, 1]]
+                parts = [pl] + [X[:, RESPONSE_FIELDS[a][0], RESPONSE_FIELDS[a][1], RESPONSE_FIELDS[a][2]]
+                                [:, [e // 2 for e in args.response_ells]]
                                 .reshape(len(pl), -1)[:, c] for a, c in zip(details["fields"], details["cuts"])]
                 return np.concatenate(parts, axis=1)
             diff = full_vector(plp, Xp) - full_vector(plm, Xm)  # per seed
@@ -735,6 +746,8 @@ def response_oneloop(args, fr, base_case, forecast_case, sigma):
 
 def response_information(args, fr):
     """Fisher errors of P_l to 0.2 + the modulus cross-spectra X_a (module docstring)."""
+    RESPONSE_FIELDS[:] = [(j, l, m) for j in args.response_scales for l in range(1, 5) for m in range(l + 1)]
+    ells, xs = tuple(args.response_ells), tuple(args.response_x)
     from cosmoprimo import Cosmology
     from numpy.polynomial.legendre import leggauss
     from scipy.special import eval_legendre
@@ -758,7 +771,7 @@ def response_information(args, fr):
     model = ModulusCrossRSD([(sigma(j), l, m) for j, l, m in RESPONSE_FIELDS], kk, mu)
 
     def multipoles(grid):
-        return np.concatenate([(2 * e + 1) * (grid * eval_legendre(e, mu)[None, :] * wmu).sum(1) for e in (0, 2)])
+        return np.concatenate([(2 * e + 1) * (grid * eval_legendre(e, mu)[None, :] * wmu).sum(1) for e in ells])
 
     q = QUIJOTE_COSMOLOGY
     b1 = json.loads(args.fiducial[0].read_text())["bestfit"]["b1"]
@@ -780,24 +793,27 @@ def response_information(args, fr):
                    e=multipoles(np.ones((kk.size, mu.size))),
                    k4=multipoles((kk**4 * pk0(kk))[:, None] * np.ones_like(mu)[None, :]))
     columns["c2"] = np.concatenate([np.zeros(kk.size), columns["c"][kk.size:]])  # quadrupole-only counterterm
-    data = {a: X[:, j, l, m][:, [0, 1]].reshape(n, -1) for a, (j, l, m) in enumerate(RESPONSE_FIELDS)}
+    data = {a: X[:, j, l, m][:, [e // 2 for e in ells]].reshape(n, -1) for a, (j, l, m) in enumerate(RESPONSE_FIELDS)}
 
     def cut(a, x):
-        return np.tile(kk <= x / sigma(RESPONSE_FIELDS[a][0]), 2)
+        return np.tile(kk <= x / sigma(RESPONSE_FIELDS[a][0]), len(ells))
 
     # Model check: per field, counterterm and constant fitted to the mean of the boxes at the fiducial biases.
     check = {}
-    for x in (0.75, 1.0):
+    for x in xs:
         for a, (j, l, m) in enumerate(RESPONSE_FIELDS):
             sel = cut(a, x)
             nb = int(sel.sum())
+            if int((kk <= x / sigma(RESPONSE_FIELDS[a][0])).sum()) < 3:  # the counterterm and the constant need 3 bins
+                check[x, a] = np.inf
+                continue
             cov = np.cov(data[a][:, sel], rowvar=False) / args.volume * (n - 1) / (n - nb - 2)
             design = np.array([columns["c"][sel], columns["e"][sel]]).T
             y = data[a][:, sel].mean(0) - base[a][sel]
             inv = np.linalg.inv(cov)
             res = y - design @ np.linalg.solve(design.T @ inv @ design, design.T @ inv @ y)
             check[x, a] = float(res @ inv @ res / (nb - 2))
-    for x in (0.75, 1.0):
+    for x in xs:
         print(f"model check, k <= {x} / sigma: chi^2/dof per field " + ", ".join(
             f"{sigma(j):.1f}/{l}/{m}: {check[x, a]:.1f}" for a, (j, l, m) in enumerate(RESPONSE_FIELDS)), flush=True)
 
@@ -863,12 +879,14 @@ def response_information(args, fr):
     if args.response_oneloop:
         return response_oneloop(args, fr, base_case, forecast_case, sigma)
     s21m = ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "17.6", "--s21-white")
-    cases = {"P_l to 0.2": ((), 0.75, (), False),
-             "P_l + S21m(q = 2, sigma_1 >= 17.7)": ((), 0.75, (), False, s21m),
-             "P_l + S21m + X sigma 17.7/25, k <= 0.75/sigma, c+e free, validated fields":
-                 ((5, 6), 0.75, ("c", "e"), True, s21m)}
-    for x in (0.75, 1.0):
-        for scales in ((5, 6), (4, 5, 6)):
+    cases = {"P_l to 0.2": ((), xs[0], (), False),
+             "P_l + S21m(q = 2, sigma_1 >= 17.7)": ((), xs[0], (), False, s21m)}
+    for x in xs:
+        for scales in ((5, 6), tuple(args.response_scales)):
+            cases[f"P_l + S21m + X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, c+e free, validated fields"] = \
+                (scales, x, ("c", "e"), True, s21m)
+    for x in xs:
+        for scales in ((5, 6), (4, 5, 6), tuple(args.response_scales)):
             for nuisances in (("c", "e"), ("e",)):
                 for validated in (True, False):
                     label = (f"+ X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, "
