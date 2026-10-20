@@ -967,3 +967,26 @@ Reading:
   part of the amplitude error (O(kappa_4) ~ 1-3% at sigma = 12.5) at no cost, one extra FFT per field; (iii)
   simulation-calibrated amplitudes (the derivative boxes give the cosmology response; the bias dependence of a galaxy
   sample does not transfer).
+
+### Chains with all 5000 boxes (2026-10-20, evening)
+
+All 5000 fiducial halo boxes are now local (same settings, modulus spectra included). Percival m1: P_l + S21m + X
+1.029 (sigma x 1.015), P_l 1.003. Chains `pud/*_chain_n5000_V60` (V = 60, no AP, proposals from the 2201-box chains;
+the n_s-free P_l chain stuck once, R - 1 = 2.1, and converged with a new seed; all R - 1 <= 0.01, ESS >= 320); plots
+`outputs/plots/triangle_pk_s21_pud_{nsfixed,nsfree}_n5000_V60.png` and the WST blocks at the best fit,
+`outputs/plots/wst_bestfit_pk_s21_pud_n5000_V60.png`. Change of sigma, P_l to 0.2 -> P_l + S21m(q = 2) + X:
+
+| boxes | n_s fixed: omega_cdm / ln A_s / h | n_s free: omega_cdm / ln A_s / n_s / h |
+|---|---|---|
+| 1188 | -5 / -2 / -3% | -14 / -6 / -11 / -11% |
+| 2201 | -7 / -4 / -6% | -23 / -12 / -18 / -18% |
+| 5000 | **-10 / -8 / -10%** | **-23 / -14 / -21 / -20%** |
+
+5000 boxes, absolute: n_s fixed P_l 0.00206 / 0.0369 / 0.00347 -> 0.00185 / 0.0338 / 0.00311; n_s free 0.00445 /
+0.0611 / 0.0283 / 0.00546 -> 0.00341 / 0.0528 / 0.0225 / 0.00435. Shifts from the truth: P_l up to +1.0 sigma
+(ln A_s, n_s fixed) and -1.0 sigma (n_s, n_s free); P_l + S21m + X within 0.53 sigma everywhere.
+
+Reading: the n_s-free gain saturated at ~2200 boxes; the n_s-fixed one kept growing (it was the most sensitive to
+covariance noise, the gain being small against P_l's own marginal). At the full set the covariance noise is no longer
+a factor (Percival 1.5% of sigma). The validated P(k) + WST complement is worth 8-10% with n_s fixed and 14-23% with
+n_s free, at V = 60, and it removes P_l's ~1 sigma parameter pulls.
