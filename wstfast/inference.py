@@ -921,8 +921,9 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         labels += [f"{prefix}P{ell}_k{k:.4f}" for ell in ells for k in power.k]
         meta = power.metadata
     if "pud" in options.stats:
-        if spec.tracer != "biased" or spec.space != "redshift":
-            raise SystemExit("the modulus cross-spectra are modelled for biased tracers in redshift space")
+        if (spec.tracer, spec.space) not in (("biased", "redshift"), ("matter", "real")):
+            raise SystemExit("the modulus cross-spectra are modelled for biased tracers in redshift space and for "
+                             "matter in real space")
         if options.ap or window is not None:
             raise SystemExit("the modulus cross-spectra have no AP or window model yet")
         fields = [(j, ell, m) for j in range(config.J + 1)
@@ -934,7 +935,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                                           [options.pud_x / config.sigma(j) for j, _, _ in fields], files=files)
         files = response.files
         shot = response.metadata["boxsize"] ** 3 / response.metadata["nparticles"]
-        table = response_taylor(config, fields, response.k, shot, settings["z"])
+        table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real")
         table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields],
                      linear=not options.pud_marg)
         theories.append(ResponseTheory(basis, nuisance, table))
@@ -969,18 +970,26 @@ RESPONSE_STEPS = {"omega_cdm": 0.002, "logA": 0.01, "h": 0.005, "n_s": 0.005, "b
                   "sv": 0.5}
 
 
-def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor")):
+#: The matter limit in real space: no velocities (f = 0, no damping of the short modes) and no bias.
+RESPONSE_CENTER_REAL = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm", "logA", "h", "n_s")},
+                        "b1": 1.0, "b2": 0.0, "bG2": 0.0, "sv": 0.0}
+
+
+def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor"), real=False):
     """Second-order Taylor table of X_a = P_{U_a d} / <U_a> = (2 ell + 1) int r_a Z1 P_L L_ell (ell = 0, 2) on the
     bins ``k`` for the fields (j, l, |m|): the tree response of ``covariance_rsd.ModulusCrossRSD`` (Gaussian damping
-    sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER by central differences; also the
+    sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER (``real``: RESPONSE_CENTER_REAL,
+    f = 0, the matter limit in real space) by central differences; also the
     counterterm (k^2 P_L at the centre) and constant columns. Cached in ``cache_dir`` (~10 min to build)."""
     import hashlib
 
+    centre = RESPONSE_CENTER_REAL if real else RESPONSE_CENTER
     key = hashlib.sha1(json.dumps([[config.sigma(j), l, m] for j, l, m in fields] + [list(map(float, k)),
-                                   float(shotnoise), float(z), RESPONSE_CENTER, RESPONSE_STEPS]).encode()).hexdigest()[:16]
+                                   float(shotnoise), float(z), centre, RESPONSE_STEPS]
+                                  + (["real"] if real else [])).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"{key}.npz"
     names = list(RESPONSE_PARAMS)
-    center = np.array([RESPONSE_CENTER[n] for n in names])
+    center = np.array([centre[n] for n in names])
     if path.exists():
         with np.load(path) as data:
             return dict(params=names, center=center, **{name: data[name] for name in ("x0", "jac", "hess", "ct", "cst")})
@@ -1005,7 +1014,8 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
         if key not in cosmologies:
             cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=QUIJOTE_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
                               logA=p["logA"], m_ncdm=[], N_eff=3.046, engine="class")
-            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of="delta_m").to_1d(z=z), float(cosmo.growth_rate(z)))
+            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of="delta_m").to_1d(z=z),
+                                0.0 if real else float(cosmo.growth_rate(z)))
         return cosmologies[key]
 
     def evaluate(values):
