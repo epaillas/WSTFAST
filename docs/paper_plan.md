@@ -385,3 +385,147 @@ cosmology dependence enters only through R_l(s_lin^2), so a layer-2 model whose 
 the cosmology and the biases (a bispectrum prediction rather than a fitted correction) is not tested. Since what S21m
 carries on top of either two-point vector is bias information and no single multipole constrains cosmology, there is
 no sign that it would change the conclusion; a broader S21m vector (sigma_1 < 25, more sigma_2) is the place to look.
+
+### Can the halo q != 2 first layer (the Edgeworth factor E(q)) be kept next to the bands? (2026-10-19, night)
+
+Question: a Fisher follow-up found that S1m at q = 0.8 on the same blocks as the q = 2 bands (`--q 2.0 0.8`, plus
+S21m) beats P_l to 0.2 by tens of percent for halos, through nuisance-breaking in the Edgeworth term (in real-space
+matter the same q = 0.8 rows add nothing). Earlier notes say tree-level K4 fails at sigma = 17.7. Is the prize robust
+to freeing the E nuisances (step 0), and can E itself be modelled to V = 60 accuracy (step 1)? No chains.
+
+**Step 0, Fisher** (`scripts/fisher_rsd.py --edgeworth-info`, new mode; `outputs/fisher/edgeworth_info{,_real}_V60.json`).
+The setup is that of the layer-2 Fisher above (`build_fit` likelihood, bands12 emulator, V = 60, Quijote cosmology,
+`pk02_V60` / `q2_12k18_s21_V60` nuisances). The vector is the bands to k84 = 0.18 + S21m (white, layer-2 template
+marginalised per l, cubic biases `relation`), plus q = 0.8 on the same 23 coefficients (136 rows). The E nuisances that
+the refactor removed from the package enter as extra Jacobian columns, through a monkeypatch of `tracer_cumulants` /
+`s1m_from_variances` inside the script:
+- A_TN, A_TN2 (priors N(1, 1)) scale the N and N^2 Poisson pieces of the tree kappa, in S1m and in S21m's Edgeworth
+  factors;
+- Edgeworth amplitudes a_ng multiply E of the q = 0.8 blocks: one global, one per sigma, or one per (sigma, l), each
+  with a Gaussian prior of width 0.29 (the old flat [0.5, 1.5]). S1m is linear in a_ng, so each column is S1m(a = 1) -
+  S1m(a = 0).
+The cubic-bias offsets and bGamma3 get priors widened x3 (6 / 3 / 3 / 3) or made flat. The q = 0.8 rows are cut at
+sigma >= 12.5 (all 23 coefficients; the k84 cut leaves l <= 1 at 12.5 and l <= 5 at 17.7), 17.7 or 25.
+
+The reference vectors reproduce the layer-2 table: P_l to 0.2 0.0023 / 0.0397 / 0.0038, n_s free 0.0046 / 0.0670 /
+0.0321 / 0.0056; bands + S21m 0.0022 / 0.0420 / 0.0038, n_s free 0.0047 / 0.0686 / 0.0285 / 0.0058. Gain = 1 -
+sigma / sigma(P_l to 0.2), in percent:
+
+| q = 0.8 at sigma >= | E treatment | n_s fixed: omega_cdm / ln A_s / h | n_s free: omega_cdm / ln A_s / n_s / h |
+|---|---|---|---|
+| 12.5 | tree K4, priors as fitted | +40 / +24 / +15 | +39 / +40 / +48 / +30 |
+| 12.5 | + A_TN, A_TN2 | +38 / +18 / +14 | +36 / +32 / +46 / +27 |
+| 12.5 | + a_ng per sigma | +26 / +17 / +12 | +37 / +32 / +37 / +28 |
+| 12.5 | + a_ng per (sigma, l) | +21 / +8 / +7 | +20 / +15 / +25 / +14 |
+| 12.5 | cubic-bias priors flat | +40 / +18 / +15 | +38 / +39 / +47 / +29 |
+| 12.5 | all: A_TN, a_ng per sigma, cubic x3 | +25 / +14 / +11 | +34 / +30 / +35 / +26 |
+| 12.5 | all: A_TN, a_ng per (sigma, l), cubic x3 | +18 / +6 / +6 | +15 / +11 / +21 / +9 |
+| 17.7 | tree K4, priors as fitted | +28 / +18 / +12 | +36 / +35 / +34 / +27 |
+| 17.7 | + A_TN, A_TN2 | +24 / +12 / +11 | +31 / +29 / +32 / +24 |
+| 17.7 | + a_ng per sigma | +25 / +12 / +12 | +35 / +30 / +32 / +27 |
+| 17.7 | + a_ng per (sigma, l) | +18 / +5 / +6 | +18 / +14 / +20 / +13 |
+| 17.7 | cubic-bias priors flat | +28 / +16 / +12 | +36 / +34 / +34 / +27 |
+| 17.7 | all: A_TN, a_ng per sigma, cubic x3 | +21 / +10 / +10 | +29 / +26 / +29 / +23 |
+| 17.7 | all: A_TN, a_ng per (sigma, l), cubic x3 | +14 / +2 / +4 | +14 / +11 / +18 / +9 |
+| 25 | tree K4, priors as fitted | +15 / +0 / +5 | +23 / +15 / +24 / +18 |
+| 25 | + A_TN, A_TN2 | +10 / -1 / +0 | +11 / +8 / +17 / +7 |
+| 25 | + a_ng per sigma | +13 / -0 / +4 | +21 / +14 / +23 / +16 |
+| 25 | + a_ng per (sigma, l) | +8 / -4 / -1 | +10 / +6 / +15 / +6 |
+| 25 | cubic-bias priors flat | +14 / +0 / +4 | +20 / +14 / +21 / +15 |
+| 25 | all: A_TN, a_ng per sigma, cubic x3 | +9 / -1 / -1 | +9 / +6 / +15 / +5 |
+| 25 | all: A_TN, a_ng per (sigma, l), cubic x3 | +6 / -5 / -2 | +6 / +4 / +13 / +3 |
+
+The background note's 0.0013 / 0.024 / 0.0031 (43 / 40 / 18%) came from a different nuisance treatment; recomputed with
+the fit's own likelihood, the baseline is 40 / 24 / 15%.
+
+Real-space matter control (`--real-space`): bands12k + S21m (compress-m, matter layer-2 template) + q = 0.8 at the
+emulated l <= 4. On top of the bands, q = 0.8 changes the errors by +4 / +1 / 0% (sigma >= 12.5, n_s fixed) and +5%
+(n_s free) at most, and by -2 to -5% once a_ng is free or the cut is 17.7 / 25. The negative values are the Hartlap /
+Percival price of the extra rows. Against P_0 to 0.2 the WST stays where it was: +4 / -11 / -21% n_s fixed, about
++2% n_s free. As expected, the halo gain is nuisance-breaking (b2 / bG2 / bGamma3 / c_v through E), not new linear
+information.
+
+Step 0 reading: freeing A_TN and per-sigma Edgeworth amplitudes, with the cubic priors widened, keeps the gain above
+the 15% kill line at sigma >= 12.5 and 17.7: n_s fixed 25 / 14 / 11% and 21 / 10 / 10%, so only omega_cdm stays above
+15%; n_s free 34 / 30 / 35 / 26% and 29 / 26 / 29 / 23%. The cubic-bias priors barely matter (flat: -2 to -6 points
+on ln A_s). What erodes the gain is block freedom in E. With one amplitude per (sigma, l) at a 29% prior, the gain
+falls to 18 / 6 / 6% (n_s fixed) and 15 / 11 / 21 / 9% (n_s free). With the rows cut at sigma >= 25, it is at most 15%
+(n_s on its own) with the E nuisances free. **The kill criterion is not met** with per-sigma freedom, and is met
+almost everywhere with per-(sigma, l) freedom: the prize exists only if E is known to better than a per-(sigma, l)
+amplitude of +-29%.
+
+**Step 1, model-free E per block** (`outputs/drafts/nnlo_edgeworth/edgeworth_direct.py`, draft next to the NNLO code,
+not in the package; output `edgeworth_direct.{json,log}`). The data E(q) = S1m(q) / Gauss(q; lambda = S1m(q = 2) / n)
+- 1 is measured per box and block (j, l, m) at q = 0.5, 0.8, 1 on the 1188 halo boxes, with covariance = box scatter / 60
+(Hartlap-corrected). The models are evaluated at the Quijote cosmology and the `q2_12k18_s21_V60` nuisances (b1 1.91,
+b2 -0.38, bG2 -0.34, bGamma3 0.67, c_v 3.07, cubic offsets ~ 0). They are read from the emulated S1m with the Edgeworth
+amplitude on and off, as alpha = K4 / (8 n (n + 2)) and beta = s32 / 72 with alpha linear in A_TN, A_TN2:
+- **tree**: no cubic operators, Poisson;
+- **cubic**: the relation cubic biases;
+- **+ A_TN**: A_TN, A_TN2 fitted;
+- **NNLO**: the draft NNLO Edgeworth, with c6 = 3.6, c35 = 1.9 fixed, or with c6, c35, A_TN, A_TN2 all fitted;
+- **a_ng(sigma, l)**: cubic + A_TN with one free amplitude per (sigma, l), the calibrated-correction form.
+The free parameters are fitted to the q = 0.8 entries of the blocks in the step-0 vector (52 blocks: k84 <= 0.18),
+which is the exponent that vector uses. The table gives the rms over m of (data - model) / sigma_V60 per (sigma, l),
+with the rms fractional residual of E in brackets:
+
+| sigma, l | k84 | tree | cubic | cubic + A_TN | NNLO (c6 3.6) + A_TN | NNLO, c6 c35 A_TN fitted | cubic + A_TN + a_ng(sigma, l) |
+|---|---|---|---|---|---|---|---|
+| 12.5, 0 | 0.129 | 51.2 [58%] | 3.1 [4%] | 40.6 [46%] | 42.4 [48%] | 11.4 [13%] | 6.0 [7%] |
+| 12.5, 1 | 0.159 | 24.2 [8%] | 28.6 [9%] | 33.7 [10%] | 35.5 [11%] | 16.5 [5%] | 9.6 [3%] |
+| 17.7, 0 | 0.091 | 17.9 [60%] | 9.6 [32%] | 26.4 [88%] | 19.5 [65%] | 2.5 [8%] | 4.8 [16%] |
+| 17.7, 1 | 0.113 | 11.2 [10%] | 26.0 [21%] | 41.4 [33%] | 38.6 [31%] | 20.5 [17%] | 10.5 [9%] |
+| 17.7, 2 | 0.130 | 9.6 [6%] | 20.0 [14%] | 33.5 [23%] | 30.5 [21%] | 12.2 [8%] | 12.2 [10%] |
+| 17.7, 3 | 0.145 | 7.7 [5%] | 13.7 [9%] | 23.6 [15%] | 20.3 [13%] | 7.8 [5%] | 11.5 [9%] |
+| 17.7, 4 | 0.158 | 22.2 [17%] | 19.0 [15%] | 17.0 [12%] | 16.3 [12%] | 25.3 [19%] | 8.4 [6%] |
+| 17.7, 5 | 0.169 | 38.3 [29%] | 33.6 [26%] | 30.3 [23%] | 31.8 [24%] | 44.4 [33%] | 8.1 [7%] |
+| 25.0, 0 | 0.064 | 6.8 [83%] | 4.8 [59%] | 10.3 [126%] | 8.1 [99%] | 2.2 [27%] | 3.0 [37%] |
+| 25.0, 1 | 0.080 | 3.4 [7%] | 9.3 [21%] | 15.6 [34%] | 14.4 [32%] | 7.2 [17%] | 5.7 [14%] |
+| 25.0, 2 | 0.092 | 4.1 [8%] | 9.4 [19%] | 15.9 [31%] | 14.5 [28%] | 6.9 [14%] | 6.6 [14%] |
+| 25.0, 3 | 0.102 | 5.4 [10%] | 9.9 [19%] | 16.2 [30%] | 14.8 [27%] | 6.9 [13%] | 7.0 [14%] |
+| 25.0, 4 | 0.111 | 5.5 [10%] | 9.4 [16%] | 15.7 [27%] | 14.0 [24%] | 5.9 [10%] | 6.7 [13%] |
+| 25.0, 5 | 0.120 | 5.5 [10%] | 8.9 [16%] | 14.6 [26%] | 12.9 [23%] | 5.1 [9%] | 6.3 [12%] |
+| 25.0, 6 | 0.127 | 3.8 [7%] | 6.5 [11%] | 11.6 [20%] | 9.9 [17%] | 3.6 [6%] | 5.4 [11%] |
+| chi2 / n | | 53435 / 52 | 37190 / 52 | 29313 / 52 | 28846 / 52 | 26439 / 52 | 1069 / 52 |
+
+The data E is precise: sigma_V60 = 0.7-2.5% of E for l >= 1 at sigma = 17.7-25. That precision is why the q = 0.8 rows
+next to the bands carry information; S1m(q) / S1m(2) cancels the cosmic variance. The chi^2 is much larger than the sum
+of the z^2 because the m entries of a block are strongly correlated.
+
+- **No model reaches V = 60 accuracy at any sigma <= 25.** Tree, cubic, or NNLO, fixed or with up to four fitted E
+  parameters, they miss E by 5-60% at sigma = 12.5-17.7 (typically 8-45 sigma per (sigma, l); a single model gets an
+  occasional block to 2-3 sigma, never all of them), and by 5-30% (3-16 sigma) at sigma = 25.
+- **The free E nuisances do not fit consistently.** Fitting A_TN and A_TN2 to all blocks makes things worse at sigma =
+  25 (A_TN2 ~ 7, an unphysical value), because the misfit is scale- and l-dependent. A sub-Poisson trispectrum does
+  not explain it.
+- **NNLO with fitted closures** (c6 = 4.0, c35 = 2.1, consistent with the 2026-10-12 values) brings sigma = 17.7, l <=
+  3 to 5-17% but leaves l = 4-5 at 19-33%.
+- **Even per-(sigma, l) amplitudes leave chi^2 = 1069 / 52** and 5-12 sigma per block. Within a block the m (line of
+  sight) structure of E is wrong at the 5-15% level, and the fitted amplitudes are degenerate with A_TN (values
+  unphysical).
+- **At sigma = 25 alone** (fit on its 28 blocks): cubic + A_TN gives 179 / 28, NNLO with fitted closures 161 / 28,
+  per-l amplitudes 136 / 28, with residuals of 2-3 sigma per l and 4-7% of E. A_TN2 is again at -8 to -18 in all of
+  these fits.
+- **Using all three q** (as the multi-q extension would) is far worse: the q shape of E is measured even better, and
+  NLO is off in it (vector blocks: chi^2 4e4-3e5 / 156; sigma = 25: NNLO 208 / 84, NLO ~ 1000 / 84).
+- **Caveat:** the biases are held at the q = 2 fit's values. Free biases could absorb part of the misfit, but that is
+  the b2-c0-omega_cdm slide seen on 2026-10-11, the very degeneracy the q = 0.8 rows are supposed to break.
+
+**Go / no-go for step 2.**
+- **No-go for putting an E model into the package.** None of tree K4, cubic + A_TN or NNLO is within the V = 60 errors
+  on the blocks that carry the gain. They miss by 10-40 sigma at sigma = 17.7, where step 0 puts most of the prize, and
+  by 3-10 sigma per l even at sigma = 25, where the prize is at most 15% (n_s only) once A_TN is free.
+- **No-go, as specified, for a fiducial-calibrated E template checked by V = 60/64 profile scans.** Such a template
+  (E_data(fid) x E_model(theta) / E_model(fid), with Gaussian-prior amplitudes) is exact at the fiducial by
+  construction, so profile scans on the fiducial boxes cannot fail: they test nothing. The cosmological information it
+  adds is dE / d theta from a model that already misses E by 10-60% at fixed theta. Step 0 shows how much the prize
+  depends on that model: it halves once each (sigma, l) gets a 29% amplitude of its own.
+- **Gate before any step 2:** test the response of E, not its value. The Quijote halo derivative boxes are on disk
+  (`data/quijote/{Om_m,Om_p,s8_m,s8_p}/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los`, 200 each, paired
+  seeds). Measure dE / dOmega_m and dE / dsigma_8 per block and compare them with the model's derivatives at the
+  biases refitted on each set (the q = 2 bands + S21m fix the biases). If the model response agrees to ~10-15% per
+  (sigma, l), a calibrated template with a 10-15% prior per (sigma, l) is worth building. Its Fisher gain lies between
+  the per-(sigma, l) row at a 29% prior (15-21% n_s free, 6-18% n_s fixed) and the per-sigma row; it has not been
+  computed at the tighter width. If the response is off
+  by as much as the level, stop: the halo WST stays at bands + S21m = P_l to 0.2, and the q != 2 first layer is not
+  usable for halos at V = 60.

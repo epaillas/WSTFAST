@@ -44,6 +44,19 @@ could add). ``--fit-args`` adds fit.py arguments to every case:
         --fiducial outputs/inference/rsd/q2/pk02_V60/summary.json outputs/inference/rsd/q2/q2_12k18_s21_V60/summary.json \
         --output outputs/fisher/layer2_info_V60.json
 
+With ``--edgeworth-info``, it instead asks whether the halo q != 2 first layer (the Edgeworth factor E(q)) next to the
+q = 2 bands keeps its gain over P_l to 0.2 once the E nuisances are free (``EDGEWORTH_HALO``; ``--real-space`` runs the
+real-space matter control ``EDGEWORTH_REAL`` against P_0 to 0.2). The parameters the refactor removed from the package
+enter as extra Jacobian columns (``edgeworth_amplitudes``): A_TN, A_TN2 (priors N(1, 1)) scaling the N and N^2 Poisson
+pieces of the tree kappa, and Edgeworth amplitudes of the q != 2 blocks, one, per sigma or per (sigma, l) (Gaussian
+priors of width EDGEWORTH_NG_PRIOR); the cubic-bias priors (and bGamma3's) are also widened x3 or made flat, and the
+q != 2 rows cut at sigma >= 12.5, 17.7 or 25:
+
+    python scripts/fisher_rsd.py --edgeworth-info --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
+        --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_bands12.h5 --volume 60 \\
+        --fiducial outputs/inference/rsd/q2/pk02_V60/summary.json outputs/inference/rsd/q2/q2_12k18_s21_V60/summary.json \\
+        --output outputs/fisher/edgeworth_info_V60.json
+
 Example (halos):
 
     python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
@@ -55,6 +68,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +115,25 @@ LAYER2_CASES = {
 }
 L2_REPORT = ("omega_cdm", "logA", "n_s", "h", "b1", "b2", "bG2")
 
+#: --edgeworth-info: the halo q = 2 bands (+ S21m) with the q = 0.8 S1m of the same blocks, against P_l to 0.2; the
+#: real-space matter control (--real-space, bands12k + S21m + q = 0.8 at the emulated l <= 4, against P_0 to 0.2).
+EDGEWORTH_HALO = {
+    "reference": ["--stats", "pk", "--kmax", "0.2"],
+    "q2": ["--stats", "s1m", "s21m", "--cubic-biases", "relation"] + L2_BANDS + L2_S21 + L2_TREATMENTS["marg"],
+    "full": ["--stats", "s1m", "s21m", "--cubic-biases", "relation"] + L2_BANDS[:1] + ["2.0", "0.8"] + L2_BANDS[2:]
+            + L2_S21 + L2_TREATMENTS["marg"],
+}
+EDGEWORTH_REAL_BANDS = ["--band-min-scale", "12.5", "--band-ells", "0", "1", "2", "3", "4", "5", "6", "--band-kmax", "0.2",
+                        "--s21-min-scale", "17.6", "--s21-white", "--s21-layer2", "outputs/layer2/template_real.json",
+                        "--s21-layer2-c", "matter", "--s21-layer2-marg", "per_l", "--compress-m"]
+EDGEWORTH_REAL = {
+    "reference": ["--stats", "pk", "--kmax", "0.2"],
+    "q2": ["--stats", "band", "s21m"] + EDGEWORTH_REAL_BANDS,
+    "full": ["--stats", "band", "s21m", "s1m", "--q", "0.8", "--s1-min-scale", "12.5"] + EDGEWORTH_REAL_BANDS,
+}
+#: Gaussian prior sigma of the free Edgeworth amplitudes (the flat [0.5, 1.5] of the old --ng-amplitude).
+EDGEWORTH_NG_PRIOR = 0.29
+
 
 def load_fit():
     spec = importlib.util.spec_from_file_location("fit", Path(__file__).with_name("fit.py"))
@@ -128,6 +161,9 @@ def parse_args():
                              "sigma, veff) of measured / window-model ratios of fiducial survey mocks")
     parser.add_argument("--layer2-info", action="store_true",
                         help="layer-2 mode: information of the modelled vs marginalised halo second layer")
+    parser.add_argument("--edgeworth-info", action="store_true",
+                        help="Edgeworth mode: gain of the q != 2 S1m next to the q = 2 bands, E(q) nuisances free")
+    parser.add_argument("--real-space", action="store_true", help="Edgeworth mode: the real-space matter control")
     parser.add_argument("--neutrino", type=float, default=None,
                         help="neutrino mode: fiducial sum of neutrino masses [eV]")
     parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
@@ -255,55 +291,71 @@ def window_calibration(args, fr):
     print(f"wrote {args.output}")
 
 
-def layer2_information(args, fr):
-    """Fisher errors of the LAYER2_CASES with the template amplitudes marginalised or modelled (module docstring)."""
+def case_fisher(args, fr, case_args, vary, exact=False, extra=None):
+    """The Fisher pieces of one fit.py vector (``build_fit``: its covariance with Hartlap and Percival and the layer-2
+    terms): the varied parameter names, the Jacobian by central differences of the emulated model at the Quijote
+    cosmology and the nuisances of ``--fiducial``, the covariance (``exact``: without the layer-2 template's Monte
+    Carlo error), the Gaussian prior sigmas (inf for flat ones) and the labels. ``extra`` = callable(theory, fiducial,
+    labels) -> {name: (column, prior sigma)} adds Jacobian columns of parameters the theory does not have."""
     import shlex
 
+    fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator),
+                                        "--output-dir", "unused", "--volume", str(args.volume), "--vary", *vary,
+                                        *case_args] + shlex.split(args.fit_args)))
+    built = inference.build_fit(fit)
+    theory, labels = built["theory"], built["labels"]
+    params = get_params(theory).select(varied=True, derived=False)
+    names = params.names()
+    fiducial = {name: float(params[name].value) for name in names}
+    for path in args.fiducial:
+        if path.exists():
+            best = json.loads(path.read_text())["bestfit"]
+            fiducial.update({n: float(v) for n, v in best.items() if n in names and n not in COSMOLOGY})
+    fiducial.update({n: QUIJOTE_COSMOLOGY[n] for n in COSMOLOGY if n in names})
+    fiducial.update({n: 0.0 for n in names if n.startswith("noise")})
+    model = build(theory)
+    jacobian = [(np.asarray(model({**fiducial, n: fiducial[n] + step_of(n)}))
+                 - np.asarray(model({**fiducial, n: fiducial[n] - step_of(n)}))) / (2 * step_of(n)) for n in names]
+    prior = [prior_sigma(params[n]) if params[n].prior.dist == "norm" else np.inf for n in names]
+    if extra is not None:
+        for name, (column, sigma) in extra(theory, fiducial, labels).items():
+            names, jacobian, prior = names + [name], jacobian + [column], prior + [sigma]
+    covariance = np.array(built["covariance"])
+    if exact:  # without the template's Monte Carlo error (S21m rows pass the compressions as is)
+        mean = built["problem"]["vectors"].mean(axis=0)
+        variance = dict(zip(built["problem"]["labels"], inference.layer2_variance(fit, built["problem"]["labels"], mean)))
+        covariance -= np.diag([variance.get(label, 0.0) for label in labels])
+    return dict(names=list(names), jacobian=np.array(jacobian), covariance=covariance, prior=np.array(prior),
+                labels=list(labels), nsims=built["nsims"], m1=built["m1"], fiducial=fiducial)
+
+
+def fisher_errors(case, rows, known=(), report=None, prior_scale=None):
+    """Marginalised Fisher errors of ``case`` (``case_fisher``) on ``rows``, with the parameters ``known`` fixed and
+    the prior sigmas of ``prior_scale`` ({name: factor}) widened; every nuisance the rows depend on is marginalised."""
     from wstfast.data import hartlap_factor, precision_matrix
 
-    fiducial_files = [json.loads(path.read_text())["bestfit"] for path in args.fiducial if path.exists()]
+    names, jacobian = case["names"], case["jacobian"][:, rows]
+    hartlap = hartlap_factor(case["nsims"], len(case["labels"]))
+    cov = case["covariance"][np.ix_(rows, rows)] * hartlap_factor(case["nsims"], len(rows)) / hartlap
+    prior = case["prior"] * np.array([(prior_scale or {}).get(n, 1.0) for n in names])
+    cols = [i for i, n in enumerate(names) if n not in known and (n in COSMOLOGY or np.any(jacobian[i] != 0))]
+    fisher = jacobian[cols] @ precision_matrix(cov * case["m1"]) @ jacobian[cols].T + np.diag(1.0 / prior[cols] ** 2)
+    inverse = np.linalg.inv(fisher)
+    return {names[i]: float(np.sqrt(inverse[k, k])) for k, i in enumerate(cols) if report is None or names[i] in report}
+
+
+def layer2_information(args, fr):
+    """Fisher errors of the LAYER2_CASES with the template amplitudes marginalised or modelled (module docstring)."""
     results = {}
     for ns in (False, True):
         vary = ["omega_cdm", "logA", "n_s", "h"] if ns else ["omega_cdm", "logA", "h"]
         for case, (case_args, treatment) in LAYER2_CASES.items():
-            fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator),
-                                                "--output-dir", "unused", "--volume", str(args.volume), "--vary", *vary,
-                                                *case_args] + shlex.split(args.fit_args)))
-            built = inference.build_fit(fit)
-            theory, labels = built["theory"], built["labels"]
-            params = get_params(theory).select(varied=True, derived=False)
-            names = params.names()
-            fiducial = {name: float(params[name].value) for name in names}
-            for best in fiducial_files:
-                fiducial.update({n: float(v) for n, v in best.items() if n in names and n not in COSMOLOGY})
-            fiducial.update({n: QUIJOTE_COSMOLOGY[n] for n in COSMOLOGY if n in names})
-            fiducial.update({n: 0.0 for n in names if n.startswith("noise")})
-            model = build(theory)
-            jacobian = np.array([(np.asarray(model({**fiducial, n: fiducial[n] + step_of(n)}))
-                                  - np.asarray(model({**fiducial, n: fiducial[n] - step_of(n)}))) / (2 * step_of(n))
-                                 for n in names])
-            covariance = np.array(built["covariance"])
-            if treatment == "exact":  # without the template's Monte Carlo error (S21m rows pass the compressions as is)
-                mean = built["problem"]["vectors"].mean(axis=0)
-                variance = dict(zip(built["problem"]["labels"],
-                                    inference.layer2_variance(fit, built["problem"]["labels"], mean)))
-                covariance -= np.diag([variance.get(label, 0.0) for label in labels])
-            prior = np.array([prior_sigma(params[n]) if params[n].prior.dist == "norm" else np.inf for n in names])
-            hartlap = hartlap_factor(built["nsims"], len(labels))
-
-            def errors(rows, known=()):
-                cov = covariance[np.ix_(rows, rows)] * hartlap_factor(built["nsims"], len(rows)) / hartlap
-                jac = jacobian[:, rows]
-                cols = [i for i, n in enumerate(names)
-                        if n not in known and (n in COSMOLOGY or np.any(jac[i] != 0))]
-                fisher = (jac[cols] @ precision_matrix(cov * built["m1"]) @ jac[cols].T
-                          + np.diag(1.0 / prior[cols] ** 2))
-                inverse = np.linalg.inv(fisher)
-                return {names[i]: float(np.sqrt(inverse[k, k])) for k, i in enumerate(cols) if names[i] in L2_REPORT}
-
+            fc = case_fisher(args, fr, case_args, vary, exact=treatment == "exact")
+            labels = fc["labels"]
             key = ("[n_s free] " if ns else "") + case
-            results[key] = dict(ndata=len(labels), nparams=len(names), sigma=errors(np.arange(len(labels))))
-            print(f"{key:44s} n={len(labels):4d} np={len(names):3d} | "
+            results[key] = dict(ndata=len(labels), nparams=len(fc["names"]),
+                                sigma=fisher_errors(fc, np.arange(len(labels)), report=L2_REPORT))
+            print(f"{key:44s} n={len(labels):4d} np={len(fc['names']):3d} | "
                   + " ".join(f"{p} {results[key]['sigma'].get(p, np.nan):.4f}" for p in L2_REPORT), flush=True)
             subsets = {}
             if case.startswith(("(c)", "(e)")):
@@ -315,12 +367,137 @@ def layer2_information(args, fr):
                         subsets[value] = (np.array([n for n, p in enumerate(parts) if p[at] == value]), ())
             for value, (rows, known) in subsets.items():
                 sub = f"{key} {value}"
-                results[sub] = dict(ndata=len(rows), sigma=errors(rows, known))
+                results[sub] = dict(ndata=len(rows), sigma=fisher_errors(fc, rows, known, report=L2_REPORT))
                 print(f"  {sub:42s} n={len(rows):4d} | "
                       + " ".join(f"{p} {results[sub]['sigma'].get(p, np.nan):.4f}" for p in L2_REPORT), flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(volume=args.volume, emulator=str(args.emulator), fit_args=args.fit_args,
                                            cases={k: v[0] for k, v in LAYER2_CASES.items()}, results=results), indent=2))
+    print(f"wrote {args.output}")
+
+
+@contextmanager
+def edgeworth_amplitudes(A_TN=1.0, A_TN2=1.0, a_ng=1.0):
+    """Within the block, the free E(q) nuisances that the refactor removed from the package (fit_rsd.py --kappa-shot and
+    --ng-amplitude, b5436d2): A_TN, A_TN2 scale the N and N^2 Poisson pieces of the tree kappa (S1m and the S21m
+    Edgeworth factors), a_ng the Edgeworth correction of the q != 2 S1m blocks."""
+    from wstfast import calculators
+    from wstfast.theory import first_layer
+    from wstfast.theory.layout import CUBIC_KAPPA_SIZES, KAPPA_SIZES
+
+    edges = np.cumsum((0,) + KAPPA_SIZES + CUBIC_KAPPA_SIZES)
+    factor = np.ones(edges[-1])
+    factor[edges[1]:edges[2]], factor[edges[2]:edges[3]] = A_TN, A_TN2
+    cumulants, s1m = calculators.tracer_cumulants, first_layer.s1m_from_variances
+
+    def tracer_cumulants(kappa, *rest, **kwargs):
+        return cumulants(kappa * factor[:kappa.shape[-1]], *rest, **kwargs)
+
+    def s1m_from_variances(*rest, **kwargs):
+        if rest[5] != 2.0:
+            kwargs["edgeworth_amplitude"] = a_ng
+        return s1m(*rest, **kwargs)
+
+    calculators.tracer_cumulants, first_layer.s1m_from_variances = tracer_cumulants, s1m_from_variances
+    try:
+        yield
+    finally:
+        calculators.tracer_cumulants, first_layer.s1m_from_variances = cumulants, s1m
+
+
+def edgeworth_columns(config):
+    """``case_fisher`` extra: the Jacobian columns of A_TN, A_TN2 (central differences, priors N(1, 1)) and of the
+    Edgeworth amplitudes of the q != 2 S1m blocks, one for all blocks (a_ng), per sigma (a_ng_j{j}) and per (sigma, l)
+    (a_ng_j{j}_l{l}); S1m is linear in a_ng, so a column is S1m(a_ng = 1) - S1m(a_ng = 0) on its blocks. Prior sigma
+    of a_ng: EDGEWORTH_NG_PRIOR. The model is rebuilt within each patch (the compiled graph is jitted once)."""
+    def extra(theory, fiducial, labels):
+        def evaluate(**amplitudes):
+            with edgeworth_amplitudes(**amplitudes):
+                return np.asarray(build(theory)(fiducial))
+
+        columns = {name: ((evaluate(**{name: 1.1}) - evaluate(**{name: 0.9})) / 0.2, 1.0) for name in ("A_TN", "A_TN2")}
+        delta = evaluate() - evaluate(a_ng=0.0)
+        blocks = edgeworth_blocks(labels, config)
+        groups = {"a_ng": lambda b: True}
+        groups.update({f"a_ng_j{j}": (lambda b, j=j: b[0] == j) for j in sorted({b[0] for b in blocks.values()})})
+        groups.update({f"a_ng_j{j}_l{l}": (lambda b, j=j, l=l: b[:2] == (j, l))
+                       for j, l in sorted({b[:2] for b in blocks.values()})})
+        for name, member in groups.items():
+            rows = [n for n, b in blocks.items() if member(b)]
+            column = np.zeros(len(labels))
+            column[rows] = delta[rows]
+            columns[name] = (column, EDGEWORTH_NG_PRIOR)
+        return columns
+    return extra
+
+
+def edgeworth_blocks(labels, config, q=0.8):
+    """{row: (j, l, m, sigma)} of the q != 2 S1m rows of ``labels`` (``[q{q}:]S1m_j{j}_l{l}_m{m}``, m may be the
+    ``m1+`` class of ``--compress-m``; an S1m label without a ``q`` prefix has exponent ``q``)."""
+    out = {}
+    for n, label in enumerate(labels):
+        prefix, _, base = label.rpartition(":")
+        exponent = float(prefix.rpartition("q")[-1]) if prefix else q
+        if base.startswith("S1m_") and exponent != 2.0:
+            j, l, m = base.split("_")[1:]
+            out[n] = (int(j[1:]), int(l[1:]), m[1:], config.sigma(int(j[1:])))
+    return out
+
+
+def edgeworth_information(args, fr):
+    """Fisher gain of the q != 2 S1m blocks next to the q = 2 bands over P_l to 0.2, with the E(q) nuisances free
+    (module docstring, EDGEWORTH_CASES)."""
+    first = sorted((args.data_dir / ("real" if args.real_space else "rsd")).glob("wst_r*.npz"))[0]
+    config = load_measurement(first, q=2.0)["config"]
+    vectors = EDGEWORTH_REAL if args.real_space else EDGEWORTH_HALO
+    cubic = () if args.real_space else ("db3", "dbG3", "dbdG2", "bGamma3")
+    results = {}
+    for ns in (False, True):
+        vary = ["omega_cdm", "logA", "n_s", "h"] if ns else ["omega_cdm", "logA", "h"]
+        tag = "[n_s free] " if ns else ""
+        ref = case_fisher(args, fr, vectors["reference"], vary)
+        reference = fisher_errors(ref, np.arange(len(ref["labels"])), report=COSMOLOGY)
+        results[tag + "reference"] = dict(ndata=len(ref["labels"]), sigma=reference)
+        two = case_fisher(args, fr, vectors["q2"], vary)
+        results[tag + "q = 2 alone"] = dict(ndata=len(two["labels"]),
+                                            sigma=fisher_errors(two, np.arange(len(two["labels"])), report=COSMOLOGY))
+        full = case_fisher(args, fr, vectors["full"], vary, extra=edgeworth_columns(config))
+        blocks = edgeworth_blocks(full["labels"], config)
+        ng = [n for n in full["names"] if n.startswith("a_ng")]
+        per = {"global": ["a_ng"], "per sigma": [n for n in ng if n.count("_") == 2],
+               "per (sigma, l)": [n for n in ng if n.count("_") == 3]}
+        treatments = {  # name: (free E nuisances, prior widening of the cubic biases)
+            "baseline E (tree K4, priors as fitted)": ((), {}),
+            "+ A_TN, A_TN2": (("A_TN", "A_TN2"), {}),
+            "+ a_ng": (tuple(per["global"]), {}),
+            "+ a_ng per sigma": (tuple(per["per sigma"]), {}),
+            "+ a_ng per (sigma, l)": (tuple(per["per (sigma, l)"]), {}),
+            "+ A_TN, A_TN2, a_ng per sigma": (("A_TN", "A_TN2", *per["per sigma"]), {}),
+        }
+        if cubic:
+            treatments.update({
+                "cubic priors x3": ((), {n: 3.0 for n in cubic}),
+                "cubic priors flat": ((), {n: np.inf for n in cubic}),
+                "all: A_TN, A_TN2, a_ng per sigma, cubic x3": (("A_TN", "A_TN2", *per["per sigma"]),
+                                                               {n: 3.0 for n in cubic}),
+                "all: A_TN, A_TN2, a_ng per (sigma, l), cubic x3": (("A_TN", "A_TN2", *per["per (sigma, l)"]),
+                                                                    {n: 3.0 for n in cubic}),
+            })
+        cuts = {"q != 2 at sigma >= 12.5": 0.0, "q != 2 at sigma >= 17.7": 17.6, "q != 2 at sigma >= 25": 24.9}
+        for cut, smin in cuts.items():
+            rows = np.array([n for n in range(len(full["labels"])) if n not in blocks or blocks[n][3] >= smin])
+            for treatment, (free, widen) in treatments.items():
+                known = [n for n in full["names"] if (n in ("A_TN", "A_TN2") or n.startswith("a_ng")) and n not in free]
+                sigma = fisher_errors(full, rows, known=known, report=COSMOLOGY, prior_scale=widen)
+                key = f"{tag}{cut} | {treatment}"
+                gain = {p: 1 - sigma[p] / reference[p] for p in sigma}
+                results[key] = dict(ndata=len(rows), sigma=sigma, gain=gain)
+                print(f"{key:90s} n={len(rows):4d} | " + " ".join(f"{p} {sigma[p]:.4f} ({100 * gain[p]:+.0f}%)"
+                                                               for p in sigma), flush=True)
+        print(f"{tag}reference: " + " ".join(f"{p} {v:.4f}" for p, v in reference.items()), flush=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(dict(volume=args.volume, emulator=str(args.emulator), fit_args=args.fit_args,
+                                           vectors=vectors, results=results), indent=2))
     print(f"wrote {args.output}")
 
 
@@ -409,6 +586,8 @@ def main():
         return neutrino_forecast(args, fr)
     if args.layer2_info:
         return layer2_information(args, fr)
+    if args.edgeworth_info:
+        return edgeworth_information(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
     # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit.py's default cuts.
