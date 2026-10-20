@@ -436,7 +436,7 @@ class SurveySpectra:
     ``keep``: the (j1, l) whose |m| moduli are measured (default every l >= 1). ``window(edgesin, ellsin)``: the window
     matrix of the estimator from the correlation of the two selections (jaxpower's smooth window)."""
 
-    def __init__(self, geometry, density, kedges, ells=(0, 2, 4), keep=None, los="local"):
+    def __init__(self, geometry, density, kedges, ells=(0, 2, 4), keep=None, los="local", defer=False):
         from jaxpower import BinMesh2SpectrumPoles, MeshAttrs, RealMeshField
 
         g = geometry
@@ -448,6 +448,9 @@ class SurveySpectra:
         self.bin = BinMesh2SpectrumPoles(self.mattrs, edges=np.asarray(kedges), ells=tuple(ells))
         self.norm = float(np.sum(self.wu.astype(np.float64) * self.wd) / g.cellsize**3)
         self.ells, self.keep, self.los, self.out = tuple(ells), keep, los, {}
+        #: ``defer``: keep the meshes (host memory) and compute every spectrum in ``compute()``, e.g. after a GPU WST
+        #: has released the device memory jaxpower needs.
+        self.defer, self.pending = defer, {}
 
     @property
     def k(self) -> np.ndarray:
@@ -458,10 +461,20 @@ class SurveySpectra:
 
         if m1 is None or (self.keep is not None and (j1, ell) not in self.keep):
             return
+        if self.defer:
+            self.pending[j1, ell, m1] = (np.asarray(mesh) / mean).astype(np.float32)
+            return
         u = RealMeshField((np.asarray(mesh) / mean).astype(np.float32), attrs=self.mattrs)
         poles = compute_mesh2_spectrum(u, self.dmesh, bin=self.bin, los=self.los)
         self.out[j1, ell, m1] = np.array([np.asarray(poles.get(e).values("value")) * np.asarray(poles.get(e).values("norm"))
                                           for e in self.ells]) / self.norm
+
+    def compute(self):
+        """The deferred spectra (``defer``)."""
+        defer, self.defer = self.defer, False
+        for key in list(self.pending):
+            self(*key, self.pending.pop(key), 1.0)
+        self.defer = defer
 
     def array(self, nj: int, nl: int) -> np.ndarray:
         """The measured X as an array (nj, nl, nl, nell, nk) (NaN where not measured), as the box ``PUd_m``."""
