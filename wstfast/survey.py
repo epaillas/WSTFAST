@@ -293,7 +293,7 @@ def _components(fk, lattice: Lattice, harmonics, sigma, ell, index):
 def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray | None = None,
                        weights: np.ndarray | None = None, qs=None, los=None, erosion: float = 0.0,
                        moment_support: np.ndarray | None = None, lattice: Lattice | None = None,
-                       second_layer_bins: dict | None = None) -> dict:
+                       second_layer_bins: dict | None = None, fields=None) -> dict:
     """WST coefficients of a density contrast mesh restricted to a survey support, for one or several exponents q.
 
     ``support``: boolean mesh of the cells inside the footprint (default: every cell, a periodic box). ``weights``:
@@ -307,7 +307,10 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
     ``second_layer_bins`` (``second_layer_bins``): {(j1, l): label per support cell}; for l >= 1 the first-layer modulus
     then loses its mean in each bin (of first-layer coverage and nbar) before the second layer, instead of its mean over
     the support. Near the edges the mean of U follows the coverage, and a single mean would leave that profile in the
-    second layer as a deterministic offset; in a periodic box (one bin) both are the same.
+    second layer as a deterministic offset; in a periodic box (one bin) both are the same. ``fields``: a callable
+    fields(j1, l, m1, mesh, mean) called with every first-layer modulus that feeds a second layer, as the mean-subtracted
+    mesh the second layer reads (zero off the support; m1 None for the m-summed modulus) and its mean over the support
+    (``SurveySpectra``: its cross-spectra with the density).
 
     Returns ``q``, ``S0``, ``S1`` and ``S2`` as ``measure_wst``, and with ``los`` also ``S1m`` and ``S2m``.
     """
@@ -375,6 +378,8 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
                 second = np.zeros(nmesh**3, dtype=np.float32)
                 second[index] = u if ell == 0 else subtract_mean(u, None if second_layer_bins is None
                                                                  else second_layer_bins[j1, ell])
+                if fields is not None and ell >= 1:
+                    fields(j1, ell, m1, second.reshape(delta.shape), float(u.mean(dtype=np.float64)))
                 fu = _rfft(second.reshape(delta.shape))
                 for _, j2 in (pair for pair in pairs if pair[0] == j1):
                     u2, per_m2 = moduli(fu, config.sigma0 * config.step**j2, resolve_m=m1 is not None)
@@ -384,6 +389,95 @@ def measure_wst_survey(delta: np.ndarray, config: WSTConfig, support: np.ndarray
                         for m2, v in enumerate(per_m2):
                             out["S2m"][:, j1, j2, ell, m1, m2] = moments(v, j2)
     return out
+
+
+def survey_power(geometry, data, randoms, kedges, ells=(0, 2, 4), data_weights=None, random_weights=None,
+                 window_edges=None, window_ells=(0, 2, 4)):
+    """P_l of a catalogue on the geometry's mesh with jaxpower's FKP estimator (TSC, interlacing 3, compensated, local
+    first-point line of sight, FKP normalisation and shot noise from the catalogues): returns k (nk,), poles
+    (nell, nk) with the shot noise subtracted from the monopole, nmodes and, with ``window_edges`` ((n, 2) theory
+    bins), the window matrix (jaxpower WindowMatrix, multipoles ``window_ells``) from the randoms' correlation."""
+    from jaxpower import (BinMesh2CorrelationPoles, BinMesh2SpectrumPoles, FKPField, MeshAttrs, ParticleField,
+                          compute_fkp2_normalization, compute_fkp2_shotnoise, compute_mesh2_correlation,
+                          compute_mesh2_spectrum, compute_smooth2_spectrum_window)
+
+    g = geometry
+    mattrs = MeshAttrs(meshsize=g.nmesh, boxsize=g.boxsize, boxcenter=np.asarray(g.offset) + g.boxsize / 2)
+    dw = np.ones(len(data)) if data_weights is None else np.asarray(data_weights)
+    rw = np.ones(len(randoms)) if random_weights is None else np.asarray(random_weights)
+    dfield = ParticleField(np.asarray(data, dtype=np.float32), np.asarray(dw, dtype=np.float32), attrs=mattrs)
+    rfield = ParticleField(np.asarray(randoms, dtype=np.float32), np.asarray(rw, dtype=np.float32), attrs=mattrs)
+    fkp = FKPField(dfield, rfield, attrs=mattrs)
+    bin = BinMesh2SpectrumPoles(mattrs, edges=np.asarray(kedges), ells=tuple(ells))
+    norm, shot = compute_fkp2_normalization(fkp, bin=bin), compute_fkp2_shotnoise(fkp, bin=bin)
+    mesh = fkp.paint(resampler="tsc", interlacing=3, compensate=True, out="real")
+    poles = compute_mesh2_spectrum(mesh, bin=bin, los="firstpoint").clone(norm=norm, num_shotnoise=shot)
+    out = dict(k=np.asarray(bin.xavg), nmodes=np.asarray(poles.get(ells[0]).values("nmodes")),
+               poles=np.array([np.asarray(poles.get(e).value()) for e in ells]),
+               norm=float(np.asarray(norm[0]).ravel()[0]))
+    if window_edges is not None:
+        sbin = BinMesh2CorrelationPoles(mattrs, edges={}, ells=list(range(0, 9, 2)))
+        scaled = rfield.clone(weights=rfield.weights * (dfield.weights.sum() / rfield.weights.sum()))
+        rmesh = scaled.paint(resampler="tsc", interlacing=3, compensate=True, out="real")
+        xi = compute_mesh2_correlation(rmesh, bin=sbin, los="firstpoint").clone(
+            norm=[norm[0]] * len(sbin.ells), num_shotnoise=compute_fkp2_shotnoise(scaled, bin=sbin))
+        out["window"] = compute_smooth2_spectrum_window(xi, edgesin=np.asarray(window_edges), ellsin=tuple(window_ells),
+                                                        bin=bin)
+    return out
+
+
+class SurveySpectra:
+    """Cross-spectrum multipoles of the first-layer modulus fields with the density on a survey mesh, the survey
+    version of the box ``PUd_m``: X_a = P_{U'_a, w delta}, U'_a = (U_a - its binned mean) / <U_a> on the support (the
+    mesh the second layer reads, from ``measure_wst_survey(fields=self)``), w delta the FKP-weighted density, both on
+    the geometry's mesh; jaxpower's mesh estimator with the local (first-point) line of sight, normalised by
+    sum(W_U W_d) / V_cell with W_U the support and W_d the FKP weight on it (the box normalisation when both are 1).
+    ``keep``: the (j1, l) whose |m| moduli are measured (default every l >= 1). ``window(edgesin, ellsin)``: the window
+    matrix of the estimator from the correlation of the two selections (jaxpower's smooth window)."""
+
+    def __init__(self, geometry, density, kedges, ells=(0, 2, 4), keep=None, los="local"):
+        from jaxpower import BinMesh2SpectrumPoles, MeshAttrs, RealMeshField
+
+        g = geometry
+        self.mattrs = MeshAttrs(meshsize=g.nmesh, boxsize=g.boxsize, boxcenter=np.asarray(g.offset) + g.boxsize / 2)
+        support = np.asarray(g.support, dtype=bool)
+        self.wu = support.astype(np.float32)
+        self.wd = np.where(support, g.weights, 0.0).astype(np.float32)
+        self.dmesh = RealMeshField((self.wd * np.where(support, density, 0.0)).astype(np.float32), attrs=self.mattrs)
+        self.bin = BinMesh2SpectrumPoles(self.mattrs, edges=np.asarray(kedges), ells=tuple(ells))
+        self.norm = float(np.sum(self.wu.astype(np.float64) * self.wd) / g.cellsize**3)
+        self.ells, self.keep, self.los, self.out = tuple(ells), keep, los, {}
+
+    @property
+    def k(self) -> np.ndarray:
+        return np.asarray(self.bin.xavg)
+
+    def __call__(self, j1, ell, m1, mesh, mean):
+        from jaxpower import RealMeshField, compute_mesh2_spectrum
+
+        if m1 is None or (self.keep is not None and (j1, ell) not in self.keep):
+            return
+        u = RealMeshField((np.asarray(mesh) / mean).astype(np.float32), attrs=self.mattrs)
+        poles = compute_mesh2_spectrum(u, self.dmesh, bin=self.bin, los=self.los)
+        self.out[j1, ell, m1] = np.array([np.asarray(poles.get(e).values("value")) * np.asarray(poles.get(e).values("norm"))
+                                          for e in self.ells]) / self.norm
+
+    def array(self, nj: int, nl: int) -> np.ndarray:
+        """The measured X as an array (nj, nl, nl, nell, nk) (NaN where not measured), as the box ``PUd_m``."""
+        out = np.full((nj, nl, nl, len(self.ells), len(self.k)), np.nan)
+        for (j1, ell, m1), value in self.out.items():
+            out[j1, ell, m1] = value
+        return out
+
+    def window(self, edgesin, ellsin=(0, 2, 4)):
+        """jaxpower WindowMatrix from the theory bins ``edgesin`` (n, 2) and multipoles ``ellsin`` to the measured bins."""
+        from jaxpower import (BinMesh2CorrelationPoles, RealMeshField, compute_mesh2_correlation,
+                              compute_smooth2_spectrum_window)
+
+        sbin = BinMesh2CorrelationPoles(self.mattrs, edges={}, ells=list(range(0, 9, 2)))
+        xi = compute_mesh2_correlation(RealMeshField(self.wu, attrs=self.mattrs), RealMeshField(self.wd, attrs=self.mattrs),
+                                       bin=sbin, los=self.los).clone(norm=[self.norm] * len(sbin.ells))
+        return compute_smooth2_spectrum_window(xi, edgesin=np.asarray(edgesin), ellsin=tuple(ellsin), bin=self.bin)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

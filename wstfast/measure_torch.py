@@ -204,7 +204,7 @@ def subtract_mean_torch(u, labels=None):
 
 def measure_wst_survey_torch(delta, config: WSTConfig, support=None, weights=None, qs=None, los=None,
                              erosion: float = 0.0, moment_support=None, lattice: TorchLattice | None = None,
-                             second_layer_bins: dict | None = None) -> dict:
+                             second_layer_bins: dict | None = None, fields=None) -> dict:
     """Same arguments and outputs as ``wstfast.survey.measure_wst_survey``, computed on ``lattice.device``."""
     from .survey import _angles, _Moments, m_powers
 
@@ -277,6 +277,8 @@ def measure_wst_survey_torch(delta, config: WSTConfig, support=None, weights=Non
                 second = torch.zeros(nmesh**3, dtype=torch.float32, device=device)
                 second[index] = u if ell == 0 else subtract_mean_torch(u, None if second_layer_bins is None
                                                                        else second_layer_bins[j1, ell])
+                if fields is not None and ell >= 1:
+                    fields(j1, ell, m1, second.reshape((nmesh,) * 3).cpu().numpy(), float(u.to(torch.float64).mean()))
                 fu = torch.fft.rfftn(second.reshape((nmesh,) * 3))
                 for _, j2 in (pair for pair in pairs if pair[0] == j1):
                     u2, per_m2 = moduli(fu, config.sigma0 * config.step**j2, resolve_m=m1 is not None)

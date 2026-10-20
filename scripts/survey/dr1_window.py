@@ -105,11 +105,20 @@ def get_args():
     parser.add_argument("--randoms", type=int, nargs="+", default=[0, 1], help="random files for the mask")
     parser.add_argument("--width", type=float, nargs="+", default=[5.0], help="RIC shell widths [Mpc/h]")
     parser.add_argument("--L", type=int, default=4)
+    parser.add_argument("--sigma-min", type=float, default=25.0,
+                        help="smallest wavelet scale [Mpc/h]: J and sigma0 of the survey config so that sigma runs from it to "
+                             "70.7 in steps of sqrt(2) (17.7 needs cells <= 7 Mpc/h)")
+    parser.add_argument("--spectra", action="store_true",
+                        help="measure: also P_l (jaxpower FKP, WEIGHT x WEIGHT_FKP) and the cross-spectra X of the "
+                             "first-layer moduli at sigma <= --spectra-max-scale with the density (survey.SurveySpectra), "
+                             "and the window matrices of both (once per cap, <output>/spectra_window_<cap>.npz)")
+    parser.add_argument("--spectra-max-scale", type=float, default=25.0)
     parser.add_argument("--layer2-mean", choices=("binned", "global"), default="binned",
                         help="mean subtracted from the first-layer modulus before the second layer of the survey "
                              "measurement: per bin of first-layer coverage and nbar (survey.second_layer_bins), or "
                              "over the whole support")
     parser.add_argument("--q", type=float, default=0.8)
+    parser.add_argument("--qs", type=float, nargs="+", default=None, help="measure: exponents stored (default --q)")
     parser.add_argument("--calibrate", type=int, default=12, help="signal-only mocks for the lambda window")
     parser.add_argument("--realizations", type=int, default=10, help="test mocks (per variant for lambda)")
     parser.add_argument("--catalogue-root", type=Path, default=survey.DESI_ROOT,
@@ -185,7 +194,10 @@ def get_args():
     parser.add_argument("--box-only", action="store_true", help="halos: skip the survey measurement")
     parser.add_argument("--geometry-dir", type=Path, default=Path("outputs/survey/dr1_geometry"))
     parser.add_argument("--output", type=Path, required=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.qs is None:
+        args.qs = [args.q]
+    return args
 
 
 def build_geometries(args) -> dict[str, SurveyGeometry]:
@@ -574,6 +586,11 @@ def expected_shotnoise(g, expected) -> float:
     return float(np.sum(w * inv) / np.sum(w))
 
 
+#: Bins of the survey spectra (P_l and the modulus cross-spectra) and the theory bins of their window matrices [h/Mpc].
+SPECTRA_KEDGES = np.arange(0.0, 0.2051, 0.005)
+WINDOW_EDGES = np.column_stack([np.arange(0.0, 0.3, 0.002)[:-1], np.arange(0.0, 0.3, 0.002)[1:]])
+
+
 def run_measure(args, geometries, setups, pk):
     from wstfast.data import save_measurement
     from wstfast.survey import desi_catalogue_path, read_desi_catalogue, sky_to_cartesian
@@ -615,8 +632,31 @@ def run_measure(args, geometries, setups, pk):
             expected = len(positions) / stacks[cap].sum() * stacks[cap] if cap in stacks else None
             shotnoise = g.shotnoise if expected is None else expected_shotnoise(g, expected)
             delta = g.fkp_field(positions, rpositions, expected=expected)
-            out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=[args.q], los=s["los"],
-                               lattice=s["lattice"], second_layer_bins=s["bins2"])
+            spectra = None
+            if args.spectra:
+                config = s["config"]
+                keep = [(j, ell) for j in range(config.J + 1) if config.sigma(j) <= args.spectra_max_scale + 1e-6
+                        for ell in range(1, config.L + 1)]
+                spectra = survey.SurveySpectra(g, delta, SPECTRA_KEDGES, keep=keep)
+            out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=args.qs, los=s["los"],
+                               lattice=s["lattice"], second_layer_bins=s["bins2"], fields=spectra)
+            if args.spectra:
+                weights = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange,
+                                               columns=("Z", "WEIGHT", "WEIGHT_FKP")) for i in args.measure_randoms]
+                dweights = read_desi_catalogue(desi_catalogue_path(mock, cap, root=args.catalogue_root), args.zrange,
+                                               columns=("Z", "WEIGHT", "WEIGHT_FKP"))
+                window_path = args.output / f"spectra_window_{cap}.npz"
+                power = survey.survey_power(g, positions, rpositions, SPECTRA_KEDGES,
+                                            data_weights=dweights["WEIGHT"] * dweights["WEIGHT_FKP"],
+                                            random_weights=np.concatenate([w["WEIGHT"] * w["WEIGHT_FKP"] for w in weights]),
+                                            window_edges=None if window_path.exists() else WINDOW_EDGES)
+                config = s["config"]
+                out.update(k=power["k"], nmodes=power["nmodes"], Pdd=power["poles"], kx=spectra.k,
+                           PUd_m=spectra.array(config.J + 1, config.L + 1))
+                if not window_path.exists():  # the windows of the geometry (P_l: this mock's randoms)
+                    wx = spectra.window(WINDOW_EDGES)
+                    np.savez(window_path, pk=np.asarray(power["window"].value()), x=np.asarray(wx.value()),
+                             edgesin=WINDOW_EDGES, k=power["k"], kx=spectra.k, ells=(0, 2, 4))
             metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
                             nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=shotnoise,
                             tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap,
@@ -1058,8 +1098,10 @@ def main():
     for cap, g in geometries.items():
         print(f"{cap}: mesh {g.nmesh}^3 x {g.cellsize:g} Mpc/h, {g.support.sum() * g.cellsize**3 / 1e9:.2f}"
               f" (Gpc/h)^3, regions {np.bincount(g.region[g.support])}", flush=True)
-        # sigma = 25, 35, 50, 71 Mpc/h; with --test ric, S21m at (25, 71)
-        config = WSTConfig(J=3, L=args.L, L2=args.L, sigma0=25.0 / g.cellsize, step=2**0.5, cellsize=g.cellsize,
+        # sigma = --sigma-min ... 70.7 Mpc/h (25, 35, 50, 71 by default); with --test ric, S21m at (25, 71)
+        nscale = int(round(2 * np.log2(70.71 / args.sigma_min)))
+        config = WSTConfig(J=nscale, L=args.L, L2=args.L, sigma0=args.sigma_min / g.cellsize, step=2**0.5,
+                           cellsize=g.cellsize,
                            min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q)
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
         if args.layer2_mean == "binned" and config.second_layer_pairs():
