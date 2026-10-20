@@ -529,3 +529,94 @@ of the z^2 because the m entries of a block are strongly correlated.
   computed at the tighter width. If the response is off
   by as much as the level, stop: the halo WST stays at bands + S21m = P_l to 0.2, and the q != 2 first layer is not
   usable for halos at V = 60.
+
+**Gate: the cosmology response of E** (`edgeworth_direct.py --response` / `--decompose`, the profile fits in
+`outputs/drafts/nnlo_edgeworth/deriv_fits/run.sh`; output `edgeworth_response{.json,.log,_decomp.json}`).
+- **Data.** E(q = 0.8) is measured per block on the 200 paired seeds of each Quijote halo derivative set, using central
+  differences per seed. The steps are Delta Omega_m = +-0.01 (at fixed sigma_8 = 0.834, Omega_b and h) and Delta
+  sigma_8 = +-0.015. The error of the mean is the scatter over the 200 seeds.
+- **Model.** The bands12 emulator with the relation cubic biases, Poisson trispectrum and NLO E, i.e. the "cubic" model
+  above. Each set gets its own nuisances: a `fit.py --method profile` fit of the `q2_12k18_s21_V60` vector (bands to
+  k84 = 0.18 + S21m, V = 60 fiducial covariance), with the cosmology fixed at the set's values. For Om_pm, logA comes
+  from CLASS sigma_8 ratios.
+- **Package fix.** The band-power PCA compression now comes from the covariance set when `--covariance-data-dir` is
+  given. Before, it came from each data set's own boxes: 69 instead of 72 components on 200 boxes, a different basis on
+  each derivative set.
+- **Columns.** The model response is shown in three forms:
+  - *refit*: the nuisances refitted on each set;
+  - *fixed*: the nuisances held at the fiducial fit, so that only the cosmology moves;
+  - *template*: E_data(fid) x d ln E_model / d theta (refit), i.e. the response of the fiducial-calibrated template.
+
+Each entry is r = <model, data> / <data, data> over m (weights 1 / err^2), with the rms over m of |model - data| / |data|
+in brackets. The data column gives d ln E / d theta = (dE / d theta) / E_fid, averaged over m. The step-0 vector holds
+sigma 12.5 l <= 1, 17.7 l <= 5 and all of sigma 25.
+
+| sigma, l | k84 | dlnE/dOm data | refit | fixed | template | dlnE/ds8 data | refit | fixed | template |
+|---|---|---|---|---|---|---|---|---|---|
+| 12.5, 0 | 0.129 | -3.98 +- 0.08 | 1.08 [8%] | 0.66 [34%] | 1.12 [12%] | -2.00 +- 0.06 | 3.57 [257%] | -0.55 [155%] | 3.70 [270%] |
+| 12.5, 1 | 0.159 | -3.45 +- 0.02 | 0.97 [11%] | 0.77 [23%] | 1.04 [18%] | -1.09 +- 0.02 | 2.74 [180%] | -1.27 [243%] | 2.94 [193%] |
+| 12.5, 2 | 0.184 | -3.62 +- 0.02 | 1.13 [17%] | 0.99 [21%] | 0.93 [23%] | -0.86 +- 0.02 | 3.43 [282%] | -2.75 [478%] | 2.93 [193%] |
+| 12.5, 3 | 0.204 | -3.76 +- 0.03 | 1.35 [42%] | 1.23 [43%] | 0.91 [24%] | -0.82 +- 0.02 | 4.18 [369%] | -4.50 [712%] | 2.89 [187%] |
+| 12.5, 4 | 0.223 | -3.85 +- 0.03 | 1.69 [88%] | 1.59 [91%] | 0.86 [26%] | -0.80 +- 0.02 | 5.22 [501%] | -7.38 [1137%] | 2.80 [179%] |
+| 12.5, 5 | 0.240 | -3.93 +- 0.03 | 2.08 [134%] | 1.95 [132%] | 0.86 [24%] | -0.81 +- 0.02 | 6.38 [632%] | -10.56 [1506%] | 2.74 [174%] |
+| 12.5, 6 | 0.255 | -3.99 +- 0.03 | 2.63 [199%] | 2.47 [195%] | 0.81 [31%] | -0.81 +- 0.02 | 7.72 [804%] | -16.10 [2345%] | 2.58 [160%] |
+| 17.7, 0 | 0.091 | -4.83 +- 0.22 | 1.16 [16%] | 0.64 [36%] | 1.70 [70%] | -2.38 +- 0.16 | 4.02 [302%] | -0.19 [119%] | 5.89 [489%] |
+| 17.7, 1 | 0.113 | -4.42 +- 0.06 | 0.92 [14%] | 0.70 [31%] | 1.15 [16%] | -1.26 +- 0.04 | 2.46 [143%] | -0.91 [194%] | 3.03 [200%] |
+| 17.7, 2 | 0.130 | -4.59 +- 0.05 | 0.96 [9%] | 0.78 [22%] | 1.12 [12%] | -0.96 +- 0.04 | 2.59 [163%] | -1.42 [253%] | 2.98 [200%] |
+| 17.7, 3 | 0.145 | -4.71 +- 0.06 | 0.97 [9%] | 0.81 [19%] | 1.06 [11%] | -0.88 +- 0.04 | 2.71 [176%] | -1.72 [285%] | 2.94 [196%] |
+| 17.7, 4 | 0.158 | -4.76 +- 0.06 | 1.05 [10%] | 0.91 [12%] | 1.03 [11%] | -0.84 +- 0.04 | 2.95 [205%] | -2.16 [347%] | 2.91 [193%] |
+| 17.7, 5 | 0.169 | -4.84 +- 0.06 | 1.14 [19%] | 1.01 [16%] | 1.01 [11%] | -0.82 +- 0.04 | 3.26 [238%] | -2.76 [408%] | 2.92 [191%] |
+| 17.7, 6 | 0.180 | -4.91 +- 0.06 | 1.29 [38%] | 1.18 [34%] | 0.97 [19%] | -0.83 +- 0.04 | 3.49 [274%] | -3.58 [539%] | 2.72 [171%] |
+| 25.0, 0 | 0.064 | -5.20 +- 0.75 | 1.41 [41%] | 0.67 [33%] | 3.45 [245%] | -2.95 +- 0.55 | 4.75 [375%] | 0.09 [91%] | 11.63 [1063%] |
+| 25.0, 1 | 0.080 | -5.31 +- 0.15 | 0.98 [11%] | 0.74 [28%] | 1.23 [22%] | -1.40 +- 0.10 | 2.86 [181%] | -0.87 [191%] | 3.54 [250%] |
+| 25.0, 2 | 0.092 | -5.62 +- 0.14 | 0.97 [10%] | 0.77 [24%] | 1.18 [19%] | -1.14 +- 0.10 | 2.61 [172%] | -1.17 [222%] | 3.15 [226%] |
+| 25.0, 3 | 0.102 | -5.99 +- 0.15 | 0.92 [13%] | 0.76 [26%] | 1.13 [13%] | -1.07 +- 0.10 | 2.55 [158%] | -1.30 [232%] | 3.03 [205%] |
+| 25.0, 4 | 0.111 | -6.04 +- 0.15 | 0.95 [10%] | 0.80 [21%] | 1.13 [13%] | -0.99 +- 0.10 | 2.54 [159%] | -1.45 [249%] | 2.95 [197%] |
+| 25.0, 5 | 0.120 | -6.00 +- 0.15 | 0.95 [11%] | 0.81 [20%] | 1.12 [12%] | -0.91 +- 0.11 | 2.63 [169%] | -1.57 [260%] | 3.02 [207%] |
+| 25.0, 6 | 0.127 | -6.05 +- 0.16 | 0.95 [12%] | 0.82 [19%] | 1.06 [10%] | -0.90 +- 0.11 | 2.63 [167%] | -1.69 [272%] | 2.91 [191%] |
+
+- **The data response is large and precise.** E shrinks with Omega_m (d ln E / d Omega_m = -3.5 to -6) and with sigma_8
+  (-0.8 to -2). It is measured to 1-3% at sigma = 12.5, 1-5% at 17.7 (l >= 1) and 3-12% at 25 (l >= 1), so a 10-15%
+  test can be resolved.
+- **Omega_m passes, at about 10%, where the vector has its blocks.**
+  - With the nuisances refitted, r = 0.92-1.05 at sigma = 17.7 l = 1-4, and 0.92-0.98 at sigma = 25 l >= 1 (rms 9-14%).
+    l = 5 is at 1.14 [19%], and sigma 12.5 l <= 1 at 0.97-1.08. In units of the measurement error this is still
+    chi^2 / n = 13-230 per block.
+  - The refit matters: with fixed nuisances the model is 20-30% low.
+  - The model drifts upward with l at sigma = 12.5 (r = 1.35-2.6 for l >= 3, beyond the vector) and at 17.7 l = 6.
+  - The calibrated template is within 1-23% for l >= 1, at r = 1.01-1.23.
+- **sigma_8 fails by a factor of 2.5-4 in every block.**
+  - With the nuisances refitted, r = 2.5-3.5 at sigma = 17.7-25 (l >= 1) and 2.7-7.7 at 12.5. The template is the same
+    (r = 2.6-3.5), so the calibration does not help: the fiducial E rescales the level, not the response.
+  - With the nuisances held fixed, the model response has the wrong sign. The cosmology-only part is
+    d ln E / d sigma_8 > 0 (r = -0.9 to -1.7 at sigma 17.7-25).
+  - The whole model response therefore comes from the nuisance shifts. The linear split (`--decompose`) at sigma =
+    17.7-25, as r units:
+
+    | nuisance group | contribution to r |
+    |---|---|
+    | b2 | +4.1 to +4.9 |
+    | b1 | -0.6 to +0.3 |
+    | bG2 | -0.3 |
+    | c_v, the counterterms and the other nuisances | +0.1 to +0.8 |
+    | the sum, with the cosmology-only part | reproduces refit |
+
+  - b2 is the problem. The q = 2 vector sets d b2 / d sigma_8 = -7.5, against d b1 / d sigma_8 = -3.27. The b1 shift is
+    the peak-background-split value (-3.6 for b1 = 1.96), but the model's d E / d b2 turns that b2 shift into 4-5 times
+    the data response. Matching the data would need d b2 / d sigma_8 of about -3.6 at this d E / d b2. The fitted shift
+    rides along the b2-c0-alpha2 direction (d c0 / d sigma_8 = -44, d alpha2 / d sigma_8 = -62).
+  - The shift is not fit noise. Refitting s8_pm on seeds 0-99 and 100-199 separately gives d b2 / d sigma_8 = -8.0 /
+    -6.9 and d b1 / d sigma_8 = -3.28 / -3.26.
+  - Either d E / d b2 of the model is about twice too large, or the bands + S21m vector maps sigma_8 into a b2 shift that
+    E does not see. Both break the template the same way, because a real analysis fits the nuisances the same way.
+
+**Go / no-go: no-go for a calibrated E template, and the q != 2 halo first layer stops here.** The response test is
+the one a fiducial-calibrated template could still have passed, and it fails.
+- In sigma_8 (the amplitude direction, ln A_s at fixed shape), the model and template response is 2.5-3.5
+  times the data in every block of the vector. That is a 150-250% error, an order of magnitude beyond the 10-15% a
+  template prior could absorb, and beyond the 29% per-(sigma, l) amplitudes that already halve the prize.
+- Omega_m alone passes at about 10% for sigma = 17.7 l <= 4 and sigma 25. That is not enough: the gain needs both
+  parameters, and the sigma_8 failure enters through b2, which the q = 0.8 rows were meant to constrain.
+- Per the gate, the halo WST stays at bands + S21m = P_l to 0.2 at V = 60. A q != 2 halo first layer would first need
+  a model of E whose bias dependence (d E / d b2 at fixed P_l) is right. That is a new perturbative ingredient (the
+  b2-sourced trispectrum at the smoothing scales) and is not attempted.

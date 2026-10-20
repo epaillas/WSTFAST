@@ -1181,11 +1181,19 @@ def build_fit(options: FitOptions) -> dict:
     nreal = vectors.shape[0]
     mean = vectors.mean(axis=0)
     compression = None
+    cov_vectors = None
+    if options.covariance_data_dir is not None and not options.survey:
+        other = dataclasses.replace(options)
+        other.data_dir, other.realizations_like, other.exclude_like = options.covariance_data_dir, None, None
+        cov_vectors = build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"]
     if options.compress_m:
         compression, labels = m_compression(labels)
         vectors = vectors @ compression.T
     if options.band_cut > 0 and not options.survey:
-        cut, labels = band_compression(vectors, labels, options.band_cut, band=band_entries(labels, options.q))
+        # the components of the covariance set: data sets sharing a covariance share the compression
+        reference = vectors if cov_vectors is None else cov_vectors @ (np.eye(cov_vectors.shape[1]) if compression is None
+                                                                       else compression.T)
+        cut, labels = band_compression(reference, labels, options.band_cut, band=band_entries(labels, options.q))
         if cut is not None:
             vectors = vectors @ cut.T
             compression = cut if compression is None else cut @ compression
@@ -1198,9 +1206,6 @@ def build_fit(options: FitOptions) -> dict:
     elif options.covariance_data_dir is None:
         covariance = sample_covariance(vectors, of_mean=options.covariance_of_mean)
     else:  # one-box covariance of another set; of the mean of this set's nreal boxes with --covariance-of-mean
-        other = dataclasses.replace(options)
-        other.data_dir, other.realizations_like, other.exclude_like = options.covariance_data_dir, None, None
-        cov_vectors = build_problem(other, basis=problem["basis"], settings=problem["settings"])["vectors"]
         if compression is not None:
             cov_vectors = cov_vectors @ compression.T
         nsims = cov_vectors.shape[0]
