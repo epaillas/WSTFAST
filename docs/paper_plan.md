@@ -795,3 +795,25 @@ marginal differ along the bias-counterterm directions), and its effect is to rem
 sigma) and halve the h one. With n_s free it gains 14% (omega_cdm), 6% (ln A_s), 11% (n_s) and 11% (h), with every
 shift below 0.6 sigma. The validated P(k) + WST complement is therefore worth ~10% with n_s free and mainly a
 robustness gain with n_s fixed; the large Fisher prize stays behind the sigma = 12.5 response model.
+
+### Percival penalty and an analytic covariance for P_l + S21m + X (2026-10-20)
+
+The joint vector (236 points, 47 parameters, 1188 boxes) pays Hartlap 1.25 and Percival m1 = 1.14, i.e. sigma x 1.068
+against x 1.007 for P_l alone: ~6 points of the chain gains. Percival inflation sqrt(m1) of this vector with 3000 /
+15000 boxes: 1.025 / 1.005.
+
+Analytic covariance (`analytic_covariance_rsd_wst.py --pud`, `outputs/covariance/halos_pk_s21q2_pud_model.npz`): the
+X block added to `RSDWSTCovariance` (``response``): with U_a = c_a d + n_a, the c_a |d|^2 part and the fluctuation of
+the per-box <U_a> are rows of the 2nd-chaos matrix (so the X-P_l and X-S21m(delta) crosses come for free), the n_a d*
+part gives N'_ab P per mode and 2 c_b N'_ab P with the second layer of U_b. Fixes on the way: the box branch now takes
+sigma_v from c_v (fog emulators), the modulus auto noise is floored at 5% of g_aa (a negative fitted W overtook it at
+high K: NaNs) and the noise tables are projected on positive semi-definite matrices per (k, mu) node. `fit.py
+--covariance-file` now also works for box fits (no Hartlap / Percival).
+
+Validation against the 1188 boxes (variance of the boxes along the eigen-directions of the analytic matrix; 1 if right):
+P_l 1.04 (weakest 10%: 1.09), S21m 1.01 (1.29), **X 7.9 (58)**, P_l + X 6.0 (15). Diagonals agree (0.93-0.98) and the
+correlations to 0.03-0.05 rms, but X is 85-97% correlated with P_0, and its information sits in the directions
+decorrelated from P_l, where its variance is the noise of the moduli, which the Gaussian-chaos model underestimates by
+up to ~50x (the connected noise that the free W absorbs in S21m). An analytic X covariance would overstate its
+information: not usable. The analytic P_l + S21m blocks are fine (for parameter errors). Way forward: more
+realizations (being downloaded), and/or compressing X and S21m (|m| averaging or PCA) to shrink the vector.

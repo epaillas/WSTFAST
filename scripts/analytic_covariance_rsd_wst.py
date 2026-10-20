@@ -4,7 +4,7 @@
 Model inputs at the nuisance values of a fit.py summary (``--fiducial``, e.g. the joint P_l + WST baseline fit):
 the field power P_d(k, mu) of the fit model (as analytic_covariance_rsd.py --inputs model), the tree response and
 Gaussian-chaos cross noise of the first-layer moduli at the fitted biases and shot noise, with the fitted noise
-amplitudes and white terms W_j. Writes ``lncov`` (S1m and S21m in ln, P_l linear) and its parts. Example:
+amplitudes and white terms W_j. Writes ``lncov`` (S1m and S21m in ln, P_l and, with ``--pud``, the modulus cross-spectra X linear) and its parts. Example:
 
     python scripts/analytic_covariance_rsd_wst.py --fiducial outputs/inference/rsd/paper_c_joint_nsfixed_V60/summary.json \
         --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_sv1_cubic.h5 --output outputs/covariance/halos_wst_model.npz
@@ -120,6 +120,12 @@ def main():
     parser.add_argument("--nmesh", type=int, default=128)
     parser.add_argument("--chaos-nmesh", type=int, default=128, help="0: skip the 4th chaos")
     parser.add_argument("--output", type=Path, default=Path("outputs/covariance/halos_wst_model.npz"))
+    parser.add_argument("--pud", action="store_true",
+                        help="also the cross-spectra X = P_Ud / <U> of the first-layer fields (fit.py --stats pud)")
+    parser.add_argument("--pud-min-scale", type=float, default=17.6)
+    parser.add_argument("--pud-max-scale", type=float, default=25.0)
+    parser.add_argument("--pud-x", type=float, default=0.5)
+    parser.add_argument("--pud-skip", nargs="*", default=["j5_l1_m0"])
     parser.add_argument("--survey", nargs="+", default=None, metavar="CAP",
                         help="survey: the caps (measurements in <data-dir>/<cap>/), one --window each; the box "
                              "covariance (--box) rescaled to each entry's effective volume on the cap")
@@ -152,7 +158,12 @@ def main():
     klin = np.geomspace(1e-4, 10.0, 1024)
     pklin = fo.pk_interpolator(of="delta_m")(klin, z=settings["z"])
     f = float(fo.sigma8_z(settings["z"], of="theta_cb") / fo.sigma8_z(settings["z"], of="delta_cb"))
-    sigma_v = settings.get("s21_damping", 2.0) * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+    if "c_v" in best:  # the Fingers-of-God counterterm as the velocity damping it expands
+        from wstfast.theory.layout import FOG_KNL
+
+        sigma_v = float(np.sqrt(2 * max(best["c_v"], 0.0)) / (f * FOG_KNL))
+    else:
+        sigma_v = (settings.get("s21_damping") or 2.0) * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
     plin = lambda k: np.where(np.asarray(k) > 0, np.exp(np.interp(np.log(np.maximum(k, 1e-30)), np.log(klin), np.log(pklin))), 0.0)  # noqa: E731
     beta = np.array([1.0] + [best[n] for n in ("b1", "b2", "bG2", "bGamma3")])
     meta = json.loads(str(np.load(files[0])["metadata"]))
@@ -171,9 +182,24 @@ def main():
     moduli = ModulusTables(kgrid, mugrid, r, g, amplitudes, white)
     print(f"moduli spectra of {len(fields)} fields ({time.time() - t1:.0f}s)", flush=True)
 
+    response = None
+    if args.pud:  # the cross-spectra X = P_Ud / <U> of fit.py --stats pud (its default cuts)
+        from wstfast.data import load_response_dataset
+
+        xfields = [(j, ell, m) for j, ell, m in keys
+                   if args.pud_min_scale - 1e-6 <= config.sigma(j) <= args.pud_max_scale + 1e-6 and ell >= 1
+                   and f"j{j}_l{ell}_m{m}" not in args.pud_skip]
+        kmax = [args.pud_x / config.sigma(j) for j, _, _ in xfields]
+        data = load_response_dataset(args.data_dir, "rsd", xfields, kmax, files=files)
+        mean, labels, offset = data.vectors.mean(axis=0), {}, 0
+        for (j, ell, m), mask in zip(xfields, data.mask):
+            for e, kk in zip(np.repeat([0, 2], data.k.size)[mask], np.tile(data.k, 2)[mask]):
+                labels[f"X{e}_j{j}_l{ell}_m{m}_k{kk:.4f}"] = float(mean[offset])
+                offset += 1
+        response = dict(fields=[keys.index(x) for x in xfields], kmax=kmax, labels=xfields, mean=labels, ells=(0, 2))
     t2 = time.time()
     cov = RSDWSTCovariance(config, s1m, entries, fields, args.q, meta["boxsize"], pfield, plin, z1, moduli,
-                           pk_edges=power.edges, nmesh=args.nmesh)
+                           pk_edges=power.edges, nmesh=args.nmesh, response=response)
     print(f"2nd chaos of {len(cov.labels)} entries ({time.time() - t2:.0f}s)", flush=True)
     chaos4 = np.zeros_like(cov.lncov)
     if args.chaos_nmesh:

@@ -97,7 +97,7 @@ class RSDWSTCovariance:
     TERMS = ("delta", "noise_level", "u_noise")
 
     def __init__(self, config, s1m, s21m, fields, q, boxsize, pfield, plin, z1, moduli, pk_edges=None,
-                 pk_ells=(0, 2, 4), nmesh=128, include=TERMS):
+                 pk_ells=(0, 2, 4), nmesh=128, include=TERMS, response=None):
         from scipy.special import eval_legendre
 
         lat = HalfLattice(nmesh, boxsize)
@@ -159,8 +159,57 @@ class RSDWSTCovariance:
                     rows.append(np.where(inside, legendre / nmodes, 0.0))
                     kmean = (mult[inside] * k[inside]).sum() / nmodes
                     self.labels.append(f"P{ell}_k{kmean:.4f}")
+        self.npk = len(rows) - self.ns1m - self.ns21m
+        # Cross-spectra X_a = P_{U_a d} / <U_a> of first-layer fields (``response``: dict(fields = indices into
+        # ``fields``, kmax per field, ells, labels (j, l, m) per field, mean = {label: box-mean X})). With
+        # U_a = c_a d + n_a (n_a uncorrelated with d): the c_a |d|^2 part is a row of D, as are the fluctuations of
+        # the per-box mean <U_a> (q = 1 in the S1m row); the n_a d* part gives N'_ab P per mode (``x_part``), and
+        # with the second layer of U_b (|U_b|^2 holds 2 c_b Re(d n_b*)) 2 c_b N'_ab P.
+        xinfo = []
+        if response is not None:
+            if pk_edges is None:
+                raise ValueError("the cross-spectra need pk_edges")
+            index = np.digitize(k, pk_edges) - 1
+            for a, kmax, (j, l, m) in zip(response["fields"], response["kmax"], response["labels"]):
+                w1, sigma1, _ = first[a]
+                ca = moduli.response(a, k, mu) * Z1 * PL / P
+                for ell in response.get("ells", (0, 2)):
+                    legendre = (2 * ell + 1) * eval_legendre(ell, mu)
+                    for i in range(len(pk_edges) - 1):
+                        inside = index == i
+                        nmodes = mult[inside].sum()
+                        kmean = (mult[inside] * k[inside]).sum() / nmodes
+                        if kmean > kmax:
+                            continue
+                        label = f"X{ell}_j{j}_l{l}_m{m}_k{kmean:.4f}"
+                        mean = response["mean"][label]
+                        rows.append(np.where(inside, legendre * ca / nmodes, 0.0) - mean * 0.5 * w1 / (V * sigma1))
+                        xinfo.append((a, np.where(inside, legendre / nmodes, 0.0)))
+                        self.labels.append(label)
+        self.nx = len(xinfo)
         D = np.array(rows)
         self.delta_part = (D * (2 * P**2 * mult)) @ D.T
+        self.x_part = np.zeros_like(self.delta_part)
+        if xinfo:
+            nprime = {}
+
+            def own_noise(a, b):
+                if (a, b) not in nprime:
+                    ra, rb = moduli.response(a, k, mu), moduli.response(b, k, mu)
+                    nprime[a, b] = nprime[b, a] = ra * rb * PL + moduli.noise(a, b, k, mu) - ra * rb * (Z1 * PL) ** 2 / P
+                return nprime[a, b]
+
+            o = len(rows) - self.nx
+            for i, (a, wa) in enumerate(xinfo):
+                for j, (b, wb) in enumerate(xinfo):
+                    if j < i:
+                        continue
+                    value = (mult * wa * wb * own_noise(a, b) * P).sum()
+                    self.x_part[o + i, o + j] = self.x_part[o + j, o + i] = value
+                for s, (b, w2b, sb) in enumerate(second):
+                    cb = moduli.response(b, k, mu) * Z1 * PL / P
+                    value = (mult * wa * q / 2 * w2b / (V * sb) * 2 * cb * own_noise(a, b) * P).sum()
+                    self.x_part[o + i, self.ns1m + s] = self.x_part[self.ns1m + s, o + i] = value
         self.u_part = np.zeros_like(self.delta_part)
         if "u_noise" in include:
             o = self.ns1m
@@ -172,7 +221,7 @@ class RSDWSTCovariance:
                     nab = r[a] * r[b] * PL + noise[a, b] - cab
                     value = q**2 / 2 / V**2 * (mult * w2a * w2b * (2 * cab * nab + nab**2)).sum() / (sa * sb)
                     self.u_part[o + i, o + j] = self.u_part[o + j, o + i] = value
-        self.lncov = self.delta_part + self.u_part
+        self.lncov = self.delta_part + self.u_part + self.x_part
         self._chaos_inputs = (config, s1m, s21m, fields, q, boxsize, pfield, plin, z1, moduli)
 
     def chaos4(self, nmesh=128, **kwargs):
@@ -209,7 +258,7 @@ class RSDWSTCovariance:
 class ModulusTables:
     """r_a(k, mu) and N_ab(k, mu) of the first-layer fields from ``ModulusCrossRSD`` tables: linear in ln k (constant
     outside the table), Lagrange in mu^2 through the Gauss nodes. ``amplitudes`` (nfield,) and ``white`` (nfield,) set
-    the auto noise (1 + a) g_aa + W; the cross noise is g_ab rescaled by sqrt(N_aa N_bb / (g_aa g_bb))."""
+    the auto noise (1 + a) g_aa + W (floored at 0.05 g_aa); the cross noise is g_ab rescaled by sqrt(N_aa N_bb / (g_aa g_bb))."""
 
     def __init__(self, k, mu, r, g, amplitudes=None, white=None):
         from .spectrum import lagrange_matrix
@@ -219,12 +268,19 @@ class ModulusTables:
         nf = r.shape[0]
         a = np.zeros(nf) if amplitudes is None else np.asarray(amplitudes)
         W = np.zeros(nf) if white is None else np.asarray(white)
-        auto = np.array([(1 + a[i]) * g[i, i] + W[i] for i in range(nf)])
+        # floored at 5% of the Gaussian-chaos noise: a negative fitted W can overtake g_aa where it falls (high K)
+        auto = np.array([np.maximum((1 + a[i]) * g[i, i] + W[i], 0.05 * g[i, i]) for i in range(nf)])
         ratio = auto / np.array([g[i, i] for i in range(nf)])
         self.r = r
         self.n = g * np.sqrt(ratio[:, None] * ratio[None, :])
         for i in range(nf):
             self.n[i, i] = auto[i]
+        # the rescaled cross noise need not be a covariance: project each (k, mu) node on the positive semi-definite
+        # matrices (eigenvalues floored at 1e-6 of the largest), so that every covariance built on it is one too
+        n = np.moveaxis(self.n, (0, 1), (-2, -1))
+        values, vectors = np.linalg.eigh(n)
+        values = np.maximum(values, 1e-6 * values[..., -1:])
+        self.n = np.moveaxis(np.einsum("...ij,...j,...kj->...ik", vectors, values, vectors), (-2, -1), (0, 1))
 
     def _interp(self, table, k, mu):
         k, mu = np.broadcast_arrays(np.asarray(k, "f8"), np.asarray(mu, "f8"))

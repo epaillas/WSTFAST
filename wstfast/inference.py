@@ -478,7 +478,8 @@ class FitOptions:
     survey: tuple | None = None
     window: tuple | None = None
     combine_caps: bool = False
-    #: Survey: analytic covariance (analytic_covariance_rsd_wst.py --survey) instead of box realizations.
+    #: Analytic covariance (analytic_covariance_rsd_wst.py; --survey for a survey fit) instead of box realizations:
+    #: ln S1m / ln S21m converted through the data mean, P_l and X as they are; no Hartlap or Percival factor.
     covariance_file: Path | None = None
     #: npz files of modelling errors (labels, covariance in data units or fractional) added as they are.
     extra_covariance: tuple = ()
@@ -1333,6 +1334,19 @@ def build_fit(options: FitOptions) -> dict:
     nsims = nreal  # realizations of the covariance estimate
     if options.survey:  # box covariance at each cap's effective volume, with the layer-2 terms (survey_problem)
         covariance, nsims = problem["covariance"], problem["nsims"]
+    elif options.covariance_file is not None:  # analytic one-box covariance (analytic_covariance_rsd_wst.py)
+        if compression is not None:
+            raise SystemExit("an analytic box covariance needs an uncompressed data vector")
+        analytic = np.load(options.covariance_file)
+        index = {str(label): i for i, label in enumerate(analytic["labels"])}
+        missing = [label for label in labels if label not in index]
+        if missing:
+            raise SystemExit(f"{options.covariance_file} has no entries {missing[:5]}...")
+        rows = np.array([index[label] for label in labels])
+        scale = np.where([label.startswith(("S1m", "S21m")) for label in labels], vectors.mean(axis=0), 1.0)  # ln
+        covariance = analytic["lncov"][np.ix_(rows, rows)] * np.outer(scale, scale)
+        covariance /= nreal if options.covariance_of_mean else 1
+        nsims = 10**9  # exact: no Hartlap / Percival factors
     elif options.covariance_data_dir is None:
         covariance = sample_covariance(vectors, of_mean=options.covariance_of_mean)
     else:  # one-box covariance of another set; of the mean of this set's nreal boxes with --covariance-of-mean
