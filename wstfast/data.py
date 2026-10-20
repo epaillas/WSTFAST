@@ -167,6 +167,8 @@ class PowerDataset:
     edges: np.ndarray
     metadata: dict
     files: list
+    #: Survey measurements: the kept entries in the ell-major (nell, nk) vector of the survey window matrix.
+    rows: np.ndarray | None = None
 
     @property
     def mean(self) -> np.ndarray:
@@ -197,6 +199,25 @@ def load_power_dataset(data_dir: Path, space: str = "real", kmin: float = 0.0, k
     files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
     if not files:
         raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    with np.load(files[0]) as data:
+        survey = "k_edges" not in data.files
+    if survey:  # survey measurements (dr1_window --spectra): final bins, FKP shot noise added back to the monopole
+        vectors, metadatas, shots = [], [], []
+        with np.load(files[0]) as data:
+            k, nmodes = data["k"], data["nmodes"]
+        keep = (k >= kmin) & (k <= kmax)
+        for path in files:
+            with np.load(path) as data:
+                metadatas.append(json.loads(str(data["metadata"])))
+                poles = np.array(data["Pdd"], dtype=np.float64)
+                poles[0] += float(data["shotnoise_pk"])
+                shots.append(float(data["shotnoise_pk"]))
+            vectors.append(np.concatenate([poles[ell // 2][keep] for ell in ells]))
+        reference = common_metadata(metadatas, files)
+        reference["shotnoise"] = float(np.mean(shots))
+        rows = np.concatenate([(ell // 2) * k.size + np.flatnonzero(keep) for ell in ells])
+        return PowerDataset(vectors=np.array(vectors), k=k[keep], nmodes=nmodes[keep], edges=None, metadata=reference,
+                            files=[str(path) for path in files], rows=rows)
     with np.load(files[0]) as data:
         k, nmodes, edges = data["k"], data["nmodes"], data["k_edges"]
     nk = (k.size // rebin) * rebin
@@ -244,6 +265,19 @@ def load_response_dataset(data_dir: Path, space: str, fields, kmax, rebin: int =
     with np.load(files[0]) as data:
         if "PUd_m" not in data.files:
             raise ValueError(f"{files[0]} has no line-of-sight-resolved modulus spectra (measure with spectra and los)")
+        survey = "kx" in data.files
+        k, nmodes = (data["kx"], None) if survey else (data["k"], data["nmodes"])
+    if survey:  # survey measurements (survey.SurveySpectra): final bins, X already normalised by the mean of U
+        mask = np.array([np.tile(k <= kf, 2) for kf in kmax])
+        vectors, metadatas = [], []
+        for path in files:
+            with np.load(path) as data:
+                metadatas.append(json.loads(str(data["metadata"])))
+                x = data["PUd_m"]
+                vectors.append(np.concatenate([x[j, l, m, :2].ravel()[mk] for (j, l, m), mk in zip(fields, mask)]))
+        return ResponseDataset(vectors=np.array(vectors), k=k, mask=mask, fields=list(fields),
+                               metadata=common_metadata(metadatas, files), files=[str(path) for path in files])
+    with np.load(files[0]) as data:
         k, nmodes = data["k"], data["nmodes"]
     nk = (k.size // rebin) * rebin
     weights = nmodes[:nk].reshape(-1, rebin)

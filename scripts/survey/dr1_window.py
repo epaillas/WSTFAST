@@ -1102,8 +1102,8 @@ def main():
         print(f"{cap}: mesh {g.nmesh}^3 x {g.cellsize:g} Mpc/h, {g.support.sum() * g.cellsize**3 / 1e9:.2f}"
               f" (Gpc/h)^3, regions {np.bincount(g.region[g.support])}", flush=True)
         # sigma = --sigma-min ... 70.7 Mpc/h (25, 35, 50, 71 by default); with --test ric, S21m at (25, 71)
-        nscale = int(round(2 * np.log2(70.71 / args.sigma_min)))
-        config = WSTConfig(J=nscale, L=args.L, L2=args.L, sigma0=args.sigma_min / g.cellsize, step=2**0.5,
+        nscale = int(round(2 * np.log2(70.71 / args.sigma_min)))  # sigma_min = 25 x 2^((3 - J) / 2) exactly (the box scales)
+        config = WSTConfig(J=nscale, L=args.L, L2=args.L, sigma0=25.0 * 2 ** ((3 - nscale) / 2) / g.cellsize, step=2**0.5,
                            cellsize=g.cellsize,
                            min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q)
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)

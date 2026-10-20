@@ -24,6 +24,7 @@ from .data import (PowerDataset, WSTDataset, chi_squared, hartlap_factor, load_b
                    load_power_dataset, load_s1m_dataset, load_s21m_dataset, percival_m1, sample_covariance)
 from .theory.power import LatticeBinning, default_knodes
 from .theory.spectrum import (APPolynomial, BandProjection, MultipoleProjection, S1mProjection, SpectrumGrid,
+                              WindowedMultipoleProjection,
                               multipole_ap_projection, s1m_ap_projection)
 
 
@@ -914,8 +915,15 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         power = load_power_dataset(options.data_dir, space, kmin=options.kmin, kmax=options.kmax, rebin=options.rebin,
                                    files=files, ells=ells)
         files = power.files
-        projection = (APPolynomial(multipole_ap_projection(power.edges, grid, ells=ells, **lattice)) if options.ap
-                      else MultipoleProjection(power.edges, grid, ells=ells, **lattice))
+        if power.rows is not None:  # survey: continuum multipoles through the cap's window matrix
+            if options.ap:
+                raise SystemExit("the survey P_l has no AP model yet")
+            spectra_window = np.load(Path(options.data_dir) / f"spectra_window_{space}.npz")
+            projection = WindowedMultipoleProjection(spectra_window["pk"], spectra_window["edgesin"], grid,
+                                                     rows=power.rows)
+        else:
+            projection = (APPolynomial(multipole_ap_projection(power.edges, grid, ells=ells, **lattice)) if options.ap
+                          else MultipoleProjection(power.edges, grid, ells=ells, **lattice))
         theories.append(PowerTheory(projection, basis=basis, nuisance=nuisance, shotnoise=power.shotnoise, ap=ap))
         vectors.append(power.vectors)
         labels += [f"{prefix}P{ell}_k{k:.4f}" for ell in ells for k in power.k]
@@ -924,8 +932,8 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         if (spec.tracer, spec.space) not in (("biased", "redshift"), ("matter", "real")):
             raise SystemExit("the modulus cross-spectra are modelled for biased tracers in redshift space and for "
                              "matter in real space")
-        if options.ap or window is not None:
-            raise SystemExit("the modulus cross-spectra have no AP or window model yet")
+        if options.ap:
+            raise SystemExit("the modulus cross-spectra have no AP model yet")
         fields = [(j, ell, m) for j in range(config.J + 1)
                   if options.pud_min_scale - 1e-6 <= config.sigma(j) <= options.pud_max_scale + 1e-6
                   for ell in range(1, 5) for m in range(ell + 1) if f"j{j}_l{ell}_m{m}" not in options.pud_skip]
@@ -934,8 +942,21 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         response = load_response_dataset(options.data_dir, space, fields,
                                           [options.pud_x / config.sigma(j) for j, _, _ in fields], files=files)
         files = response.files
-        shot = response.metadata["boxsize"] ** 3 / response.metadata["nparticles"]
-        table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real")
+        shot = response.metadata.get("shotnoise", response.metadata["boxsize"] ** 3 / response.metadata["nparticles"])
+        if window is None:
+            table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real")
+        else:  # survey: the tree response through the cap's cross-spectrum window, about the emulator's fiducial
+            spectra_window = np.load(Path(options.data_dir) / f"spectra_window_{space}.npz")
+            nk = spectra_window["kx"].size
+            rows = np.concatenate([np.arange(nk), nk + np.arange(nk)])  # observed multipoles 0 and 2
+            fiducial = settings.get("fiducial", "quijote")
+            center = dict(RESPONSE_CENTER)
+            if fiducial == "abacus":
+                from .config import ABACUS_COSMOLOGY
+
+                center.update({n: ABACUS_COSMOLOGY[n] for n in ("omega_cdm", "logA", "h", "n_s")}, b1=2.0)
+            table = response_taylor(config, fields, response.k, shot, settings["z"], center=center, fiducial=fiducial,
+                                    window=spectra_window["x"][rows], edgesin=spectra_window["edgesin"])
         table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields],
                      linear=not options.pud_marg)
         theories.append(ResponseTheory(basis, nuisance, table))
@@ -975,18 +996,26 @@ RESPONSE_CENTER_REAL = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm
                         "b1": 1.0, "b2": 0.0, "bG2": 0.0, "sv": 0.0}
 
 
-def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor"), real=False):
+def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor"), real=False,
+                    center=None, fiducial="quijote", window=None, edgesin=None, kmax_theory=0.15):
     """Second-order Taylor table of X_a = P_{U_a d} / <U_a> = (2 ell + 1) int r_a Z1 P_L L_ell (ell = 0, 2) on the
     bins ``k`` for the fields (j, l, |m|): the tree response of ``covariance_rsd.ModulusCrossRSD`` (Gaussian damping
     sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER (``real``: RESPONSE_CENTER_REAL,
     f = 0, the matter limit in real space) by central differences; also the
-    counterterm (k^2 P_L at the centre) and constant columns. Cached in ``cache_dir`` (~10 min to build)."""
+    counterterm (k^2 P_L at the centre) and constant columns. Cached in ``cache_dir`` (~10 min to build). ``center``:
+    another expansion point; ``fiducial`` "abacus": one 0.06 eV neutrino and the cb power. Survey (``window``,
+    (2 nk, 3 nin): the rows of multipoles 0 and 2 of a ``survey.SurveySpectra.window`` on the theory bins ``edgesin``):
+    the response is computed at the theory bins (k <= ``kmax_theory``, multipoles 0, 2, 4) and mapped through the
+    window, so the table holds the observed multipoles 0 and 2 at ``k``."""
     import hashlib
 
-    centre = RESPONSE_CENTER_REAL if real else RESPONSE_CENTER
+    centre = dict(center) if center is not None else RESPONSE_CENTER_REAL if real else RESPONSE_CENTER
+    extra = [] if window is None else [hashlib.sha1(np.ascontiguousarray(window)).hexdigest(),
+                                       list(map(float, np.ravel(edgesin))), float(kmax_theory)]
     key = hashlib.sha1(json.dumps([[config.sigma(j), l, m] for j, l, m in fields] + [list(map(float, k)),
                                    float(shotnoise), float(z), centre, RESPONSE_STEPS]
-                                  + (["real"] if real else [])).encode()).hexdigest()[:16]
+                                  + (["real"] if real else []) + ([fiducial] if fiducial != "quijote" else [])
+                                  + extra).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"{key}.npz"
     names = list(RESPONSE_PARAMS)
     center = np.array([centre[n] for n in names])
@@ -1001,20 +1030,37 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
 
     mu, wmu = leggauss(16)
     mu, wmu = mu[8:], wmu[8:]
-    model = ModulusCrossRSD([(config.sigma(j), l, m) for j, l, m in fields], k, mu)
-    legendre = np.array([(2 * e + 1) * eval_legendre(e, mu) * wmu for e in (0, 2)])  # (2, nmu)
+    if window is None:
+        ktheory, ells = np.asarray(k), (0, 2)
+    else:
+        kin = np.asarray(edgesin).mean(axis=1)
+        nin = int(np.sum(kin <= kmax_theory))
+        ktheory, ells = kin[:nin], (0, 2, 4)
+        columns = np.concatenate([e * kin.size + np.arange(nin) for e in range(3)])
+        wsel = np.asarray(window)[:, columns]  # (2 nk, 3 nin): the theory beyond kmax_theory is dropped
+    model = ModulusCrossRSD([(config.sigma(j), l, m) for j, l, m in fields], ktheory, mu)
+    legendre = np.array([(2 * e + 1) * eval_legendre(e, mu) * wmu for e in ells])  # (nell, nmu)
 
-    def multipoles(grid):  # (..., nk, nmu) -> (..., 2 nk), ell-major
-        return np.concatenate([np.einsum("...km,m->...k", grid, row) for row in legendre], axis=-1)
+    def multipoles(grid):  # (..., nk, nmu) -> (..., 2 nk) at k, ell-major (through the window for a survey)
+        out = np.concatenate([np.einsum("...km,m->...k", grid, row) for row in legendre], axis=-1)
+        return out if window is None else out @ wsel.T
 
     cosmologies = {}
 
     def power(p):
         key = tuple(round(p[n], 12) for n in ("omega_cdm", "logA", "h", "n_s"))
         if key not in cosmologies:
-            cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=QUIJOTE_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
-                              logA=p["logA"], m_ncdm=[], N_eff=3.046, engine="class")
-            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of="delta_m").to_1d(z=z),
+            if fiducial == "abacus":
+                from .config import ABACUS_COSMOLOGY, ABACUS_M_NCDM
+
+                cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=ABACUS_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
+                                  logA=p["logA"], m_ncdm=[ABACUS_M_NCDM], engine="class")
+                of = "delta_cb"
+            else:
+                cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=QUIJOTE_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
+                                  logA=p["logA"], m_ncdm=[], N_eff=3.046, engine="class")
+                of = "delta_m"
+            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of=of).to_1d(z=z),
                                 0.0 if real else float(cosmo.growth_rate(z)))
         return cosmologies[key]
 
@@ -1022,7 +1068,7 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
         p = dict(zip(names, values))
         pk, f = power(p)
         r, _, _ = model.spectra(pk, f, p["sv"], np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0]), shotnoise)
-        return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(k)[None, :, None])
+        return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(ktheory)[None, :, None])
 
     steps = np.array([RESPONSE_STEPS[n] for n in names])
     x0 = evaluate(center)
@@ -1044,8 +1090,8 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
                      + evaluate(center - ei - ej)) / (4 * steps[i] * steps[j])
             hess[i, j] = hess[j, i] = value
     pk0, _ = power(dict(zip(names, center)))
-    ct = multipoles((k**2 * pk0(k))[:, None] * np.ones_like(mu)[None, :])
-    cst = multipoles(np.ones((k.size, mu.size)))
+    ct = multipoles((ktheory**2 * pk0(ktheory))[:, None] * np.ones_like(mu)[None, :])
+    cst = multipoles(np.ones((ktheory.size, mu.size)))
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, x0=x0, jac=jac, hess=hess, ct=ct, cst=cst)
     return dict(params=names, center=center, x0=x0, jac=jac, hess=hess, ct=ct, cst=cst)
@@ -1065,6 +1111,12 @@ def box_entries(box_dir: Path, labels, config: WSTConfig, q: float) -> tuple[np.
             raise SystemExit(f"no box scale for sigma = {sigma:.2f} Mpc/h in {box_dir}")
         return matches[0]
 
+    # P_l and X: the survey bins are the box spectra's bins merged by 2 (edges (0.5 + 2n) k_f): matched by index
+    kfund = 2 * np.pi / first["metadata"]["boxsize"]
+
+    def kbin(label_k):
+        return int(np.floor((float(label_k) / kfund - 0.5) / 2))
+
     keys = []
     for label in labels:
         parts = label.split(":")[-1].split("_")
@@ -1073,13 +1125,35 @@ def box_entries(box_dir: Path, labels, config: WSTConfig, q: float) -> tuple[np.
         elif parts[0] == "S21m":
             keys.append(("S21m", j_box(int(parts[1][1:])), j_box(int(parts[2][1:])), int(parts[3][1:]),
                          int(parts[4][1:]), int(parts[5][1:])))
+        elif parts[0][0] == "P":  # P{ell}_k{k}
+            keys.append(("P", int(parts[0][1:]) // 2, kbin(parts[1][1:])))
+        elif parts[0][0] == "X":  # X{ell}_j{j}_l{l}_m{m}_k{k}
+            keys.append(("X", int(parts[0][1:]) // 2, j_box(int(parts[1][1:])), int(parts[2][1:]), int(parts[3][1:]),
+                         kbin(parts[4][1:])))
         else:
-            raise SystemExit(f"survey fits support S1m and S21m only ({label})")
+            raise SystemExit(f"no box entry for the survey label {label}")
+
+    def merged(data, name):  # box spectra in bins of 2 k_f, mode-weighted (load_power_dataset with rebin 2)
+        nk = data["k"].size // 2 * 2
+        w = data["nmodes"][:nk].reshape(-1, 2)
+        return (data[name][..., :nk].reshape(*data[name].shape[:-1], -1, 2) * w).sum(-1) / w.sum(1)
+
     vectors = []
     for path in files:
         m = load_measurement(path, q=q)
-        vectors.append([m["S1m"][k[1], k[2], k[3]] if k[0] == "S1m"
-                        else m["S2m"][k[1], k[2], k[3], k[4], k[5]] / m["S1m"][k[1], k[3], k[4]] for k in keys])
+        if any(k[0] in ("P", "X") for k in keys):
+            pdd, pud = merged(m, "Pdd"), merged(m, "PUd_m")
+        row = []
+        for k in keys:
+            if k[0] == "S1m":
+                row.append(m["S1m"][k[1], k[2], k[3]])
+            elif k[0] == "S21m":
+                row.append(m["S2m"][k[1], k[2], k[3], k[4], k[5]] / m["S1m"][k[1], k[3], k[4]])
+            elif k[0] == "P":
+                row.append(pdd[k[1], k[2]])
+            else:
+                row.append(pud[k[2], k[3], k[4], k[1], k[5]] / m["Umean_m"][k[2], k[3], k[4]])
+        vectors.append(row)
     return np.array(vectors), (first["metadata"]["boxsize"] / 1000.0) ** 3
 
 
