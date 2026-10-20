@@ -817,3 +817,69 @@ decorrelated from P_l, where its variance is the noise of the moduli, which the 
 up to ~50x (the connected noise that the free W absorbs in S21m). An analytic X covariance would overstate its
 information: not usable. The analytic P_l + S21m blocks are fine (for parameter errors). Way forward: more
 realizations (being downloaded), and/or compressing X and S21m (|m| averaging or PCA) to shrink the vector.
+
+### What would a one-loop WST model buy on top of the proposed P(k) + WST baseline? (2026-10-20)
+
+`fisher_rsd.py --response-info --response-oneloop` (`outputs/fisher/response_info_V60_oneloop.json`), V = 60, the
+original 1188 halo boxes (pinned: the fiducial directory is growing), Hartlap and Percival as in the fits (the
+per-field linear nuisances of X not counted in m1, as with `--pud-marg`); in brackets the many-simulation limit (m1 =
+1). The Fisher errors match the chains to ~5% (n_s fixed, P_l 0.0022 / 0.0394 / 0.0037 against 0.0021 / 0.0377 /
+0.0035; the tree baseline 0.0020 / 0.0380 / 0.0035 against 0.0020 / 0.0371 / 0.0034).
+
+"One loop" here means: the vectors a model beyond tree level would open, with the tree Jacobian standing in for the
+one-loop one. X to k <= 1 / sigma and 1.5 / sigma (k = 0.08 / 0.12 at sigma = 12.5) and with the sigma = 12.5
+fields; S21m at sigma_1 = 12.5 (no emulator covers it: exact CLASS basis); the q = 0.8 first layer (sigma >= 17.7,
+l <= 4) with the E(q) nuisances of the Edgeworth gate free (A_TN, A_TN2, a_ng per sigma). X nuisances per field: (c,
+e) = the k^2 P_L counterterm and constant of the current fits; (c, c2, e) = the standard one-loop EFT set, with a
+separate quadrupole k^2 term; (c, c2, e, k4) adds k^4 P_L.
+
+n_s fixed, sigma(omega_cdm) / sigma(ln A_s) / sigma(h):
+
+| vector | 1188 boxes | many simulations |
+|---|---|---|
+| P_l to 0.2 | 0.0022 / 0.0394 / 0.0037 | 0.0022 / 0.0390 / 0.0037 |
+| tree baseline (P_l + S21m(17.7) + X(17.7-25, k <= 0.5/sigma)) | 0.0020 / 0.0380 / 0.0035 | 0.0019 / 0.0357 / 0.0033 |
+| + S21m at sigma_1 = 12.5 (no X) | 0.0019 / 0.0358 / 0.0033 | 0.0018 / 0.0344 / 0.0032 |
+| + S1m(q = 0.8), a_ng per sigma (no X) | 0.0018 / 0.0337 / 0.0033 | 0.0017 / 0.0320 / 0.0032 |
+| + S1m(q = 0.8) + S21m(12.5) (no X) | 0.0018 / 0.0322 / 0.0034 | 0.0017 / 0.0303 / 0.0031 |
+| X(12.5-25, k <= 1/sigma), (c, e) | 0.0018 / 0.0225 / 0.0039 | 0.0014 / 0.0178 / 0.0031 |
+| X(12.5-25, k <= 1.5/sigma), (c, e) | 0.0012 / 0.0129 / 0.0038 | 0.0008 / 0.0089 / 0.0026 |
+| X(12.5-25, k <= 1/sigma), (c, c2, e) | 0.0023 / 0.0402 / 0.0043 | 0.0018 / 0.0320 / 0.0034 |
+| X(12.5-25, k <= 1.5/sigma), (c, c2, e) | 0.0016 / 0.0260 / 0.0042 | 0.0011 / 0.0180 / 0.0029 |
+| X(12.5-25, k <= 1.5/sigma), (c, c2, e, k4) | 0.0022 / 0.0299 / 0.0046 | 0.0015 / 0.0207 / 0.0032 |
+| all: q = 0.8 + S21m(12.5) + X(k <= 1.5/sigma), (c, c2, e) | 0.0019 / 0.0290 / 0.0050 | 0.0012 / 0.0185 / 0.0031 |
+
+n_s free, sigma(omega_cdm) / sigma(ln A_s) / sigma(n_s) / sigma(h):
+
+| vector | 1188 boxes | many simulations |
+|---|---|---|
+| P_l to 0.2 | 0.0045 / 0.0655 / 0.0313 / 0.0055 | 0.0045 / 0.0649 / 0.0311 / 0.0055 |
+| tree baseline | 0.0040 / 0.0622 / 0.0270 / 0.0051 | 0.0038 / 0.0586 / 0.0254 / 0.0048 |
+| + S21m at sigma_1 = 12.5 (no X) | 0.0038 / 0.0590 / 0.0260 / 0.0048 | 0.0037 / 0.0568 / 0.0250 / 0.0046 |
+| + S1m(q = 0.8), a_ng per sigma (no X) | 0.0033 / 0.0503 / 0.0218 / 0.0045 | 0.0032 / 0.0480 / 0.0207 / 0.0042 |
+| + S1m(q = 0.8) + S21m(12.5) (no X) | 0.0033 / 0.0489 / 0.0214 / 0.0044 | 0.0031 / 0.0461 / 0.0201 / 0.0041 |
+| X(12.5-25, k <= 1/sigma), (c, e) | 0.0038 / 0.0390 / 0.0223 / 0.0052 | 0.0030 / 0.0310 / 0.0177 / 0.0041 |
+| X(12.5-25, k <= 1.5/sigma), (c, c2, e) | 0.0042 / 0.0467 / 0.0225 / 0.0056 | 0.0029 / 0.0325 / 0.0156 / 0.0039 |
+| all, (c, c2, e) | 0.0045 / 0.0503 / 0.0245 / 0.0063 | 0.0029 / 0.0323 / 0.0156 / 0.0040 |
+
+Reading:
+- **The counterterm budget of a one-loop X decides most of the answer.** With one k^2 term and a constant per field,
+  a one-loop X at k <= 1 / sigma would cut sigma(ln A_s) by 43% (n_s fixed; -40% with n_s free) and at 1.5 / sigma
+  by 67%; with the standard one-loop set (separate monopole and quadrupole k^2 terms) nothing survives at k <= 1 /
+  sigma and 34% (n_s fixed) / 29% (n_s free) at 1.5 / sigma. The information of X is in the k- and mu-shape of the
+  response, which per-field counterterms absorb; it is the b1 lever (sigma(b1) 0.046 -> 0.013-0.027). Nothing helps h.
+- **The number of boxes matters as much as the model.** At 500-800 data points the Percival factor reaches m1 ~ 2
+  with 1188 boxes (sigma x 1.4): with many simulations the realistic one-loop X at 1.5 / sigma would give -50 / -54 /
+  -22% (n_s fixed) and -36 / -50 / -50 / -29% (n_s free) over P_l, against -27 / -34 / +14% and -7 / -29 / -28 / +2%
+  with 1188 boxes. A compression of X (PCA, |m| averaging) or more boxes comes before any one-loop work.
+- **The q = 0.8 first layer at one loop is the cheapest gain with n_s free** (-21 / -21 / -22 / -13% over P_l + S21m,
+  E nuisances per sigma free, no X needed, small vector), but it halves with a_ng per (sigma, l) and needs a one-loop
+  K4 whose b2 response passes the derivative-box gate (the tree one fails by 2.5-3.5x).
+- **S21m at sigma_1 = 12.5 adds little** (-3% n_s fixed, -7 to -10% n_s free).
+- Realistic best case with 1188 boxes, n_s free: q = 0.8 + S21m(12.5) without X, -27 / -25 / -32 / -20% over P_l
+  (-18 / -21 / -21 / -14% over the tree baseline). With many boxes and a one-loop X with the standard counterterms:
+  -36 / -50 / -50 / -29% over P_l.
+
+Caveats: tree Jacobians stand in for one-loop ones; a one-loop model must still pass the derivative-box gate (the tree
+response at sigma = 12.5 recovers only 55-73% of the amplitude step); a one-loop RSD bispectrum-type response for
+biased tracers brings its own bias and counterterm parameters (only the per-field counterterms are modelled here).

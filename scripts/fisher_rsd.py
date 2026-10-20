@@ -193,6 +193,8 @@ def parse_args():
     parser.add_argument("--real-space", action="store_true", help="Edgeworth mode: the real-space matter control")
     parser.add_argument("--response-info", action="store_true",
                         help="response mode: what the modulus cross-spectra P_Ud add to P_l to 0.2")
+    parser.add_argument("--response-oneloop", action="store_true",
+                        help="response mode: what a one-loop WST model could add to the proposed P(k) + WST baseline")
     parser.add_argument("--response-gate", action="store_true",
                         help="response mode: linear recovery of the Quijote derivative steps by P_l + X")
     parser.add_argument("--neutrino", type=float, default=None,
@@ -356,10 +358,47 @@ def case_fisher(args, fr, case_args, vary, exact=False, extra=None):
         mean = built["problem"]["vectors"].mean(axis=0)
         variance = dict(zip(built["problem"]["labels"], inference.layer2_variance(fit, built["problem"]["labels"], mean)))
         covariance -= np.diag([variance.get(label, 0.0) for label in labels])
-    vectors = np.asarray(built["problem"]["vectors"])
+    vectors = np.asarray(built["vectors"])  # as fitted (compressed when the fit compresses)
     return dict(names=list(names), jacobian=np.array(jacobian), covariance=covariance, prior=np.array(prior),
-                labels=list(labels), nsims=built["nsims"], m1=built["m1"], fiducial=fiducial,
-                vectors=vectors if vectors.shape[1] == len(labels) else None)
+                labels=list(labels), nsims=built["nsims"], m1=built["m1"], fiducial=fiducial, vectors=vectors)
+
+
+def exact_case(args, fr, case_args, vary, settings, extra=None):
+    """``case_fisher`` with the exact (CLASS) basis of ``settings`` instead of an emulator, for vectors no emulator covers
+    (e.g. S21m at sigma_1 = 12.5: add its S21 and first-layer labels to the settings): the sample covariance of the
+    boxes at --volume with Hartlap, and the Percival factor of the vector."""
+    import shlex
+
+    from wstfast.data import percival_m1
+
+    fit = fr.fit_options(fr.parse_args(["--data-dir", str(args.data_dir), "--emulator", str(args.emulator),
+                                        "--output-dir", "unused", "--volume", str(args.volume), "--vary", *vary,
+                                        *case_args] + shlex.split(args.fit_args)))
+    problem = inference.build_problem(fit, basis=inference.exact_basis(settings, vary), settings=settings)
+    theory = problem["theories"][0] if len(problem["theories"]) == 1 else JointTheory(problem["theories"])
+    params = get_params(theory).select(varied=True, derived=False)
+    names = params.names()
+    fiducial = {name: float(params[name].value) for name in names}
+    for path in args.fiducial:
+        if path.exists():
+            best = json.loads(path.read_text())["bestfit"]
+            fiducial.update({n: float(v) for n, v in best.items() if n in names and n not in COSMOLOGY})
+    fiducial.update({n: QUIJOTE_COSMOLOGY[n] for n in COSMOLOGY if n in names})
+    fiducial.update({n: 0.0 for n in names if n.startswith("noise")})
+    model = build(theory)
+    jacobian = [(np.asarray(model({**fiducial, n: fiducial[n] + step_of(n)}))
+                 - np.asarray(model({**fiducial, n: fiducial[n] - step_of(n)}))) / (2 * step_of(n)) for n in names]
+    prior = [prior_sigma(params[n]) if params[n].prior.dist == "norm" else np.inf for n in names]
+    if extra is not None:
+        for name, (column, sigma) in extra(theory, fiducial, list(problem["labels"])).items():
+            names, jacobian, prior = names + [name], jacobian + [column], prior + [sigma]
+    vectors = np.asarray(problem["vectors"])
+    nsims, ndata = vectors.shape
+    covariance = (np.cov(vectors, rowvar=False) * (problem["meta"]["boxsize"] / 1000.0) ** 3 / args.volume
+                  * (nsims - 1) / (nsims - ndata - 2))
+    return dict(names=list(names), jacobian=np.array(jacobian), covariance=covariance, prior=np.array(prior),
+                labels=list(problem["labels"]), nsims=nsims, m1=percival_m1(nsims, ndata, len(names)),
+                fiducial=fiducial, vectors=vectors)
 
 
 def fisher_errors(case, rows, known=(), report=None, prior_scale=None):
@@ -609,6 +648,91 @@ def response_gate(args, forecast, details, merge, tree_q):
     print(f"wrote {path}")
 
 
+#: --response-oneloop: the base vectors (fit.py arguments) of the proposed P(k) + WST baseline and of its extensions.
+ONELOOP_PK = ("--stats", "pk", "--kmax", "0.2")
+ONELOOP_S21 = ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "17.6", "--s21-white")
+ONELOOP_S21_EXACT = {"17.7": ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "17.6",
+                              "--s21-white"),
+                     "12.5": ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "12.4",
+                              "--s21-white")}
+ONELOOP_E = ("--stats", "pk", "s21m", "s1m", "--kmax", "0.2", "--q", "2.0", "0.8", "--s1-min-scale", "17.6",
+             "--s21-min-scale", "17.6", "--s21-white")
+
+
+def response_oneloop(args, fr, base_case, forecast_case, sigma):
+    """What a one-loop WST model could add to the proposed P(k) + WST baseline (P_l to 0.2 + S21m(q = 2, sigma_1 >=
+    17.7) + X(sigma 17.7-25, k <= 0.5 / sigma)): Fisher errors of the vectors a model beyond tree level would open
+    (X to larger k and at sigma = 12.5; S21m at sigma_1 = 12.5, exact CLASS basis; the q = 0.8 first layer with its
+    E(q) nuisances free), with the tree Jacobian standing in for the one-loop one and two nuisance sets per field of X:
+    as fitted (c, e) and one-loop-like (c, c2, e, k4)."""
+    settings = json.loads(args.emulator.with_suffix(".json").read_text())
+    exact = dict(settings, coefficients=list(dict.fromkeys(settings["coefficients"]
+                                                           + [f"S1_j4_l{l}" for l in range(5)])),
+                 s21_coefficients=settings["s21_coefficients"] + [f"S21_j4_j9_l{l}" for l in range(1, 5)])
+    config = load_measurement(sorted((args.data_dir / "rsd").glob("wst_r*.npz"))[0], q=2.0)["config"]
+    nuis = {"(c, e)": ("c", "e"), "(c, c2, e)": ("c", "c2", "e"), "(c, c2, e, k4)": ("c", "c2", "e", "k4")}
+    skip = ((5, 1, 0),)
+    results = {}
+    for ns in (False, True):
+        vary = ["omega_cdm", "logA", "n_s", "h"] if ns else ["omega_cdm", "logA", "h"]
+        tag = "[n_s free] " if ns else ""
+        pk, s21 = base_case(ONELOOP_PK, vary), base_case(ONELOOP_S21, vary)
+        rows = {}
+
+        def run(label, case, scales=(), x=0.5, kinds=("c", "e"), skip_=(), rows_=None, known=()):
+            errors, ndata = forecast_case(case, vary, scales, x, kinds, skip=skip_, rows=rows_, known=known)
+            ideal, _ = forecast_case(case, vary, scales, x, kinds, skip=skip_, rows=rows_, known=known, percival=False)
+            results[tag + label] = dict(ndata=ndata, sigma=errors, sigma_no_percival=ideal)
+            rows[label] = errors
+            report = [p for p in ("omega_cdm", "logA", "n_s", "h", "b1") if p in errors]
+            print(f"{tag + label:86s} n={ndata:3d} | " + " ".join(f"{p} {errors[p]:.4f}" for p in report)
+                  + " || m1 = 1: " + " ".join(f"{ideal[p]:.4f}" for p in report), flush=True)
+
+        run("P_l to 0.2", pk)
+        run("P_l + S21m(17.7)", s21)
+        run("BASELINE: P_l + S21m(17.7) + X(17.7/25, k <= 0.5/sigma)", s21, (5, 6), 0.5, skip_=skip)
+        for nlabel, kinds in nuis.items():
+            for scales in ((5, 6), (4, 5, 6)):
+                for x in (0.5, 0.75, 1.0, 1.5):
+                    if scales == (5, 6) and x == 0.5:
+                        continue
+                    run(f"one-loop X {nlabel}: X({'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma)",
+                        s21, scales, x, kinds)
+        # S21m at sigma_1 = 12.5 (exact basis), with the widest X
+        for key, base in ONELOOP_S21_EXACT.items():
+            case = exact_case(args, fr, list(base), vary, exact)
+            run(f"exact basis: P_l + S21m({key})", case)
+            run(f"exact basis: P_l + S21m({key}) + X(12.5/17.7/25, k <= 1.0/sigma) (c, e)", case, (4, 5, 6), 1.0)
+        # the q = 0.8 first layer (sigma >= 17.7, l <= 4) with its E(q) nuisances free
+        e = base_case(ONELOOP_E, vary, extra=edgeworth_columns(config))
+        keep = [r for r, label in enumerate(e["labels"]) if "S1q2_" not in label and not label.startswith("q2:")]
+        ng = [name for name in e["names"] if name.startswith("a_ng")]
+        per_sigma = [name for name in ng if name.count("_") == 2]
+        for elabel, free in {"A_TN, A_TN2, a_ng per sigma free": ("A_TN", "A_TN2", *per_sigma),
+                             "A_TN, A_TN2, a_ng per (sigma, l) free": ("A_TN", "A_TN2", *[n for n in ng if n.count("_") == 3])}.items():
+            known = [name for name in e["names"] if (name in ("A_TN", "A_TN2") or name.startswith("a_ng")) and name not in free]
+            run(f"+ S1m(q = 0.8, sigma >= 17.7) [{elabel}]", e, rows_=keep, known=known)
+            run(f"+ S1m(q = 0.8) [{elabel}] + X(12.5/17.7/25, k <= 1.0/sigma) (c, e)", e, (4, 5, 6), 1.0,
+                rows_=keep, known=known)
+        # everything a one-loop model would open: q = 0.8 layer (a_ng per sigma) + S21m(12.5) + the widest X
+        everything = exact_case(args, fr, list(ONELOOP_E[:-5]) + ["--s21-min-scale", "12.4", "--s21-white",
+                                                                  "--s1-min-scale", "17.6"], vary, exact,
+                                extra=edgeworth_columns(config))
+        keep = [r for r, label in enumerate(everything["labels"]) if not label.startswith("q2:")]
+        ng = [name for name in everything["names"] if name.startswith("a_ng")]
+        known = [name for name in ng if name.count("_") != 2]
+        for nlabel, kinds in nuis.items():
+            run(f"ALL: S1m(q = 0.8) + S21m(12.5) + X(12.5/17.7/25, k <= 1.5/sigma) {nlabel}", everything, (4, 5, 6), 1.5,
+                kinds, rows_=keep, known=known)
+            run(f"ALL: S1m(q = 0.8) + S21m(12.5) + X(12.5/17.7/25, k <= 1.0/sigma) {nlabel}", everything, (4, 5, 6), 1.0,
+                kinds, rows_=keep, known=known)
+        run("ALL without X: S1m(q = 0.8) + S21m(12.5)", everything, rows_=keep, known=known)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    path = args.output.with_name(args.output.stem + "_oneloop.json")
+    path.write_text(json.dumps(dict(volume=args.volume, results=results), indent=2))
+    print(f"wrote {path}")
+
+
 def response_information(args, fr):
     """Fisher errors of P_l to 0.2 + the modulus cross-spectra X_a (module docstring)."""
     from cosmoprimo import Cosmology
@@ -653,7 +777,9 @@ def response_information(args, fr):
     dtree = {name: (tree({**fiducial, name: fiducial[name] + h})[0] - tree({**fiducial, name: fiducial[name] - h})[0])
              / (2 * h) for name, h in RESPONSE_STEPS.items()}
     columns = dict(c=multipoles((kk**2 * pk0(kk))[:, None] * np.ones_like(mu)[None, :]),
-                   e=multipoles(np.ones((kk.size, mu.size))))
+                   e=multipoles(np.ones((kk.size, mu.size))),
+                   k4=multipoles((kk**4 * pk0(kk))[:, None] * np.ones_like(mu)[None, :]))
+    columns["c2"] = np.concatenate([np.zeros(kk.size), columns["c"][kk.size:]])  # quadrupole-only counterterm
     data = {a: X[:, j, l, m][:, [0, 1]].reshape(n, -1) for a, (j, l, m) in enumerate(RESPONSE_FIELDS)}
 
     def cut(a, x):
@@ -677,43 +803,65 @@ def response_information(args, fr):
 
     details = {}
 
-    def forecast(vary, scales, x, nuisances, validated, base=("--stats", "pk", "--kmax", "0.2")):
-        case = case_fisher(args, fr, list(base), vary)
-        pl = case["vectors"] if base[:3] != ("--stats", "pk", "--kmax") else pl_vectors
+    cases_cache = {}
+
+    def base_case(base, vary, extra=None):
+        key = (tuple(base), tuple(vary), extra is not None)
+        if key not in cases_cache:
+            cases_cache[key] = case_fisher(args, fr, list(base), vary, extra=extra)
+        return cases_cache[key]
+
+    def forecast_case(case, vary, scales, x, nuisances, validated=False, skip=(), rows=None, known=(), percival=True):
+        """Errors of the base vector of ``case`` (its ``rows``; parameters ``known`` fixed) + X of the fields of
+        ``scales`` at k <= x / sigma (``validated``: those passing the model check; ``skip``: (j, l, m) left out),
+        nuisances per field among c (k^2 P_L), e (constant), c2 (k^2 P_L on the quadrupole only), k4 (k^4 P_L);
+        Hartlap on the joint vector and the Percival factor with the per-field linear nuisances not counted (they are
+        marginalised analytically in the fits)."""
+        from wstfast.data import percival_m1
+
+        rows = np.arange(len(case["labels"])) if rows is None else np.asarray(rows)
         names, prior = list(case["names"]), list(case["prior"])
-        fields = [a for a, (j, _, _) in enumerate(RESPONSE_FIELDS) if j in scales
+        fields = [a for a, (j, l, m) in enumerate(RESPONSE_FIELDS) if j in scales and (j, l, m) not in skip
                   and (not validated or check[x, a] <= 2.0)]
         cuts = [cut(a, x) for a in fields]
         nx = int(sum(c.sum() for c in cuts))
-        vector = np.concatenate([pl] + [data[a][:, c] for a, c in zip(fields, cuts)], axis=1)
+        base = case["vectors"][:, rows]
+        vector = np.concatenate([base] + [data[a][:, c] for a, c in zip(fields, cuts)], axis=1)
         jac = {name: np.concatenate([np.zeros(0)] + [dtree[name][a][c] for a, c in zip(fields, cuts)])
                for name in [*vary, "b1", "b2", "bG2", "sv"]}
-        offset = 0
+        offset, linear = 0, []
         for a, c in zip(fields, cuts):
             for kind in nuisances:
                 column = np.zeros(nx)
                 column[offset:offset + c.sum()] = columns[kind][c]
                 jac[f"{kind}_{a}"] = column
+                linear.append(f"{kind}_{a}")
             offset += int(c.sum())
-        allnames = names + [name for name in jac if name not in names]
+        allnames = [name for name in names if name not in known] + [name for name in jac if name not in names]
         full = np.zeros((len(allnames), vector.shape[1]))
         for i, name in enumerate(allnames):
             if name in names:
-                full[i, :pl.shape[1]] = case["jacobian"][names.index(name)]
+                full[i, :base.shape[1]] = case["jacobian"][names.index(name)][rows]
             if name in jac:
-                full[i, pl.shape[1]:] = jac[name]
+                full[i, base.shape[1]:] = jac[name]
         sig = np.array([prior[names.index(name)] if name in names else np.inf for name in allnames])
         cov = np.cov(vector, rowvar=False) / args.volume * (n - 1) / (n - vector.shape[1] - 2)
         used = [i for i, name in enumerate(allnames) if name in vary or np.any(full[i] != 0)]
-        inverse = np.linalg.inv(full[used] @ precision_matrix(cov) @ full[used].T + np.diag(1 / sig[used] ** 2))
+        m1 = percival_m1(n, vector.shape[1], len([i for i in used if allnames[i] not in linear])) if percival else 1.0
+        inverse = np.linalg.inv(full[used] @ precision_matrix(cov * m1) @ full[used].T + np.diag(1 / sig[used] ** 2))
         details.update(full=full[used], names=[allnames[i] for i in used], prior=sig[used], cov=cov, fields=fields,
-                       cuts=cuts, inverse=inverse)
+                       cuts=cuts, inverse=inverse, m1=m1)
         return {allnames[i]: float(np.sqrt(inverse[b, b])) for b, i in enumerate(used) if allnames[i] in L2_REPORT}, \
             int(vector.shape[1])
+
+    def forecast(vary, scales, x, nuisances, validated, base=("--stats", "pk", "--kmax", "0.2")):
+        return forecast_case(base_case(base, vary), vary, scales, x, nuisances, validated)
 
     if args.response_gate:
         return response_gate(args, forecast, details, merge=lambda path: _response_vector(path, w, nk, kk),
                              tree_q=q)
+    if args.response_oneloop:
+        return response_oneloop(args, fr, base_case, forecast_case, sigma)
     s21m = ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "17.6", "--s21-white")
     cases = {"P_l to 0.2": ((), 0.75, (), False),
              "P_l + S21m(q = 2, sigma_1 >= 17.7)": ((), 0.75, (), False, s21m),

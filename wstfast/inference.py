@@ -1381,4 +1381,4 @@ def build_fit(options: FitOptions) -> dict:
     likelihood = WSTLikelihood(theory, vectors.mean(axis=0), covariance * m1)
     fix_parameters(likelihood, fixed)
     return dict(likelihood=likelihood, theory=theory, labels=list(labels), problem=problem, covariance=covariance,
-                nsims=int(nsims), m1=m1, nparams=nparams, ndata=int(ndata), nreal=int(nreal))
+                nsims=int(nsims), m1=m1, nparams=nparams, ndata=int(ndata), nreal=int(nreal), vectors=vectors)
