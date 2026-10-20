@@ -78,6 +78,10 @@ def parse_args(argv=None):
                         help="pud: keep k <= x / sigma_j (the reach of the tree response)")
     parser.add_argument("--pud-skip", nargs="*", default=list(defaults.pud_skip),
                         help="pud: fields left out, j{j}_l{l}_m{m}")
+    parser.add_argument("--pud-marg", action="store_true",
+                        help="pud: marginalise the per-field counterterm and constant analytically (in the covariance)")
+    parser.add_argument("--pud-marg-widths", type=float, nargs=2, default=list(defaults.pud_marg_widths),
+                        help="pud: Gaussian prior widths of the marginalised counterterm and constant")
     parser.add_argument("--compress-m", action="store_true",
                         help="real space: average the |m| blocks of S1m and S21m within their equally distributed "
                              "classes (inference.m_compression); shorter data vector, smaller Hartlap and Percival factors")

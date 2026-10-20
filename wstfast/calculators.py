@@ -1072,7 +1072,8 @@ class ResponseTheory(Calculator):
     the tree-level response r_a Z1 P_L (``covariance_rsd.ModulusCrossRSD``) as a second-order Taylor expansion
     (``table``: ``inference.response_taylor``) in the cosmology, b1, b2, bG2 (shared with the other theories by name)
     and the velocity dispersion ``sv_U`` of the short modes, plus per field a counterterm ``cU_*`` k^2 P_L and a
-    constant ``eU_*`` (flat priors). ``table``: dict(params, center, x0, jac, hess, ct, cst, mask, labels)."""
+    constant ``eU_*`` (flat priors), or neither with ``table["linear"]`` False (marginalised in the covariance,
+    ``FitOptions.pud_marg``). ``table``: dict(params, center, x0, jac, hess, ct, cst, mask, labels, linear)."""
 
     COSMOLOGY = ("omega_cdm", "logA", "h", "n_s")
 
@@ -1083,7 +1084,7 @@ class ResponseTheory(Calculator):
         own = {"sv_U": Parameter("sv_U", value=float(table["center"][list(table["params"]).index("sv")]),
                                  prior=dict(limits=[0.0, 20.0]), ref=dict(dist="norm", loc=6.0, scale=0.5),
                                  latex=r"\sigma_v^U")}
-        for label in table["labels"]:
+        for label in (table["labels"] if table.get("linear", True) else []):
             own[f"cU_{label}"] = Parameter(f"cU_{label}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
                                            ref=dict(dist="norm", loc=0.0, scale=1.0), latex=rf"c^U_{{\rm {label}}}")
             own[f"eU_{label}"] = Parameter(f"eU_{label}", value=0.0, prior=dict(limits=[-1e6, 1e6]),
@@ -1097,6 +1098,7 @@ class ResponseTheory(Calculator):
         self.ct, self.cst = jnp.asarray(table["ct"], dtype="f8"), jnp.asarray(table["cst"], dtype="f8")
         self.mask = np.asarray(table["mask"], dtype=bool)  # (nfield, nentry)
         self.labels = list(table["labels"])
+        self.linear = bool(table.get("linear", True))
 
     def __call__(self):
         values = []
@@ -1112,8 +1114,11 @@ class ResponseTheory(Calculator):
             + 0.5 * jnp.einsum("ij...,i,j->...", self.hess, delta, delta)  # (nfield, nentry)
         parts = []
         for a, label in enumerate(self.labels):
-            c, e = self.response_params[f"cU_{label}"].value, self.response_params[f"eU_{label}"].value
-            parts.append((x[a] + c * self.ct + e * self.cst)[self.mask[a]])
+            if self.linear:
+                c, e = self.response_params[f"cU_{label}"].value, self.response_params[f"eU_{label}"].value
+                parts.append((x[a] + c * self.ct + e * self.cst)[self.mask[a]])
+            else:  # marginalised analytically in the covariance (FitOptions.pud_marg)
+                parts.append(x[a][self.mask[a]])
         self.flattheory = jnp.concatenate(parts)
         return self.flattheory
 

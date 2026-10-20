@@ -521,6 +521,10 @@ class FitOptions:
     pud_max_scale: float = 25.0
     pud_x: float = 0.75
     pud_skip: tuple = ("j5_l1_m0",)
+    #: Marginalise the per-field counterterm and constant of X analytically (Gaussian priors of widths
+    #: ``pud_marg_widths``, ~10 times the largest best-fit values: effectively flat) instead of fitting them.
+    pud_marg: bool = False
+    pud_marg_widths: tuple = (3000.0, 30000.0)
 
 
 def load_basis(path: Path, vary, prepare=None):
@@ -791,6 +795,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
     ap = APGeometry(basis, settings["z"], omega_b=fiducial_omega_b(settings)) if options.ap else None
 
     theories, vectors, labels = [], [], []
+    linear = []  # (first index, column from there, prior width) of analytically marginalised linear nuisances
     files = None
     if getattr(options, "realizations_like", None) is not None:
         ids = {path.name for path in (options.realizations_like / space).glob("wst_r*.npz")}
@@ -929,14 +934,29 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         files = response.files
         shot = response.metadata["boxsize"] ** 3 / response.metadata["nparticles"]
         table = response_taylor(config, fields, response.k, shot, settings["z"])
-        table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields])
+        table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields],
+                     linear=not options.pud_marg)
         theories.append(ResponseTheory(basis, nuisance, table))
+        if options.pud_marg:  # the columns of the linear nuisances, at their place in the data vector
+            start, offset = len(labels), 0
+            for mk in response.mask:
+                n = int(mk.sum())
+                for column, width in zip((table["ct"], table["cst"]), options.pud_marg_widths):
+                    vector = np.zeros(n + offset)
+                    vector[offset:] = column[mk]
+                    linear.append((start, vector, float(width)))
+                offset += n
         vectors.append(response.vectors)
         labels += [f"{prefix}X{e}_j{j}_l{ell}_m{m}_k{k:.4f}" for (j, ell, m), mk in zip(fields, response.mask)
                    for e, k in zip(np.repeat([0, 2], response.k.size)[mk], np.tile(response.k, 2)[mk])]
         meta = response.metadata
+    templates = []
+    for start, column, width in linear:
+        vector = np.zeros(len(labels))
+        vector[start:start + column.size] = column
+        templates.append((vector, width))
     return dict(theories=theories, vectors=np.concatenate(vectors, axis=1), labels=labels, meta=meta, basis=basis,
-                settings=settings, spec=spec, tracer=tracer)
+                settings=settings, spec=spec, tracer=tracer, linear_templates=templates)
 
 
 #: Parameters, expansion point and steps of the Taylor table of the modulus cross-spectra (``response_taylor``): the
@@ -1334,6 +1354,8 @@ def build_fit(options: FitOptions) -> dict:
                                                        ndata)
     else:  # on the uncompressed entries (the template is keyed by them), then compressed
         terms = covariance_terms(options, problem["labels"], mean, len(problem["labels"]))
+        for vector, width in problem.get("linear_templates", []):  # analytically marginalised linear nuisances
+            terms = terms + width**2 * np.outer(vector, vector)
         covariance = covariance + (compression @ terms @ compression.T if compression is not None else terms)
     print(f"{ndata} data points ({', '.join(options.stats)}), {nreal} realizations")
 
