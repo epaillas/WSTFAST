@@ -772,3 +772,26 @@ Reading / conclusion:
 - Proposed P(k) + WST vector: P_l to 0.2 + S21m(q = 2, sigma_1 >= 17.7, white W, no layer-2 template) + X(sigma =
   17.7-25, l = 1-4, k <= 0.5 / sigma). Not done: AP for X (the filters in observed coordinates and the cross-spectrum
   stretch), V = 64, chains, survey window.
+
+### Chains: P_l vs P_l + S21m(q = 2) + X (2026-10-20)
+
+`fit.py --pud-marg` marginalises the per-field counterterm and constant of X analytically (Gaussian widths 3000 /
+30000, ~10x the largest best-fit values; commit f667709): same best fit and chi^2 as the free fit, 101 -> 47
+parameters. NUTS chains at V = 60, no AP, no-AP fog_cubic emulator, `outputs/inference/rsd/pud/*_chain_V60`; plots
+`outputs/plots/triangle_pk_s21_pud_{nsfixed,nsfree}_V60.png`. The P_l chain with n_s fixed on this emulator did not
+converge (R - 1 = 4 at the 20000-step cap, a stuck chain); its reference is the converged `q2/pk02_chain_V60`
+(bands12 emulator, the same P_s grid to 1e-4).
+
+| chain (R - 1 <= 0.01, ESS >= 366) | omega_cdm | ln A_s | n_s | h | shifts [sigma] |
+|---|---|---|---|---|---|
+| P_l to 0.2, n_s fixed | 0.0021 | 0.0377 | -- | 0.0035 | -0.74 / +1.16 / -- / -0.56 |
+| P_l + S21m + X, n_s fixed | 0.0020 | 0.0371 | -- | 0.0034 | -0.57 / 0.00 / -- / -0.27 |
+| P_l to 0.2, n_s free | 0.0044 | 0.0627 | 0.0290 | 0.0054 | -0.04 / +0.44 / -0.34 / -0.08 |
+| P_l + S21m + X, n_s free | 0.0038 | 0.0590 | 0.0257 | 0.0048 | -0.55 / +0.21 / +0.30 / -0.40 |
+
+Reading: the posteriors are smaller gains than the profile scans suggested. With n_s fixed the complement narrows the
+marginals by 2-5% (the P_l marginals are themselves 10-15% narrower than its profile widths: the profile and the
+marginal differ along the bias-counterterm directions), and its effect is to remove P_l's ln A_s pull (+1.16 -> 0.00
+sigma) and halve the h one. With n_s free it gains 14% (omega_cdm), 6% (ln A_s), 11% (n_s) and 11% (h), with every
+shift below 0.6 sigma. The validated P(k) + WST complement is therefore worth ~10% with n_s free and mainly a
+robustness gain with n_s fixed; the large Fisher prize stays behind the sigma = 12.5 response model.
