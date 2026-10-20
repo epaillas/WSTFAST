@@ -57,6 +57,19 @@ q != 2 rows cut at sigma >= 12.5, 17.7 or 25:
         --fiducial outputs/inference/rsd/q2/pk02_V60/summary.json outputs/inference/rsd/q2/q2_12k18_s21_V60/summary.json \\
         --output outputs/fisher/edgeworth_info_V60.json
 
+With ``--response-info``, it instead forecasts what the cross-spectra of the first-layer modulus fields with the density,
+X_a = P_{U_a d} / <U_a> (a = sigma, l, |m|; monopole and quadrupole), add to P_l to 0.2: X_a is zero for a Gaussian field
+(U_a is even in d) and its tree-level model is the response r_a Z1 P_L of the S21 model (``ModulusCrossRSD``). P_l has the
+model, binning and priors of fit.py; X_a its tree-level model at the shared cosmology and b1, b2, bG2, a velocity
+dispersion of the short modes, and per field a k^2 counterterm and a constant; the joint covariance is the sample
+covariance of the boxes. Each field is first checked against the mean of the boxes at the fiducial biases
+(``RESPONSE_FIDUCIAL``, the best point of a (b2, bG2, sigma_v) grid), k <= x / sigma, counterterm and constant fitted;
+fields above chi^2/dof 2 at V = --volume are dropped from the "validated" rows:
+
+    python scripts/fisher_rsd.py --response-info --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \
+        --emulator outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic.h5 --volume 60 \
+        --fiducial outputs/inference/rsd/q2/pk02_V60/summary.json --output outputs/fisher/response_info_V60.json
+
 Example (halos):
 
     python scripts/fisher_rsd.py --data-dir data/quijote/fiducial/z0.5/halos_m13_J9_L6_L2-4_dj2_sigma0.8_step1.414_n256_los \\
@@ -123,6 +136,12 @@ LAYER2_CASES = {
 }
 L2_REPORT = ("omega_cdm", "logA", "n_s", "h", "b1", "b2", "bG2")
 
+#: --response-info: the modulus fields (j1, l, |m|) of X_a, the fiducial (b2, bG2) and short-mode velocity dispersion of
+#: the tree response (best point of a grid against the box mean at k <= 0.75 / sigma), the finite-difference steps.
+RESPONSE_FIELDS = [(j, l, m) for j in (4, 5, 6) for l in range(1, 5) for m in range(l + 1)]
+RESPONSE_FIDUCIAL = dict(b2=-0.5, bG2=-0.3, sv=6.0)
+RESPONSE_STEPS = dict(omega_cdm=0.002, logA=0.01, h=0.005, n_s=0.005, b1=0.02, b2=0.05, bG2=0.05, sv=0.5)
+
 #: --edgeworth-info: the halo q = 2 bands (+ S21m) with the q = 0.8 S1m of the same blocks, against P_l to 0.2; the
 #: real-space matter control (--real-space, bands12k + S21m + q = 0.8 at the emulated l <= 4, against P_0 to 0.2).
 EDGEWORTH_HALO = {
@@ -172,6 +191,8 @@ def parse_args():
     parser.add_argument("--edgeworth-info", action="store_true",
                         help="Edgeworth mode: gain of the q != 2 S1m next to the q = 2 bands, E(q) nuisances free")
     parser.add_argument("--real-space", action="store_true", help="Edgeworth mode: the real-space matter control")
+    parser.add_argument("--response-info", action="store_true",
+                        help="response mode: what the modulus cross-spectra P_Ud add to P_l to 0.2")
     parser.add_argument("--neutrino", type=float, default=None,
                         help="neutrino mode: fiducial sum of neutrino masses [eV]")
     parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
@@ -509,6 +530,132 @@ def edgeworth_information(args, fr):
     print(f"wrote {args.output}")
 
 
+def response_information(args, fr):
+    """Fisher errors of P_l to 0.2 + the modulus cross-spectra X_a (module docstring)."""
+    from cosmoprimo import Cosmology
+    from numpy.polynomial.legendre import leggauss
+    from scipy.special import eval_legendre
+
+    from wstfast.data import load_power_dataset, precision_matrix
+    from wstfast.theory.covariance_rsd import ModulusCrossRSD
+
+    files = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))
+    n = len(files)
+    pl = load_power_dataset(args.data_dir, "rsd", kmax=0.2, rebin=2, ells=(0, 2, 4)).vectors
+    with np.load(files[0]) as z:
+        k, nmodes, shot = z["k"], z["nmodes"], 1e9 / json.loads(str(z["metadata"]))["nparticles"]
+    nk = k.size // 2 * 2
+    w = nmodes[:nk].reshape(-1, 2)
+    kb = (k[:nk].reshape(-1, 2) * w).sum(1) / w.sum(1)  # the mode-weighted bins of load_power_dataset
+    kk = kb[kb <= 0.13]
+    X = []
+    for path in files:
+        with np.load(path) as z:
+            merged = (z["PUd_m"][..., :nk].reshape(*z["PUd_m"].shape[:-1], -1, 2) * w).sum(-1) / w.sum(1)
+            X.append(merged[..., :kk.size] / z["Umean_m"][..., None, None])
+    X = np.array(X)  # (n, j, l, |m|, ell, nk)
+    sigma = lambda j: 3.125 * 2 ** (j / 2)  # noqa: E731
+    mu, wmu = leggauss(16)
+    mu, wmu = mu[8:], wmu[8:]
+    model = ModulusCrossRSD([(sigma(j), l, m) for j, l, m in RESPONSE_FIELDS], kk, mu)
+
+    def multipoles(grid):
+        return np.concatenate([(2 * e + 1) * (grid * eval_legendre(e, mu)[None, :] * wmu).sum(1) for e in (0, 2)])
+
+    q = QUIJOTE_COSMOLOGY
+    b1 = json.loads(args.fiducial[0].read_text())["bestfit"]["b1"]
+    fiducial = dict(omega_cdm=q["omega_cdm"], logA=q["logA"], h=q["h"], n_s=q["n_s"], b1=b1, **RESPONSE_FIDUCIAL)
+
+    def tree(p):
+        cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=q["omega_b"], h=p["h"], n_s=p["n_s"], logA=p["logA"],
+                          m_ncdm=[], N_eff=3.046, engine="class")
+        pk = cosmo.get_fourier().pk_interpolator(of="delta_m").to_1d(z=0.5)
+        f = float(cosmo.growth_rate(0.5))
+        r, _, _ = model.spectra(pk, f, p["sv"], np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0]), shot)
+        z1 = p["b1"] + f * mu**2
+        return np.array([multipoles(r[i] * z1[None, :] * pk(kk)[:, None]) for i in range(len(RESPONSE_FIELDS))]), pk
+
+    base, pk0 = tree(fiducial)
+    dtree = {name: (tree({**fiducial, name: fiducial[name] + h})[0] - tree({**fiducial, name: fiducial[name] - h})[0])
+             / (2 * h) for name, h in RESPONSE_STEPS.items()}
+    columns = dict(c=multipoles((kk**2 * pk0(kk))[:, None] * np.ones_like(mu)[None, :]),
+                   e=multipoles(np.ones((kk.size, mu.size))))
+    data = {a: X[:, j, l, m][:, [0, 1]].reshape(n, -1) for a, (j, l, m) in enumerate(RESPONSE_FIELDS)}
+
+    def cut(a, x):
+        return np.tile(kk <= x / sigma(RESPONSE_FIELDS[a][0]), 2)
+
+    # Model check: per field, counterterm and constant fitted to the mean of the boxes at the fiducial biases.
+    check = {}
+    for x in (0.75, 1.0):
+        for a, (j, l, m) in enumerate(RESPONSE_FIELDS):
+            sel = cut(a, x)
+            nb = int(sel.sum())
+            cov = np.cov(data[a][:, sel], rowvar=False) / args.volume * (n - 1) / (n - nb - 2)
+            design = np.array([columns["c"][sel], columns["e"][sel]]).T
+            y = data[a][:, sel].mean(0) - base[a][sel]
+            inv = np.linalg.inv(cov)
+            res = y - design @ np.linalg.solve(design.T @ inv @ design, design.T @ inv @ y)
+            check[x, a] = float(res @ inv @ res / (nb - 2))
+    for x in (0.75, 1.0):
+        print(f"model check, k <= {x} / sigma: chi^2/dof per field " + ", ".join(
+            f"{sigma(j):.1f}/{l}/{m}: {check[x, a]:.1f}" for a, (j, l, m) in enumerate(RESPONSE_FIELDS)), flush=True)
+
+    def forecast(vary, scales, x, nuisances, validated):
+        case = case_fisher(args, fr, ["--stats", "pk", "--kmax", "0.2"], vary)
+        names, prior = list(case["names"]), list(case["prior"])
+        fields = [a for a, (j, _, _) in enumerate(RESPONSE_FIELDS) if j in scales
+                  and (not validated or check[x, a] <= 2.0)]
+        cuts = [cut(a, x) for a in fields]
+        nx = int(sum(c.sum() for c in cuts))
+        vector = np.concatenate([pl] + [data[a][:, c] for a, c in zip(fields, cuts)], axis=1)
+        jac = {name: np.concatenate([np.zeros(0)] + [dtree[name][a][c] for a, c in zip(fields, cuts)])
+               for name in [*vary, "b1", "b2", "bG2", "sv"]}
+        offset = 0
+        for a, c in zip(fields, cuts):
+            for kind in nuisances:
+                column = np.zeros(nx)
+                column[offset:offset + c.sum()] = columns[kind][c]
+                jac[f"{kind}_{a}"] = column
+            offset += int(c.sum())
+        allnames = names + [name for name in jac if name not in names]
+        full = np.zeros((len(allnames), vector.shape[1]))
+        for i, name in enumerate(allnames):
+            if name in names:
+                full[i, :pl.shape[1]] = case["jacobian"][names.index(name)]
+            if name in jac:
+                full[i, pl.shape[1]:] = jac[name]
+        sig = np.array([prior[names.index(name)] if name in names else np.inf for name in allnames])
+        cov = np.cov(vector, rowvar=False) / args.volume * (n - 1) / (n - vector.shape[1] - 2)
+        used = [i for i, name in enumerate(allnames) if name in vary or np.any(full[i] != 0)]
+        inverse = np.linalg.inv(full[used] @ precision_matrix(cov) @ full[used].T + np.diag(1 / sig[used] ** 2))
+        return {allnames[i]: float(np.sqrt(inverse[b, b])) for b, i in enumerate(used) if allnames[i] in L2_REPORT}, \
+            int(vector.shape[1])
+
+    cases = {"P_l to 0.2": ((), 0.75, (), False)}
+    for x in (0.75, 1.0):
+        for scales in ((5, 6), (4, 5, 6)):
+            for nuisances in (("c", "e"), ("e",)):
+                for validated in (True, False):
+                    label = (f"+ X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, "
+                             f"{'+'.join(nuisances)} free{', validated fields' if validated else ''}")
+                    cases[label] = (scales, x, nuisances, validated)
+    results = {}
+    for ns in (False, True):
+        vary = ["omega_cdm", "logA", "n_s", "h"] if ns else ["omega_cdm", "logA", "h"]
+        for label, spec in cases.items():
+            key = ("[n_s free] " if ns else "") + label
+            errors, ndata = forecast(vary, *spec)
+            results[key] = dict(ndata=ndata, sigma=errors)
+            print(f"{key:72s} n={ndata:3d} | " + " ".join(f"{p} {errors.get(p, np.nan):.4f}" for p in L2_REPORT),
+                  flush=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(dict(volume=args.volume, fiducial=fiducial, results=results,
+                                           check={f"{x}:{RESPONSE_FIELDS[a]}": v for (x, a), v in check.items()}),
+                                      indent=2))
+    print(f"wrote {args.output}")
+
+
 def neutrino_forecast(args, fr):
     """sigma(M_nu) of P_l, the WST (S1m + S21m) and both, from exact derivatives (module docstring)."""
     import shlex
@@ -596,6 +743,8 @@ def main():
         return layer2_information(args, fr)
     if args.edgeworth_info:
         return edgeworth_information(args, fr)
+    if args.response_info:
+        return response_information(args, fr)
     common = ["--data-dir", str(args.data_dir), "--emulator", str(args.emulator), "--output-dir", "unused",
               "--vary", *COSMOLOGY, "--rebin", "2"]
     # Widest selection: P_l to max(kmax), S1m to min(s1-min-scale) at every q, S21m with fit.py's default cuts.

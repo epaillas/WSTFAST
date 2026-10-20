@@ -650,3 +650,66 @@ so the conclusions there hold at either q.
 Consequence: the proposed halo baseline is all q = 2 -- the bands (sigma >= 12.5, l <= 6, k84 <= 0.18) and S21m (25 ->
 70.7, white term W) -- with no layer-2 template, 8 marginalised amplitudes and the template's Monte Carlo error fewer, and
 no dependence on the q = 0.8 Edgeworth factor (only E(1) remains in the S21m normalisation). Not run: AP and V = 64.
+
+### The WST as a complement to P_l: the modulus cross-spectra P_Ud (2026-10-20, Phase 1)
+
+Reframing: with P_l to 0.2 as the (well-tested) Gaussian backbone, the WST should carry only what P_l cannot. Its moduli
+are even in delta, so S1 and S2 see the bispectrum only squared (S21m ~ r^2 P + noise) or through E(q). What they see
+linearly is the response of the small-scale wavelet power to the large-scale modes: the cross-spectrum of a first-layer
+modulus field with the density, P_{U_a d}(k, mu) = <U_a> r_a(k, mu) Z1 P_L(k) at tree level (a = sigma, l, |m|), zero
+for a Gaussian field. It is already measured in every halo box (`PUd_m`, multipoles 0/2/4, also in the Omega_m and
+sigma_8 derivative boxes) and r_a is the response of the S21 model (`theory.covariance_rsd.ModulusCrossRSD`).
+
+Diagnostics before the forecast (scratchpad, V = 60):
+- The second layer's complement to P_l is eaten by its own nuisances: P_l to 0.2 + S21m(q = 2, sigma_1 >= 17.7) gives
+  0.0020 / 0.0358 / 0.0034 against 0.0023 / 0.0397 / 0.0038, and 0.0017 / 0.0261 / 0.0031 with its 14 noise amplitudes
+  and W per sigma_1 known (n_s free: -9 to -13% -> -25 to -31%).
+- Model-free, 1188 boxes: S/N^2 of a block-only amplitude, alone -> jointly with P_l(0.2): P_Ud (l = 1-4, ell = 0, 2,
+  k <= 0.2) 9.6e5 -> 8.3e6 (sigma 12.5), 5.3e5 -> 3.2e6 (17.7), 2.7e5 -> 1.1e6 (25); S21m 4.5e4 -> 9.2e4. P_Ud
+  correlates 0.85-0.97 with P_0 bin by bin at k <= 0.1 (sigma 12.5): sample-variance cancellation, as in multi-tracer
+  analyses.
+- The q = 2 bands are not fully redundant with P_l: at sigma >= 25 they add nothing, at sigma <= 17.7 (k84 <= 0.18)
+  0.0018 / 0.0366 / 0.0032 and n_s 0.022 (n_s free), more than P_l to 0.25 on omega_cdm and n_s; at matched reach
+  (k84 <= 0.15 with P_l to 0.15) still -19% on n_s. Open, P(k)-side question (k-tails, weighting, counterterms).
+
+**1a, model check** (`scripts/fisher_rsd.py --response-info`): X_a = P_Ud / <U_a> (per-box mean) against the tree
+response, k <= x / sigma_a, a k^2 counterterm and a constant per field fitted, V = 60 errors.
+- At the P_l best-fit biases (bG2 = 0.06) and no FoG of the short modes, the data sit 10-30% above the model on the
+  largest scales, with an |m| pattern (fitted per-field amplitudes 0.6-0.9 for m = 0, 1.2-1.5 for m = l).
+- The pattern is the tidal bias and the FoG of the short modes: on a (b2, bG2, sigma_v) grid with no free amplitude the
+  best points are bG2 = -0.3 to -0.6 (the WST fits' bG2 = -0.34), sigma_v = 6 Mpc/h (grid edge), chi^2/dof 1.4 over
+  all fields at x = 0.75. With b2 = -0.5, bG2 = -0.3, sigma_v = 6: every field passes at k <= 0.75 / sigma (chi^2/dof
+  <= 1.6) except four (sigma 12.5 l = 1 |m| = 0, 1 and l = 4 m = 0; sigma 17.7 l = 1 m = 0: 2.1-7.7). At k <= 1 /
+  sigma most sigma <= 17.7 fields fail (chi^2/dof 2-135): the tree response holds to k ~ 0.06 (sigma 12.5), 0.04
+  (17.7), 0.03 (25).
+
+**1b, joint Fisher** (P_l with fit.py's model, binning and priors; X_a with the tree response at the shared cosmology,
+b1, b2, bG2, a short-mode sigma_v and per field c_a k^2 P_L + e_a; joint sample covariance with Hartlap; V = 60;
+`outputs/fisher/response_info_V60.json`):
+
+| vector | n | omega_cdm | ln A_s | h | b1 / b2 / bG2 | n_s free: omega_cdm / ln A_s / n_s / h |
+|---|---|---|---|---|---|---|
+| P_l to 0.2 | 48 | 0.0023 | 0.0394 | 0.0038 | 0.044 / 0.59 / 0.33 | 0.0046 / 0.0669 / 0.0318 / 0.0057 |
+| + S21m(q = 2, sigma_1 >= 17.7) (layer-2 Fisher) | 156 | 0.0020 | 0.0358 | 0.0034 | 0.038 / 0.17 / 0.088 | 0.0042 / 0.0601 / 0.0278 / 0.0052 |
+| + X, sigma 17.7/25, k <= 0.75/sigma, validated fields | 182 | 0.0020 | 0.0354 | 0.0034 | 0.038 / 0.16 / 0.063 | 0.0044 / 0.0598 / 0.0282 / 0.0054 |
+| + X, sigma 12.5/17.7/25, k <= 0.75/sigma, validated fields | 270 | 0.0019 | 0.0276 | 0.0034 | 0.028 / 0.10 / 0.038 | 0.0042 / 0.0509 / 0.0270 / 0.0053 |
+| same, no k^2 counterterm (constant only) | 270 | 0.0017 | 0.0250 | 0.0032 | 0.025 / 0.08 / 0.032 | 0.0040 / 0.0478 / 0.0258 / 0.0051 |
+| + X, sigma 12.5/17.7/25, k <= 1/sigma, all fields (beyond the tree reach) | 412 | 0.0013 | 0.0172 | 0.0030 | 0.017 / 0.06 / 0.026 | 0.0036 / 0.0350 / 0.0210 / 0.0047 |
+
+Reading:
+- **Gate 1 passes, narrowly.** Inside the tree reach, with every nuisance free, P_l + X gains -17% / -30% / -11% on
+  omega_cdm / ln A_s / h (n_s fixed) and -9 / -24 / -15 / -7% with n_s free, against -13 / -10 / -11% for P_l +
+  S21m. The sigma = 12.5 fields carry most of it.
+- **It is the b1 lever.** sigma(b1) 0.044 -> 0.028 and ln A_s -30%: the response, measured almost free of sample
+  variance, separates b1 from A_s, which neither P_l nor S21m does (S21m only reaches b2, bG2).
+- **The prize is model-limited.** At k <= 1/sigma (where the tree model fails) the same vector would give -43% /
+  -56% / -21% (n_s free -22 / -48 / -34 / -18%). A response model that holds to k ~ 0.08-0.1 at sigma = 12.5 (one-loop
+  response, or a validated correction) is where the information is.
+- Caveats: the check is at the truth cosmology with grid-fitted biases (P_l's own best fit has bG2 = 0.06, 1 sigma
+  away); the derivatives are the tree model's, untested against simulations; 270 data points on 1188 boxes (Hartlap
+  1.3, no Percival factor); per-field nuisances are free and flat.
+
+Next (Phase 2, the gate that stopped the q = 0.8 template): the measured dX_a/dtheta on the Omega_m and sigma_8
+derivative boxes (PUd_m is stored there) against the tree model with the nuisances refitted per set, for the validated
+fields at k <= 0.75 / sigma. Only if it holds to ~10-15%: implement X in fit.py (loader, theory from the emulated basis,
+AP), then profile scans and chains of P_l + X.
