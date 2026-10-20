@@ -395,7 +395,7 @@ def survey_power(geometry, data, randoms, kedges, ells=(0, 2, 4), data_weights=N
                  window_edges=None, window_ells=(0, 2, 4)):
     """P_l of a catalogue on the geometry's mesh with jaxpower's FKP estimator (TSC, interlacing 3, compensated, local
     first-point line of sight, FKP normalisation and shot noise from the catalogues): returns k (nk,), poles
-    (nell, nk) with the shot noise subtracted from the monopole, nmodes and, with ``window_edges`` ((n, 2) theory
+    (nell, nk) with the shot noise subtracted from the monopole, that shot noise, nmodes and, with ``window_edges`` ((n, 2) theory
     bins), the window matrix (jaxpower WindowMatrix, multipoles ``window_ells``) from the randoms' correlation."""
     from jaxpower import (BinMesh2CorrelationPoles, BinMesh2SpectrumPoles, FKPField, MeshAttrs, ParticleField,
                           compute_fkp2_normalization, compute_fkp2_shotnoise, compute_mesh2_correlation,
@@ -414,7 +414,8 @@ def survey_power(geometry, data, randoms, kedges, ells=(0, 2, 4), data_weights=N
     poles = compute_mesh2_spectrum(mesh, bin=bin, los="firstpoint").clone(norm=norm, num_shotnoise=shot)
     out = dict(k=np.asarray(bin.xavg), nmodes=np.asarray(poles.get(ells[0]).values("nmodes")),
                poles=np.array([np.asarray(poles.get(e).value()) for e in ells]),
-               norm=float(np.asarray(norm[0]).ravel()[0]))
+               norm=float(np.asarray(norm[0]).ravel()[0]),
+               shotnoise=float(np.asarray(shot[0]).ravel()[0] / np.asarray(norm[0]).ravel()[0]))
     if window_edges is not None:
         sbin = BinMesh2CorrelationPoles(mattrs, edges={}, ells=list(range(0, 9, 2)))
         scaled = rfield.clone(weights=rfield.weights * (dfield.weights.sum() / rfield.weights.sum()))

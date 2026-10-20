@@ -249,6 +249,41 @@ class MultipoleProjection:
         self.matrix, self.shot = np.array(rows), np.array(shot)
 
 
+class WindowedMultipoleProjection:
+    """Linear map from the P_s grid to window-convolved survey multipoles: the continuum multipoles ``ells_in`` at the
+    centres of the window's theory bins ``edgesin`` (Gauss-Legendre in mu, ``nmu`` nodes on [0, 1]), then the rows
+    ``rows`` of the window matrix ``window`` (nobs, len(ells_in) * nin, ell-major columns). ``shot``: the window of a
+    constant monopole (the stochastic term); ``k2mu2`` / ``k2`` as ``MultipoleProjection``."""
+
+    def __init__(self, window, edgesin, grid: SpectrumGrid, ells_in=(0, 2, 4), rows=None, nmu: int = 16):
+        from scipy.special import eval_legendre
+
+        edgesin = np.asarray(edgesin)
+        kin = edgesin.mean(axis=1)
+        x, w = np.polynomial.legendre.leggauss(2 * nmu)
+        x, w = x[nmu:], w[nmu:]  # mu in (0, 1]; the integrand is even
+        interp = grid_interpolation(grid, np.repeat(kin, nmu), np.tile(x, kin.size))
+        blocks = []
+        for ell in ells_in:
+            weights = np.tile((2 * ell + 1) * eval_legendre(ell, x) * w, kin.size)
+            rows_ell = interp.multiply(weights[:, None]).tocsr()
+            agg = np.repeat(np.arange(kin.size), nmu)
+            from scipy import sparse
+
+            blocks.append(sparse.csr_matrix((np.ones(agg.size), (agg, np.arange(agg.size))), shape=(kin.size, agg.size))
+                          @ rows_ell)
+        from scipy import sparse
+
+        theory = sparse.vstack(blocks).toarray()  # (len(ells_in) * nin, ngrid)
+        window = np.asarray(window)
+        window = window if rows is None else window[np.asarray(rows)]
+        self.matrix = window @ theory
+        unit = np.concatenate([np.ones(kin.size) if ell == 0 else np.zeros(kin.size) for ell in ells_in])
+        self.shot = window @ unit
+        self.k2mu2 = (grid.k[:, None] * grid.mu[None, :]) ** 2
+        self.k2 = grid.k[:, None] ** 2 * np.ones_like(grid.mu)[None, :]
+
+
 def ap_matrix(weights, kmodes, mumodes, logk, nodes2, denominators, qpar, qperp):
     """(ntarget, nk * nmu) matrix of a linear observable of a (k, mu) grid with AP distortions: the observed modes
     (``kmodes``, ``mumodes``, with per-target ``weights`` (ntarget, nmodes)) are interpolated at their true-frame

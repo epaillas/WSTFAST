@@ -586,8 +586,10 @@ def expected_shotnoise(g, expected) -> float:
     return float(np.sum(w * inv) / np.sum(w))
 
 
-#: Bins of the survey spectra (P_l and the modulus cross-spectra) and the theory bins of their window matrices [h/Mpc].
-SPECTRA_KEDGES = np.arange(0.0, 0.2051, 0.005)
+#: Bins of the survey spectra (P_l and the modulus cross-spectra): those of the Quijote boxes' spectra merged by 2 (edges
+#: (0.5 + 2n) k_f, k_f = 2 pi / 1000), so that the box covariance rescaled to the cap's volume applies bin by bin; and
+#: the theory bins of their window matrices [h/Mpc].
+SPECTRA_KEDGES = (0.5 + 2 * np.arange(17)) * 2 * np.pi / 1000.0
 WINDOW_EDGES = np.column_stack([np.arange(0.0, 0.3, 0.002)[:-1], np.arange(0.0, 0.3, 0.002)[1:]])
 
 
@@ -651,7 +653,8 @@ def run_measure(args, geometries, setups, pk):
                                             random_weights=np.concatenate([w["WEIGHT"] * w["WEIGHT_FKP"] for w in weights]),
                                             window_edges=None if window_path.exists() else WINDOW_EDGES)
                 config = s["config"]
-                out.update(k=power["k"], nmodes=power["nmodes"], Pdd=power["poles"], kx=spectra.k,
+                out.update(k=power["k"], nmodes=power["nmodes"], Pdd=power["poles"], shotnoise_pk=power["shotnoise"],
+                           kx=spectra.k,
                            PUd_m=spectra.array(config.J + 1, config.L + 1))
                 if not window_path.exists():  # the windows of the geometry (P_l: this mock's randoms)
                     wx = spectra.window(WINDOW_EDGES)
