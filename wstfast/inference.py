@@ -932,8 +932,6 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         if (spec.tracer, spec.space) not in (("biased", "redshift"), ("matter", "real")):
             raise SystemExit("the modulus cross-spectra are modelled for biased tracers in redshift space and for "
                              "matter in real space")
-        if options.ap:
-            raise SystemExit("the modulus cross-spectra have no AP model yet")
         fields = [(j, ell, m) for j in range(config.J + 1)
                   if options.pud_min_scale - 1e-6 <= config.sigma(j) <= options.pud_max_scale + 1e-6
                   for ell in range(1, 5) for m in range(ell + 1) if f"j{j}_l{ell}_m{m}" not in options.pud_skip]
@@ -943,8 +941,11 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                                           [options.pud_x / config.sigma(j) for j, _, _ in fields], files=files)
         files = response.files
         shot = response.metadata.get("shotnoise", response.metadata["boxsize"] ** 3 / response.metadata["nparticles"])
+        if options.ap and window is not None:
+            raise SystemExit("the survey modulus cross-spectra have no AP model yet")
         if window is None:
-            table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real")
+            table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real",
+                                    ap_omega_b=fiducial_omega_b(settings) if options.ap else None)
         else:  # survey: the tree response through the cap's cross-spectrum window, about the emulator's fiducial
             spectra_window = np.load(Path(options.data_dir) / f"spectra_window_{space}.npz")
             nk = spectra_window["kx"].size
@@ -997,7 +998,7 @@ RESPONSE_CENTER_REAL = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm
 
 
 def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor"), real=False,
-                    center=None, fiducial="quijote", window=None, edgesin=None, kmax_theory=0.15):
+                    center=None, fiducial="quijote", window=None, edgesin=None, kmax_theory=0.15, ap_omega_b=None):
     """Second-order Taylor table of X_a = P_{U_a d} / <U_a> = (2 ell + 1) int r_a Z1 P_L L_ell (ell = 0, 2) on the
     bins ``k`` for the fields (j, l, |m|): the tree response of ``covariance_rsd.ModulusCrossRSD`` (Gaussian damping
     sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER (``real``: RESPONSE_CENTER_REAL,
@@ -1006,7 +1007,10 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
     another expansion point; ``fiducial`` "abacus": one 0.06 eV neutrino and the cb power. Survey (``window``,
     (2 nk, 3 nin): the rows of multipoles 0 and 2 of a ``survey.SurveySpectra.window`` on the theory bins ``edgesin``):
     the response is computed at the theory bins (k <= ``kmax_theory``, multipoles 0, 2, 4) and mapped through the
-    window, so the table holds the observed multipoles 0 and 2 at ``k``."""
+    window, so the table holds the observed multipoles 0 and 2 at ``k``. ``ap_omega_b``: the bins are observed with
+    the Quijote fiducial (``theory.ap``) and every evaluation carries the AP distortions of its (omega_cdm, h) at this
+    omega_b (``ModulusCrossRSD.spectra(ap=)``: filters and multipole weights observed, spectra true, volume factor), so
+    the table's derivatives in omega_cdm and h include AP."""
     import hashlib
 
     centre = dict(center) if center is not None else RESPONSE_CENTER_REAL if real else RESPONSE_CENTER
@@ -1015,7 +1019,8 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
     key = hashlib.sha1(json.dumps([[config.sigma(j), l, m] for j, l, m in fields] + [list(map(float, k)),
                                    float(shotnoise), float(z), centre, RESPONSE_STEPS]
                                   + (["real"] if real else []) + ([fiducial] if fiducial != "quijote" else [])
-                                  + extra).encode()).hexdigest()[:16]
+                                  + extra + ([] if ap_omega_b is None else ["ap", float(ap_omega_b)])
+                                  ).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"{key}.npz"
     names = list(RESPONSE_PARAMS)
     center = np.array([centre[n] for n in names])
@@ -1067,8 +1072,16 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
     def evaluate(values):
         p = dict(zip(names, values))
         pk, f = power(p)
-        r, _, _ = model.spectra(pk, f, p["sv"], np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0]), shotnoise)
-        return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(ktheory)[None, :, None])
+        beta = np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0])
+        if ap_omega_b is None:
+            r, _, _ = model.spectra(pk, f, p["sv"], beta, shotnoise)
+            return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(ktheory)[None, :, None])
+        from .theory.ap import ap_ratios, observed_to_true
+
+        qpar, qperp = (float(q) for q in ap_ratios(z, p["h"], ap_omega_b, p["omega_cdm"]))
+        r, _, _ = model.spectra(pk, f, p["sv"], beta, shotnoise, ap=(qpar, qperp))
+        kt, mut, volume = (np.asarray(x) for x in observed_to_true(ktheory[:, None], mu[None, :], qpar, qperp))
+        return multipoles(r * volume * (p["b1"] + f * mut**2)[None] * pk(kt.ravel()).reshape(kt.shape)[None])
 
     steps = np.array([RESPONSE_STEPS[n] for n in names])
     x0 = evaluate(center)

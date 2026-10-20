@@ -41,21 +41,30 @@ class ModulusCrossRSD(ModulusSpectra):
     tracer at fixed biases, on the (K, mu_K) grid: the fixed-beta, cross-field version of second_layer.ModulusSpectra
     (whose auto terms it reproduces: r_a^2 P_L(K) and g_aa)."""
 
-    def spectra(self, pk, f: float, sigma_v: float, beta, shotnoise: float):
-        """Return r (nfield, nk, nmu), g (nfield, nfield, nk, nmu) and the block normalisations n lambda (nfield,)."""
+    def spectra(self, pk, f: float, sigma_v: float, beta, shotnoise: float, ap=None):
+        """Return r (nfield, nk, nmu), g (nfield, nfield, nk, nmu) and the block normalisations n lambda (nfield,).
+
+        With ``ap`` (q_par, q_perp), (k, mu) are observed: the p integral runs over true wavevectors, the filters and
+        harmonics of every leg are evaluated at its observed wavevector (the true one times (q_perp, q_perp, q_par)),
+        the spectra at the true ones with the true-frame shot noise ``shotnoise`` q_par q_perp^2, and the long mode is
+        the true k' of (k, mu). Then P_{U d}(k, mu) / <U> = r Z1(k') P_L(k') / (q_par q_perp^2)."""
         beta = np.asarray(beta, "f8")
-        N = float(shotnoise)
+        stretch = np.ones(3) if ap is None else np.array([ap[1], ap[1], ap[0]], "f8")
+        N = float(shotnoise) * stretch.prod()
         damp = lambda k, mu: np.exp(-0.5 * (f * k * mu * sigma_v) ** 2)  # noqa: E731
         p, w = self.p, self.weights
         dp, pkp = damp(p, self.mup), pk(p)
         z1p = linear_components(self.pvec, f) @ beta
         pdp = pkp * z1p**2 * dp**2 + N
-        radial = {s: np.exp(-0.5 * (s * p) ** 2) for s, _, _ in self.fields}
+        pobs = np.sqrt(np.sum((self.pvec * stretch) ** 2, axis=-1))
+        harmonics = (self.harmonics if ap is None else
+                     {(ell, m): spherical_harmonic(ell, m, self.pvec * stretch) for _, ell, m in self.fields})
+        radial = {s: np.exp(-0.5 * (s * pobs) ** 2) for s, _, _ in self.fields}
         norms, kernels = [], []
         for s, ell, m in self.fields:
             c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
-            rp = (s * p) ** ell * radial[s]
-            norms.append(np.sum(w * rp**2 * c2w * np.abs(self.harmonics[ell, m]) ** 2 * pdp))
+            rp = (s * pobs) ** ell * radial[s]
+            norms.append(np.sum(w * rp**2 * c2w * np.abs(harmonics[ell, m]) ** 2 * pdp))
             kernels.append((-1) ** ell * c2w * rp)
         norms = np.array(norms)
         nf, nk, nmu = len(self.fields), self.k.size, self.mu.size
@@ -63,9 +72,11 @@ class ModulusCrossRSD(ModulusSpectra):
         g = np.zeros((nf, nf, nk, nmu))
         for i, kk in enumerate(self.k):
             for a, mk in enumerate(self.mu):
-                kvec = np.array([kk * np.sqrt(1 - mk**2), 0.0, kk * mk])
+                kvec = np.array([kk * np.sqrt(1 - mk**2), 0.0, kk * mk]) / stretch
                 qvec = kvec - self.pvec
                 qn = np.sqrt(np.sum(qvec**2, axis=-1))
+                qobs = qvec * stretch
+                qno = np.sqrt(np.sum(qobs**2, axis=-1))
                 muq = qvec[:, 2] / np.maximum(qn, 1e-30)
                 dq, pkq = damp(qn, muq), pk(qn)
                 z1q = linear_components(qvec, f) @ beta
@@ -77,8 +88,8 @@ class ModulusCrossRSD(ModulusSpectra):
                 cache, kern = {}, []
                 for index, (s, ell, m) in enumerate(self.fields):
                     if (ell, m) not in cache:
-                        cache[ell, m] = np.real(self.harmonics[ell, m] * np.conj(spherical_harmonic(ell, m, qvec)))
-                    kern.append(kernels[index] * (s * qn) ** ell * np.exp(-0.5 * (s * qn) ** 2) * cache[ell, m])
+                        cache[ell, m] = np.real(harmonics[ell, m] * np.conj(spherical_harmonic(ell, m, qobs)))
+                    kern.append(kernels[index] * (s * qno) ** ell * np.exp(-0.5 * (s * qno) ** 2) * cache[ell, m])
                 kern = np.array(kern)  # (nf, np)
                 r[:, i, a] = (kern @ (w * long) / 2 + N * z1k * (kern @ w) / 2) / norms
                 g[:, :, i, a] = (kern * pair) @ kern.T / 2 / np.outer(norms, norms)
