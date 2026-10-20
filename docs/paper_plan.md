@@ -620,3 +620,33 @@ the one a fiducial-calibrated template could still have passed, and it fails.
 - Per the gate, the halo WST stays at bands + S21m = P_l to 0.2 at V = 60. A q != 2 halo first layer would first need
   a model of E whose bias dependence (d E / d b2 at fixed P_l) is right. That is a new perturbative ingredient (the
   b2-sourced trispectrum at the smoothing scales) and is not attempted.
+
+### S21m at q = 2 needs no layer-2 template (2026-10-19, night)
+
+In the halo q = 2 vector (`fit.py --q 2.0`) S21m is loaded and modelled at the first q (`build_problem`: `q0 =
+options.q[0]`), i.e. at q = 2, not at the q = 0.8 of the paper's baseline; the real-space band runs (`--stats band`)
+kept S21m at q = 0.8. The layer-2 template was measured at q = 0.8 (`scripts/layer2/template_rsd.py`, `Q = 0.8`) as
+the deficit S2m(q) / [Gaussian prediction from S2m(q = 2)] - 1, which vanishes identically at q = 2: the q = 2
+coefficient is the second-layer power itself, with no one-point (chi-distribution) assumption to correct. The halo
+q = 2 runs so far therefore applied a q = 0.8 correction that does not exist at q = 2; the per-l marginalisation
+(width 1) absorbed it.
+
+Test (V = 60, no AP, n_s fixed): `q2_12k18_s21nt_*` = `q2_12k18_s21_*` without `--s21-layer2` (profile and the
+16-point chi^2 scans; parabola widths, shifts of the minima from the truth):
+
+| vector | sigma(omega_cdm) | sigma(ln A_s) | sigma(h) | shifts omega_cdm / ln A_s / h | chi^2 at the best fit |
+|---|---|---|---|---|---|
+| bands to k84 = 0.18 + S21m(q = 2), q = 0.8 template marginalised per l | 0.0023 | 0.042 | 0.0038 | +0.6 / +0.8 / +0.9 | 23.7/95 |
+| same, no template | 0.0023 | 0.041 | 0.0038 | +0.7 / +0.8 / +0.9 | 23.9/95 |
+
+Best fits identical in cosmology (b2 -0.38 -> -0.43, W_j6 -935 -> -877). Fisher (`fisher_rsd.py --layer2-info`, new
+treatment "none", now with `--cubic-biases relation` as in the fits; the previous subsection's table omitted the cubic
+offsets, which moves its entries by <= 0.5%): bands + S21m(q = 2) without template 0.0022 / 0.0419 / 0.0038, b2 / bG2
+0.24 / 0.119; n_s free 0.0046 / 0.0685 / 0.0284 / 0.0058 -- the same as with the template marginalised. Caveat for the
+previous subsection: its rows (d) and (f) used S21m at q = 0.8 (fit.py's default q), rows (a)/(b) at q = 2; at q = 2
+the rows are S21m alone 0.0288 / 0.255 / 0.109 (none) and P_l to 0.2 + S21m 0.0021 / 0.0382 / 0.0035, n_s 0.0297 (none),
+so the conclusions there hold at either q.
+
+Consequence: the proposed halo baseline is all q = 2 -- the bands (sigma >= 12.5, l <= 6, k84 <= 0.18) and S21m (25 ->
+70.7, white term W) -- with no layer-2 template, 8 marginalised amplitudes and the template's Monte Carlo error fewer, and
+no dependence on the q = 0.8 Edgeworth factor (only E(1) remains in the S21m normalisation). Not run: AP and V = 64.

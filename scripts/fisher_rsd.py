@@ -98,20 +98,28 @@ BASELINE = ["--stats", "pk", "s1m", "s21m", "--kmax", "0.12", "--s21-min-scale",
 
 #: The halo q = 2 vector of docs/paper_plan.md (bands to k84 = 0.18 + S21m, `q2_12k18_s21_V60`) and its pieces, for
 #: --layer2-info. "marg" marginalises the template amplitudes per l (width 1, as fitted), "w0.1" with width 0.1, "model"
-#: keeps them at the template (only its Monte Carlo error enters the covariance), "exact" also drops that error.
+#: keeps them at the template (only its Monte Carlo error enters the covariance), "exact" also drops that error, "none"
+#: has no template: S21m is taken at the first q (2 here), where the template, a deficit with respect to the Gaussian
+#: prediction from S2m(q = 2), vanishes identically (scripts/layer2/template_rsd.py measures it at q = 0.8).
 L2_BANDS = ["--q", "2.0", "--s1-min-scale", "12.5", "--s1-ells", "0", "1", "2", "3", "4", "5", "6", "--s1-kmax", "0.18"]
-L2_S21 = ["--s21-min-scale", "25", "--s21-white", "--s21-layer2", "outputs/layer2/template_rsd.json",
-          "--s21-layer2-c", "halo"]
-L2_TREATMENTS = {"marg": ["--s21-layer2-marg", "per_l"],
-                 "w0.1": ["--s21-layer2-marg", "per_l", "--s21-layer2-marg-width", "0.1"], "model": [], "exact": []}
+L2_S21 = ["--s21-min-scale", "25", "--s21-white"]
+L2_TEMPLATE = ["--s21-layer2", "outputs/layer2/template_rsd.json", "--s21-layer2-c", "halo"]
+L2_TREATMENTS = {"marg": L2_TEMPLATE + ["--s21-layer2-marg", "per_l"],
+                 "w0.1": L2_TEMPLATE + ["--s21-layer2-marg", "per_l", "--s21-layer2-marg-width", "0.1"],
+                 "model": L2_TEMPLATE, "exact": L2_TEMPLATE, "none": []}
 LAYER2_CASES = {
     **{f"(a/b) bands + S21m [{t}]": (["--stats", "s1m", "s21m"] + L2_BANDS + L2_S21 + extra, t)
        for t, extra in L2_TREATMENTS.items()},
     "(c) bands alone": (["--stats", "s1m"] + L2_BANDS, None),
-    **{f"(d) S21m alone [{t}]": (["--stats", "s21m"] + L2_S21 + extra, t) for t, extra in L2_TREATMENTS.items()},
+    **{f"(d) S21m(q = 0.8) alone [{t}]": (["--stats", "s21m"] + L2_S21 + extra, t)
+       for t, extra in L2_TREATMENTS.items() if t != "none"},
+    **{f"(d) S21m(q = 2) alone [{t}]": (["--stats", "s21m", "--q", "2.0"] + L2_S21 + L2_TREATMENTS[t], t)
+       for t in ("marg", "none")},
     "(e) P_l to 0.2": (["--stats", "pk", "--kmax", "0.2"], None),
-    **{f"(f) P_l to 0.2 + S21m [{t}]": (["--stats", "pk", "s21m", "--kmax", "0.2"] + L2_S21 + extra, t)
-       for t, extra in L2_TREATMENTS.items() if t != "w0.1"},
+    **{f"(f) P_l to 0.2 + S21m(q = 0.8) [{t}]": (["--stats", "pk", "s21m", "--kmax", "0.2"] + L2_S21 + extra, t)
+       for t, extra in L2_TREATMENTS.items() if t not in ("w0.1", "none")},
+    **{f"(f) P_l to 0.2 + S21m(q = 2) [{t}]": (["--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0"] + L2_S21
+                                                + L2_TREATMENTS[t], t) for t in ("marg", "none")},
 }
 L2_REPORT = ("omega_cdm", "logA", "n_s", "h", "b1", "b2", "bG2")
 
