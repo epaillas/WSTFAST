@@ -42,7 +42,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--emulator", type=Path, required=True, help="emulated Basis (train_emulator.py --stat rsd)")
     parser.add_argument("--data-dir", type=Path, default=defaults.data_dir)
-    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m", "band"), default=list(defaults.stats),
+    parser.add_argument("--stats", nargs="+", choices=("pk", "s1m", "s21m", "band", "pud"), default=list(defaults.stats),
                         help="band: the m-summed first-order coefficients at q = 2 (the band powers of the wavelet "
                              "filters), on their own cuts --band-min-scale / --band-ells")
     parser.add_argument("--q", type=float, nargs="+", default=list(defaults.q),
@@ -71,6 +71,13 @@ def parse_args(argv=None):
     parser.add_argument("--band-cut", type=float, default=defaults.band_cut,
                         help="keep the principal components of the band powers with correlation eigenvalue above this "
                              "(the bands are numerically low-rank; 0: none)")
+    parser.add_argument("--pud-min-scale", type=float, default=defaults.pud_min_scale,
+                        help="pud: smallest sigma_j of the modulus fields whose cross-spectra with delta are fitted")
+    parser.add_argument("--pud-max-scale", type=float, default=defaults.pud_max_scale)
+    parser.add_argument("--pud-x", type=float, default=defaults.pud_x,
+                        help="pud: keep k <= x / sigma_j (the reach of the tree response)")
+    parser.add_argument("--pud-skip", nargs="*", default=list(defaults.pud_skip),
+                        help="pud: fields left out, j{j}_l{l}_m{m}")
     parser.add_argument("--compress-m", action="store_true",
                         help="real space: average the |m| blocks of S1m and S21m within their equally distributed "
                              "classes (inference.m_compression); shorter data vector, smaller Hartlap and Percival factors")

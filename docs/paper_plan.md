@@ -713,3 +713,62 @@ Next (Phase 2, the gate that stopped the q = 0.8 template): the measured dX_a/dt
 derivative boxes (PUd_m is stored there) against the tree model with the nuisances refitted per set, for the validated
 fields at k <= 0.75 / sigma. Only if it holds to ~10-15%: implement X in fit.py (loader, theory from the emulated basis,
 AP), then profile scans and chains of P_l + X.
+
+### P_l + modulus cross-spectra: gate, pipeline and fits (2026-10-20, Phases 2-4)
+
+**Phase 2, derivative-box gate** (`fisher_rsd.py --response-info --response-gate`, `outputs/fisher/response_info_V60_gate.json`):
+linear recovery of the Quijote steps (paired seeds, Omega_m +- 0.01 at fixed sigma_8, sigma_8 +- 0.015) by the joint
+P_l + X Jacobian with every nuisance free, as a fit would see them. Shifts of the recovered step from the truth, in
+units of the V = 60 errors:
+
+| vector | Omega_m step: omega_cdm / ln A_s / h | sigma_8 step: omega_cdm / ln A_s / h |
+|---|---|---|
+| P_l to 0.2 (control) | +0.14 / -0.22 / +0.11 | 0.00 / +0.13 / -0.05 |
+| P_l + X, sigma 17.7 / 25, k <= 0.75 / sigma | +0.09 / +0.13 / +0.14 | +0.12 / -0.23 / +0.04 |
+| P_l + X, with sigma = 12.5 | -0.02 / +0.91 / +0.12 | +0.22 / -1.16 / 0.00 |
+
+The tree response passes at sigma >= 17.7 and fails at sigma = 12.5, where it recovers only 55-73% of the amplitude
+step: the b1 lever of the Phase-1 Fisher sits exactly where the tree response gets the amplitude dependence wrong (the
+same failure mode as E(q)). With sigma >= 17.7 only, X adds to P_l + S21m(q = 2, sigma_1 >= 17.7) little with n_s fixed
+(0.0019 / 0.0333 / 0.0033 against 0.0019 / 0.0349 / 0.0033) and 12-15% with n_s free (Fisher).
+
+**Phase 3, pipeline.** New statistic `fit.py --stats ... pud`: X = PUd_m / Umean_m (multipoles 0, 2) of the modulus
+fields with `--pud-min-scale` <= sigma <= `--pud-max-scale` (17.7, 25), l = 1-4, every |m| but `--pud-skip`
+(j5_l1_m0), at k <= `--pud-x` / sigma (`data.load_response_dataset`); model `calculators.ResponseTheory`, a
+second-order Taylor table of the tree response in (omega_cdm, ln A_s, h, n_s, b1, b2, bG2, sigma_v^U) about the
+Quijote cosmology and (b1, b2, bG2, sigma_v) = (1.9, -0.5, -0.3, 6) (`inference.response_taylor`, cached in
+`outputs/emulators/response_taylor/`, built in ~1 min), plus a counterterm cU k^2 P_L and a constant eU per field;
+b1, b2, bG2 are shared with P_l and S21m. The table matches the exact tree response to 0.016 sigma rms (0.05 max) at
+V = 60 at a point 2-5 sigma away. No AP or window yet.
+
+**Phase 4, fits** (V = 60, no AP, no-AP fog_cubic emulator, profiles and chi^2 scans with one parameter fixed,
+parabola widths, shifts of the minima from the truth; runs in `outputs/inference/rsd/pud/`; P_l references `q2/pk02_*`):
+
+| vector | sigma(omega_cdm) | sigma(ln A_s) | sigma(h) | shifts omega_cdm / ln A_s / h | chi^2 / (n - p) |
+|---|---|---|---|---|---|
+| P_l to 0.2 | 0.0024 | 0.039 | 0.0040 | -0.9 / +1.4 / -0.7 | 18.8 / 33 |
+| P_l + S21m(q = 2, sigma_1 >= 17.7, no template) | 0.0019 | 0.037 | 0.0033 | -0.9 / +1.1 / -0.4 | 42.5 / 110 |
+| P_l + X, k <= 0.75 / sigma | 0.0020 | 0.034 | 0.0033 | +0.9 / -1.8 / +0.8 | 125.6 / 112 |
+| P_l + S21m + X, k <= 0.75 / sigma | 0.0020 | 0.033 | 0.0033 | +0.3 / -2.1 / +0.3 | 141.8 / 189 |
+| P_l + X, k <= 0.5 / sigma | 0.0021 | 0.038 | 0.0034 | -0.1 / +0.7 / 0.0 | 39.9 / 58 |
+| **P_l + S21m + X, k <= 0.5 / sigma** | **0.0019** | **0.036** | **0.0033** | **-0.5 / +0.2 / -0.1** | 65.7 / 135 |
+
+n_s free (scans of n_s and ln A_s): P_l sigma(n_s) 0.0316, sigma(ln A_s) 0.069 (shifts 0.0 / +0.8); P_l + S21m + X
+(k <= 0.5 / sigma) 0.0250 (-21%), 0.058 (-16%) (shifts +0.7 / +0.7).
+
+Splitting the k <= 0.75 / sigma pull: sigma = 25 alone recovers the truth (ln A_s 3.094, omega_cdm 0.1209, h 0.6717);
+sigma = 17.7 alone pulls ln A_s to 3.039; both at k <= 0.5 / sigma recover it. The fiducial-level residual of the tree
+response in the last bins (k = 0.03-0.04 at sigma = 17.7) projects onto b1-A_s, the direction X is sensitive to.
+
+Reading / conclusion:
+- The complement works, modestly. With every piece validated (tree response at sigma >= 17.7, k <= 0.5 / sigma; S21m
+  at q = 2 without a template), P_l + S21m + X is 21% / 8% / 18% tighter than P_l to 0.2 on omega_cdm / ln A_s / h
+  with n_s fixed and 21% on n_s with n_s free, and it removes most of P_l's own drift (ln A_s +1.4 -> +0.2 sigma). Of
+  the non-Gaussian pieces, S21m carries the omega_cdm / h gain and X the unbiasing; neither reaches the b1 lever.
+- The large Fisher prize (ln A_s -30 to -56%, the b1 lever) needs the response at sigma = 12.5 and k ~ 0.05-0.1, where
+  the tree response fails both at the fiducial and in its amplitude dependence. The next model ingredient, if any, is
+  the one-loop response of the modulus fields (or a validated, cosmology-dependent correction tested on the derivative
+  boxes as above); the gate test is cheap and should come first.
+- Proposed P(k) + WST vector: P_l to 0.2 + S21m(q = 2, sigma_1 >= 17.7, white W, no layer-2 template) + X(sigma =
+  17.7-25, l = 1-4, k <= 0.5 / sigma). Not done: AP for X (the filters in observed coordinates and the cross-spectrum
+  stretch), V = 64, chains, survey window.

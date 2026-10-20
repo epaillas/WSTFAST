@@ -1067,6 +1067,66 @@ class S21mTheory(Calculator):
         return obj
 
 
+class ResponseTheory(Calculator):
+    """Cross-spectra X_a = P_{U_a d} / <U_a> of the first-layer modulus fields with the density (multipoles 0, 2):
+    the tree-level response r_a Z1 P_L (``covariance_rsd.ModulusCrossRSD``) as a second-order Taylor expansion
+    (``table``: ``inference.response_taylor``) in the cosmology, b1, b2, bG2 (shared with the other theories by name)
+    and the velocity dispersion ``sv_U`` of the short modes, plus per field a counterterm ``cU_*`` k^2 P_L and a
+    constant ``eU_*`` (flat priors). ``table``: dict(params, center, x0, jac, hess, ct, cst, mask, labels)."""
+
+    COSMOLOGY = ("omega_cdm", "logA", "h", "n_s")
+
+    def __init__(self, basis, nuisance, table):
+        params = get_params(basis)
+        self.cosmo_params = {name: params[name] for name in self.COSMOLOGY}
+        self.bias_params = nuisance.bias()
+        own = {"sv_U": Parameter("sv_U", value=float(table["center"][list(table["params"]).index("sv")]),
+                                 prior=dict(limits=[0.0, 20.0]), ref=dict(dist="norm", loc=6.0, scale=0.5),
+                                 latex=r"\sigma_v^U")}
+        for label in table["labels"]:
+            own[f"cU_{label}"] = Parameter(f"cU_{label}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
+                                           ref=dict(dist="norm", loc=0.0, scale=1.0), latex=rf"c^U_{{\rm {label}}}")
+            own[f"eU_{label}"] = Parameter(f"eU_{label}", value=0.0, prior=dict(limits=[-1e6, 1e6]),
+                                           ref=dict(dist="norm", loc=0.0, scale=10.0), latex=rf"e^U_{{\rm {label}}}")
+        self.response_params = own
+
+    def __post_init__(self, basis, nuisance, table):
+        self.names = list(table["params"])
+        self.center = jnp.asarray(table["center"], dtype="f8")
+        self.x0, self.jac, self.hess = (jnp.asarray(table[key], dtype="f8") for key in ("x0", "jac", "hess"))
+        self.ct, self.cst = jnp.asarray(table["ct"], dtype="f8"), jnp.asarray(table["cst"], dtype="f8")
+        self.mask = np.asarray(table["mask"], dtype=bool)  # (nfield, nentry)
+        self.labels = list(table["labels"])
+
+    def __call__(self):
+        values = []
+        for name in self.names:
+            if name in self.COSMOLOGY:
+                values.append(self.cosmo_params[name].value)
+            elif name == "sv":
+                values.append(self.response_params["sv_U"].value)
+            else:
+                values.append(self.bias_params[name].value)
+        delta = jnp.stack([jnp.asarray(v, dtype="f8") for v in values]) - self.center
+        x = self.x0 + jnp.tensordot(self.jac, delta, axes=([0], [0])) \
+            + 0.5 * jnp.einsum("ij...,i,j->...", self.hess, delta, delta)  # (nfield, nentry)
+        parts = []
+        for a, label in enumerate(self.labels):
+            c, e = self.response_params[f"cU_{label}"].value, self.response_params[f"eU_{label}"].value
+            parts.append((x[a] + c * self.ct + e * self.cst)[self.mask[a]])
+        self.flattheory = jnp.concatenate(parts)
+        return self.flattheory
+
+    def tree_flatten(self):
+        return [self.flattheory], None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        obj = object.__new__(cls)
+        obj.flattheory = children[0]
+        return obj
+
+
 class JointTheory(Calculator):
     """Concatenated predictions of several theories (e.g. WST and P(k)) that share the cosmological parameters.
 

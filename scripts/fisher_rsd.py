@@ -193,6 +193,8 @@ def parse_args():
     parser.add_argument("--real-space", action="store_true", help="Edgeworth mode: the real-space matter control")
     parser.add_argument("--response-info", action="store_true",
                         help="response mode: what the modulus cross-spectra P_Ud add to P_l to 0.2")
+    parser.add_argument("--response-gate", action="store_true",
+                        help="response mode: linear recovery of the Quijote derivative steps by P_l + X")
     parser.add_argument("--neutrino", type=float, default=None,
                         help="neutrino mode: fiducial sum of neutrino masses [eV]")
     parser.add_argument("--nmean", type=int, default=25, help="window mode: surveys averaged in the data")
@@ -354,8 +356,10 @@ def case_fisher(args, fr, case_args, vary, exact=False, extra=None):
         mean = built["problem"]["vectors"].mean(axis=0)
         variance = dict(zip(built["problem"]["labels"], inference.layer2_variance(fit, built["problem"]["labels"], mean)))
         covariance -= np.diag([variance.get(label, 0.0) for label in labels])
+    vectors = np.asarray(built["problem"]["vectors"])
     return dict(names=list(names), jacobian=np.array(jacobian), covariance=covariance, prior=np.array(prior),
-                labels=list(labels), nsims=built["nsims"], m1=built["m1"], fiducial=fiducial)
+                labels=list(labels), nsims=built["nsims"], m1=built["m1"], fiducial=fiducial,
+                vectors=vectors if vectors.shape[1] == len(labels) else None)
 
 
 def fisher_errors(case, rows, known=(), report=None, prior_scale=None):
@@ -530,6 +534,81 @@ def edgeworth_information(args, fr):
     print(f"wrote {args.output}")
 
 
+def _response_vector(path, w, nk, kk):
+    """X = PUd_m / Umean_m of one box in the mode-weighted bins of ``load_power_dataset`` (rebin 2), k <= kk[-1]."""
+    with np.load(path) as z:
+        merged = (z["PUd_m"][..., :nk].reshape(*z["PUd_m"].shape[:-1], -1, 2) * w).sum(-1) / w.sum(1)
+        return merged[..., :kk.size] / z["Umean_m"][..., None, None]
+
+
+def response_gate(args, forecast, details, merge, tree_q):
+    """Linear recovery of the Quijote derivative steps (paired seeds, central differences) by the joint P_l + X model:
+    dtheta_hat = (F^-1 J^T C^-1 Delta d)_cosmology with every nuisance free (Gaussian priors as in the fit), against the
+    true steps; P_l alone as the control. Shifts in units of the V = --volume Fisher errors, errors from the seed scatter."""
+    from cosmoprimo import Cosmology
+
+    from wstfast.data import load_power_dataset, precision_matrix
+
+    root = args.data_dir.parent.parent.parent  # data/quijote
+    name = args.data_dir.name
+
+    def sigma8(omega_cdm, logA):
+        return float(Cosmology(omega_cdm=omega_cdm, omega_b=tree_q["omega_b"], h=tree_q["h"], n_s=tree_q["n_s"],
+                               logA=logA, m_ncdm=[], N_eff=3.046, engine="class").sigma8_m)
+
+    s8 = sigma8(tree_q["omega_cdm"], tree_q["logA"])
+    h2 = tree_q["h"] ** 2
+    truth = {}
+    for sign, tag in ((1, "p"), (-1, "m")):  # Omega_m +- 0.01 at fixed sigma_8, h, Omega_b; sigma_8 +- 0.015
+        ocdm = tree_q["omega_cdm"] + sign * 0.01 * h2
+        truth[f"Om_{tag}"] = dict(omega_cdm=ocdm, logA=tree_q["logA"] + 2 * np.log(s8 / sigma8(ocdm, tree_q["logA"])), h=0.0)
+        truth[f"s8_{tag}"] = dict(omega_cdm=tree_q["omega_cdm"], logA=tree_q["logA"] + 2 * np.log((s8 + sign * 0.015) / s8),
+                                  h=0.0)
+    vary = ["omega_cdm", "logA", "h"]
+
+    def vectors(tag):
+        directory = root / tag / "z0.5" / name
+        files = sorted((directory / "rsd").glob("wst_r*.npz"))
+        pl = load_power_dataset(directory, "rsd", kmax=0.2, rebin=2, ells=(0, 2, 4)).vectors
+        X = np.array([merge(path) for path in files])
+        return pl, X, [path.name for path in files]
+
+    sets = {tag: vectors(tag) for tag in ("Om_p", "Om_m", "s8_p", "s8_m")}
+    out = {}
+    for label, spec in {"P_l to 0.2": ((), 0.75, (), False),
+                        "P_l + X (validated, k <= 0.75/sigma, c+e)": ((4, 5, 6), 0.75, ("c", "e"), True),
+                        "P_l + X (validated, k <= 0.75/sigma, e)": ((4, 5, 6), 0.75, ("e",), True),
+                        "P_l + X (sigma 17.7/25 only, c+e)": ((5, 6), 0.75, ("c", "e"), True)}.items():
+        errors, _ = forecast(vary, *spec)
+        J, names, prior, cov = details["full"], details["names"], details["prior"], details["cov"]
+        P = precision_matrix(cov)
+        gain = details["inverse"] @ J @ P  # parameters per unit data shift
+        cosmo = [names.index(v) for v in vary]
+        for pair in (("Om_p", "Om_m"), ("s8_p", "s8_m")):
+            (plp, Xp, fp), (plm, Xm, fm) = sets[pair[0]], sets[pair[1]]
+            assert fp == fm
+            def full_vector(pl, X):
+                parts = [pl] + [X[:, RESPONSE_FIELDS[a][0], RESPONSE_FIELDS[a][1], RESPONSE_FIELDS[a][2]][:, [0, 1]]
+                                .reshape(len(pl), -1)[:, c] for a, c in zip(details["fields"], details["cuts"])]
+                return np.concatenate(parts, axis=1)
+            diff = full_vector(plp, Xp) - full_vector(plm, Xm)  # per seed
+            shift = gain @ diff.mean(0)
+            noise = gain @ np.cov(diff, rowvar=False) @ gain.T / len(diff)
+            true = np.array([truth[pair[0]][v] - truth[pair[1]][v] for v in vary])
+            row = {}
+            for i, v in enumerate(vary):
+                c = cosmo[i]
+                row[v] = dict(true=float(true[i]), recovered=float(shift[c]), err=float(np.sqrt(noise[c, c])),
+                              bias_over_sigma=float((shift[c] - true[i]) / errors[v]))
+            out[f"{label} | {pair[0][:2]}"] = row
+            print(f"{label:46s} {pair[0][:2]}: " + "; ".join(
+                f"{v} true {row[v]['true']:+.4f} rec {row[v]['recovered']:+.4f} +- {row[v]['err']:.4f}"
+                f" (bias {row[v]['bias_over_sigma']:+.2f} sigma_V)" for v in vary), flush=True)
+    path = args.output.with_name(args.output.stem + "_gate.json")
+    path.write_text(json.dumps(out, indent=2))
+    print(f"wrote {path}")
+
+
 def response_information(args, fr):
     """Fisher errors of P_l to 0.2 + the modulus cross-spectra X_a (module docstring)."""
     from cosmoprimo import Cosmology
@@ -541,19 +620,14 @@ def response_information(args, fr):
 
     files = sorted((args.data_dir / "rsd").glob("wst_r*.npz"))
     n = len(files)
-    pl = load_power_dataset(args.data_dir, "rsd", kmax=0.2, rebin=2, ells=(0, 2, 4)).vectors
+    pl_vectors = load_power_dataset(args.data_dir, "rsd", kmax=0.2, rebin=2, ells=(0, 2, 4)).vectors
     with np.load(files[0]) as z:
         k, nmodes, shot = z["k"], z["nmodes"], 1e9 / json.loads(str(z["metadata"]))["nparticles"]
     nk = k.size // 2 * 2
     w = nmodes[:nk].reshape(-1, 2)
     kb = (k[:nk].reshape(-1, 2) * w).sum(1) / w.sum(1)  # the mode-weighted bins of load_power_dataset
     kk = kb[kb <= 0.13]
-    X = []
-    for path in files:
-        with np.load(path) as z:
-            merged = (z["PUd_m"][..., :nk].reshape(*z["PUd_m"].shape[:-1], -1, 2) * w).sum(-1) / w.sum(1)
-            X.append(merged[..., :kk.size] / z["Umean_m"][..., None, None])
-    X = np.array(X)  # (n, j, l, |m|, ell, nk)
+    X = np.array([_response_vector(path, w, nk, kk) for path in files])  # (n, j, l, |m|, ell, nk)
     sigma = lambda j: 3.125 * 2 ** (j / 2)  # noqa: E731
     mu, wmu = leggauss(16)
     mu, wmu = mu[8:], wmu[8:]
@@ -601,8 +675,11 @@ def response_information(args, fr):
         print(f"model check, k <= {x} / sigma: chi^2/dof per field " + ", ".join(
             f"{sigma(j):.1f}/{l}/{m}: {check[x, a]:.1f}" for a, (j, l, m) in enumerate(RESPONSE_FIELDS)), flush=True)
 
-    def forecast(vary, scales, x, nuisances, validated):
-        case = case_fisher(args, fr, ["--stats", "pk", "--kmax", "0.2"], vary)
+    details = {}
+
+    def forecast(vary, scales, x, nuisances, validated, base=("--stats", "pk", "--kmax", "0.2")):
+        case = case_fisher(args, fr, list(base), vary)
+        pl = case["vectors"] if base[:3] != ("--stats", "pk", "--kmax") else pl_vectors
         names, prior = list(case["names"]), list(case["prior"])
         fields = [a for a, (j, _, _) in enumerate(RESPONSE_FIELDS) if j in scales
                   and (not validated or check[x, a] <= 2.0)]
@@ -629,10 +706,19 @@ def response_information(args, fr):
         cov = np.cov(vector, rowvar=False) / args.volume * (n - 1) / (n - vector.shape[1] - 2)
         used = [i for i, name in enumerate(allnames) if name in vary or np.any(full[i] != 0)]
         inverse = np.linalg.inv(full[used] @ precision_matrix(cov) @ full[used].T + np.diag(1 / sig[used] ** 2))
+        details.update(full=full[used], names=[allnames[i] for i in used], prior=sig[used], cov=cov, fields=fields,
+                       cuts=cuts, inverse=inverse)
         return {allnames[i]: float(np.sqrt(inverse[b, b])) for b, i in enumerate(used) if allnames[i] in L2_REPORT}, \
             int(vector.shape[1])
 
-    cases = {"P_l to 0.2": ((), 0.75, (), False)}
+    if args.response_gate:
+        return response_gate(args, forecast, details, merge=lambda path: _response_vector(path, w, nk, kk),
+                             tree_q=q)
+    s21m = ("--stats", "pk", "s21m", "--kmax", "0.2", "--q", "2.0", "--s21-min-scale", "17.6", "--s21-white")
+    cases = {"P_l to 0.2": ((), 0.75, (), False),
+             "P_l + S21m(q = 2, sigma_1 >= 17.7)": ((), 0.75, (), False, s21m),
+             "P_l + S21m + X sigma 17.7/25, k <= 0.75/sigma, c+e free, validated fields":
+                 ((5, 6), 0.75, ("c", "e"), True, s21m)}
     for x in (0.75, 1.0):
         for scales in ((5, 6), (4, 5, 6)):
             for nuisances in (("c", "e"), ("e",)):

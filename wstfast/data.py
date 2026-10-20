@@ -222,6 +222,47 @@ def load_power_dataset(data_dir: Path, space: str = "real", kmin: float = 0.0, k
                         files=[str(path) for path in files])
 
 
+@dataclass
+class ResponseDataset:
+    """Cross-spectra of the first-layer modulus fields U_(j, l, |m|) with the density, normalised by the box mean of
+    the field, X = P_{U d} / <U> (multipoles 0 and 2, field-major, ell, then k), in the mode-weighted bins of
+    ``load_power_dataset``; ``k`` the bin centres and ``mask`` (nfield, 2 nk) the entries kept per field."""
+
+    vectors: np.ndarray  # (nrealizations, ndata)
+    k: np.ndarray
+    mask: np.ndarray
+    fields: list
+    metadata: dict
+    files: list
+
+
+def load_response_dataset(data_dir: Path, space: str, fields, kmax, rebin: int = 2, files=None) -> ResponseDataset:
+    """X = PUd_m / Umean_m of the fields (j, l, |m|) at k <= kmax[field] (``ResponseDataset``)."""
+    files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]
+    if not files:
+        raise FileNotFoundError(f"no measurements in {Path(data_dir) / space}")
+    with np.load(files[0]) as data:
+        if "PUd_m" not in data.files:
+            raise ValueError(f"{files[0]} has no line-of-sight-resolved modulus spectra (measure with spectra and los)")
+        k, nmodes = data["k"], data["nmodes"]
+    nk = (k.size // rebin) * rebin
+    weights = nmodes[:nk].reshape(-1, rebin)
+    kbin = (k[:nk].reshape(-1, rebin) * weights).sum(axis=1) / weights.sum(axis=1)
+    keep = kbin <= max(kmax)
+    kbin = kbin[keep]
+    mask = np.array([np.tile(kbin <= kf, 2) for kf in kmax])
+    vectors, metadatas = [], []
+    for path in files:
+        with np.load(path) as data:
+            metadatas.append(json.loads(str(data["metadata"])))
+            merged = (data["PUd_m"][..., :nk].reshape(*data["PUd_m"].shape[:-1], -1, rebin) * weights).sum(-1)
+            merged = merged / weights.sum(axis=1)
+            x = merged[..., keep] / data["Umean_m"][..., None, None]
+            vectors.append(np.concatenate([x[j, l, m, :2].ravel()[mk] for (j, l, m), mk in zip(fields, mask)]))
+    return ResponseDataset(vectors=np.array(vectors), k=kbin, mask=mask, fields=list(fields),
+                           metadata=common_metadata(metadatas, files), files=[str(path) for path in files])
+
+
 def load_s1m_dataset(data_dir: Path, space: str, coefficients, q: float, files=None) -> WSTDataset:
     """Line-of-sight-resolved S1m of every |m| block of ``coefficients`` (coefficient-major, |m| = 0..l)."""
     files = sorted((Path(data_dir) / space).glob("wst_r*.npz")) if files is None else [Path(f) for f in files]

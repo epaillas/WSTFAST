@@ -15,11 +15,12 @@ from pathlib import Path
 import numpy as np
 from desilike import build, get_params
 
-from .calculators import (APGeometry, CombinedCaps, JointTheory, LegacyPowerTheory, LinearCompression,
+from .calculators import (APGeometry, CombinedCaps, JointTheory, LegacyPowerTheory, LinearCompression, ResponseTheory,
                           NuisanceParameters, PowerBasis, PowerTheory, S1mTheory, S21mTheory, WSTBasis, WSTLikelihood,
                           WSTTheory, build_cosmology, combine_caps)
 from .config import QUIJOTE_COSMOLOGY, Coefficient, ModelSpec, WSTConfig, select_coefficients
 from .data import (PowerDataset, WSTDataset, chi_squared, hartlap_factor, load_band_dataset, load_measurement,
+                   load_response_dataset,
                    load_power_dataset, load_s1m_dataset, load_s21m_dataset, percival_m1, sample_covariance)
 from .theory.power import LatticeBinning, default_knodes
 from .theory.spectrum import (APPolynomial, BandProjection, MultipoleProjection, S1mProjection, SpectrumGrid,
@@ -513,6 +514,13 @@ class FitOptions:
     compress_m: bool = False
     #: The configuration of the data (set by build_problem; the layer-2 template is re-keyed to it).
     layer2_config: WSTConfig | None = None
+    #: Statistic "pud": the cross-spectra X = P_{U d} / <U> of the first-layer modulus fields (j, l >= 1, |m|) with
+    #: pud_min_scale <= sigma_j <= pud_max_scale, multipoles 0 and 2 at k <= pud_x / sigma_j (the reach of the tree
+    #: response), minus the fields ``pud_skip`` ("j{j}_l{l}_m{m}"); model ``ResponseTheory``.
+    pud_min_scale: float = 17.6
+    pud_max_scale: float = 25.0
+    pud_x: float = 0.75
+    pud_skip: tuple = ("j5_l1_m0",)
 
 
 def load_basis(path: Path, vary, prepare=None):
@@ -906,8 +914,110 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         vectors.append(power.vectors)
         labels += [f"{prefix}P{ell}_k{k:.4f}" for ell in ells for k in power.k]
         meta = power.metadata
+    if "pud" in options.stats:
+        if spec.tracer != "biased" or spec.space != "redshift":
+            raise SystemExit("the modulus cross-spectra are modelled for biased tracers in redshift space")
+        if options.ap or window is not None:
+            raise SystemExit("the modulus cross-spectra have no AP or window model yet")
+        fields = [(j, ell, m) for j in range(config.J + 1)
+                  if options.pud_min_scale - 1e-6 <= config.sigma(j) <= options.pud_max_scale + 1e-6
+                  for ell in range(1, 5) for m in range(ell + 1) if f"j{j}_l{ell}_m{m}" not in options.pud_skip]
+        if not fields:
+            raise SystemExit("no modulus field passes the pud cuts")
+        response = load_response_dataset(options.data_dir, space, fields,
+                                          [options.pud_x / config.sigma(j) for j, _, _ in fields], files=files)
+        files = response.files
+        shot = response.metadata["boxsize"] ** 3 / response.metadata["nparticles"]
+        table = response_taylor(config, fields, response.k, shot, settings["z"])
+        table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields])
+        theories.append(ResponseTheory(basis, nuisance, table))
+        vectors.append(response.vectors)
+        labels += [f"{prefix}X{e}_j{j}_l{ell}_m{m}_k{k:.4f}" for (j, ell, m), mk in zip(fields, response.mask)
+                   for e, k in zip(np.repeat([0, 2], response.k.size)[mk], np.tile(response.k, 2)[mk])]
+        meta = response.metadata
     return dict(theories=theories, vectors=np.concatenate(vectors, axis=1), labels=labels, meta=meta, basis=basis,
                 settings=settings, spec=spec, tracer=tracer)
+
+
+#: Parameters, expansion point and steps of the Taylor table of the modulus cross-spectra (``response_taylor``): the
+#: Quijote cosmology and the biases / short-mode velocity dispersion that fit the halo box mean at k <= 0.75 / sigma.
+RESPONSE_PARAMS = ("omega_cdm", "logA", "h", "n_s", "b1", "b2", "bG2", "sv")
+RESPONSE_CENTER = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm", "logA", "h", "n_s")},
+                   "b1": 1.9, "b2": -0.5, "bG2": -0.3, "sv": 6.0}
+RESPONSE_STEPS = {"omega_cdm": 0.002, "logA": 0.01, "h": 0.005, "n_s": 0.005, "b1": 0.02, "b2": 0.05, "bG2": 0.05,
+                  "sv": 0.5}
+
+
+def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor")):
+    """Second-order Taylor table of X_a = P_{U_a d} / <U_a> = (2 ell + 1) int r_a Z1 P_L L_ell (ell = 0, 2) on the
+    bins ``k`` for the fields (j, l, |m|): the tree response of ``covariance_rsd.ModulusCrossRSD`` (Gaussian damping
+    sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER by central differences; also the
+    counterterm (k^2 P_L at the centre) and constant columns. Cached in ``cache_dir`` (~10 min to build)."""
+    import hashlib
+
+    key = hashlib.sha1(json.dumps([[config.sigma(j), l, m] for j, l, m in fields] + [list(map(float, k)),
+                                   float(shotnoise), float(z), RESPONSE_CENTER, RESPONSE_STEPS]).encode()).hexdigest()[:16]
+    path = Path(cache_dir) / f"{key}.npz"
+    names = list(RESPONSE_PARAMS)
+    center = np.array([RESPONSE_CENTER[n] for n in names])
+    if path.exists():
+        with np.load(path) as data:
+            return dict(params=names, center=center, **{name: data[name] for name in ("x0", "jac", "hess", "ct", "cst")})
+    from cosmoprimo import Cosmology
+    from numpy.polynomial.legendre import leggauss
+    from scipy.special import eval_legendre
+
+    from .theory.covariance_rsd import ModulusCrossRSD
+
+    mu, wmu = leggauss(16)
+    mu, wmu = mu[8:], wmu[8:]
+    model = ModulusCrossRSD([(config.sigma(j), l, m) for j, l, m in fields], k, mu)
+    legendre = np.array([(2 * e + 1) * eval_legendre(e, mu) * wmu for e in (0, 2)])  # (2, nmu)
+
+    def multipoles(grid):  # (..., nk, nmu) -> (..., 2 nk), ell-major
+        return np.concatenate([np.einsum("...km,m->...k", grid, row) for row in legendre], axis=-1)
+
+    cosmologies = {}
+
+    def power(p):
+        key = tuple(round(p[n], 12) for n in ("omega_cdm", "logA", "h", "n_s"))
+        if key not in cosmologies:
+            cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=QUIJOTE_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
+                              logA=p["logA"], m_ncdm=[], N_eff=3.046, engine="class")
+            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of="delta_m").to_1d(z=z), float(cosmo.growth_rate(z)))
+        return cosmologies[key]
+
+    def evaluate(values):
+        p = dict(zip(names, values))
+        pk, f = power(p)
+        r, _, _ = model.spectra(pk, f, p["sv"], np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0]), shotnoise)
+        return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(k)[None, :, None])
+
+    steps = np.array([RESPONSE_STEPS[n] for n in names])
+    x0 = evaluate(center)
+    npar = len(names)
+    plus, minus = {}, {}
+    jac = np.zeros((npar,) + x0.shape)
+    hess = np.zeros((npar, npar) + x0.shape)
+    for i in range(npar):
+        e = np.zeros(npar)
+        e[i] = steps[i]
+        plus[i], minus[i] = evaluate(center + e), evaluate(center - e)
+        jac[i] = (plus[i] - minus[i]) / (2 * steps[i])
+        hess[i, i] = (plus[i] - 2 * x0 + minus[i]) / steps[i] ** 2
+    for i in range(npar):
+        for j in range(i + 1, npar):
+            ei, ej = np.zeros(npar), np.zeros(npar)
+            ei[i], ej[j] = steps[i], steps[j]
+            value = (evaluate(center + ei + ej) - evaluate(center + ei - ej) - evaluate(center - ei + ej)
+                     + evaluate(center - ei - ej)) / (4 * steps[i] * steps[j])
+            hess[i, j] = hess[j, i] = value
+    pk0, _ = power(dict(zip(names, center)))
+    ct = multipoles((k**2 * pk0(k))[:, None] * np.ones_like(mu)[None, :])
+    cst = multipoles(np.ones((k.size, mu.size)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, x0=x0, jac=jac, hess=hess, ct=ct, cst=cst)
+    return dict(params=names, center=center, x0=x0, jac=jac, hess=hess, ct=ct, cst=cst)
 
 
 def box_entries(box_dir: Path, labels, config: WSTConfig, q: float) -> tuple[np.ndarray, float]:
