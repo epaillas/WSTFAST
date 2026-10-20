@@ -883,3 +883,31 @@ Reading:
 Caveats: tree Jacobians stand in for one-loop ones; a one-loop model must still pass the derivative-box gate (the tree
 response at sigma = 12.5 recovers only 55-73% of the amplitude step); a one-loop RSD bispectrum-type response for
 biased tracers brings its own bias and counterterm parameters (only the per-field counterterms are modelled here).
+
+### Chains with 2201 boxes (2026-10-20, afternoon)
+
+The fiducial halo set on NERSC is growing to ~5000 boxes; the 1013 finished by 13:00 were added to the local copy
+(`data/quijote/fiducial/z0.5/halos_m13_.../rsd`, now 2201 boxes, same settings, all with the modulus spectra; every fit
+that globs the directory now uses them). Percival m1 of P_l + S21m + X: 1.141 -> 1.070 (sigma x 1.068 -> 1.034);
+P_l alone 1.015 -> 1.008. The four NUTS chains rerun at V = 60, no AP (`pud/*_chain_n2201_V60`; the n_s-fixed P_l
+chain stuck twice, R - 1 = 4 and 0.55, and converged with a new seed and the 1188-box P_l chain as proposal); plots
+`outputs/plots/triangle_pk_s21_pud_{nsfixed,nsfree}_n2201_V60.png` (and `..._nsfree_..._centred.png`, posteriors
+shifted to the truth). All R - 1 <= 0.01, ESS >= 325.
+
+| V = 60 | 1188 boxes: P_l -> P_l + S21m + X | 2201 boxes: P_l -> P_l + S21m + X | shifts at 2201 [sigma], P_l / P_l + S21m + X |
+|---|---|---|---|
+| n_s fixed, omega_cdm | 0.00211 -> 0.00201 (-5%) | 0.00209 -> 0.00195 (-7%) | -0.62 / -0.08 |
+| n_s fixed, ln A_s | 0.0377 -> 0.0371 (-2%) | 0.0372 -> 0.0355 (-4%) | +1.10 / -0.07 |
+| n_s fixed, h | 0.00352 -> 0.00343 (-3%) | 0.00350 -> 0.00330 (-6%) | -0.51 / +0.01 |
+| n_s free, omega_cdm | 0.00439 -> 0.00375 (-14%) | 0.00445 -> 0.00345 (-23%) | +0.40 / -0.40 |
+| n_s free, ln A_s | 0.0627 -> 0.0590 (-6%) | 0.0620 -> 0.0548 (-12%) | +0.03 / +0.24 |
+| n_s free, n_s | 0.0290 -> 0.0257 (-11%) | 0.0291 -> 0.0239 (-18%) | -0.78 / +0.43 |
+| n_s free, h | 0.00535 -> 0.00477 (-11%) | 0.00547 -> 0.00446 (-18%) | +0.28 / -0.27 |
+
+Reading: the gap widens with the covariance set, by more than the Percival factor alone (3.4% of sigma): with n_s free
+it roughly doubles (-12 to -23%), with n_s fixed it goes from -2 to -5% to -4 to -7%. P_l's own marginals barely move
+(as expected: its m1 was already 1.015); the combined vector, with 236 points against 48, was paying for the noise of
+its 1188-box covariance beyond the Percival correction (the Hartlap-corrected precision of a 236-point vector is itself
+noisy). With the full ~5000 boxes the remaining Percival cost is ~1.5%; the further gain should be smaller than this
+step. In every case the complement also brings the shifts within 0.45 sigma (P_l: up to 1.1 sigma in ln A_s with n_s
+fixed, 0.8 sigma in n_s with n_s free).
