@@ -911,3 +911,59 @@ its 1188-box covariance beyond the Percival correction (the Hartlap-corrected pr
 noisy). With the full ~5000 boxes the remaining Percival cost is ~1.5%; the further gain should be smaller than this
 step. In every case the complement also brings the shifts within 0.45 sigma (P_l: up to 1.1 sigma in ln A_s with n_s
 fixed, 0.8 sigma in n_s with n_s free).
+
+### Is there tree-level non-Gaussian information left in the WST? (2026-10-20, evening)
+
+The user's question: before settling for ~10-20% over P_l (less than bispectrum analyses report), make sure every
+non-Gaussian piece the WST measures that a tree-level model could handle has been tried. Method, on the halo boxes
+(the local fiducial set grew to 4227 boxes during the day; Percival m1 of a 320-point vector is now 1.06): per-field
+model check (chi^2/dof of X_a against the box mean, counterterm c and constant e fitted), a **joint check** of a scale
+set in its joint sample covariance with c and e marginalised analytically (`fisher_rsd.py --response-info`, new:
+`--response-x`, `--response-ells`, `--response-scales`, the "A" nuisance kind = a free amplitude per field), the
+derivative-box gate (`--response-gate`), Fisher with (c, e) and with (A, c, e), and profile fits. The joint check
+matters because the fields are 85-97% correlated with each other and with P_0: a coherent few-% pattern across fields
+that every field tolerates on its own is a large chi^2 in the joint fit.
+
+| piece | per-field check | joint check (c, e marg.) | gate | fit / Fisher at V = 60 | verdict |
+|---|---|---|---|---|---|
+| X, sigma 17.7-25, k <= 0.5/sigma (baseline) | ok | ok (in the fit: chi^2 66/236 with P_l + S21m) | <= 0.45 sigma | chains: -4 to -7% (n_s fixed), -12 to -23% (n_s free) with S21m | in |
+| X, sigma 17.7-25, k <= 0.75/sigma | ok (chi^2/dof <= 1.6) | **156 / 84** (44 with a free amplitude per field) | 0.5 | fits biased: ln A_s -1.8 to -2.1 sigma | out |
+| X, sigma 12.5, k <= 0.5/sigma (k_L <= 0.04, 3 bins) | ok (<= 1.4) | **412 / 84** (50 with free amplitudes) | 0.33 / 0.16 / 0.22 sigma | profile: chi^2 381/273, ln A_s -5 sigma, omega_cdm +2 sigma | out |
+| same, Fisher | | | | P_l + S21m + X: ln A_s 0.0302 (-23% vs P_l, -17% vs P_l + S21m), n_s free -18/-26/-21/-14%; with a free amplitude per field 0.0353 (-3%), n_s free -1 to -2% | the information is the amplitude |
+| X, sigma 12.5, k <= 0.6/sigma | 3 fields fail (2.3-7.2) | -- | 0.46 sigma | Fisher ln A_s 0.0280 | out |
+| X, sigma 12.5-25, k <= 0.75/sigma | 4 fields fail | 1412 / 196 (336 with free amplitudes: shape errors too) | fails (55-73% of the A_s step) | -- | out |
+| X, sigma 8.8, k <= 0.5/sigma | l >= 2, m <= 1 fail (chi^2/dof 3-16) | -- | -- | -- | out |
+| X, sigma 35.4 (k <= 0.75-1.5/sigma) | ok | -- | -- | adds nothing (n 188 -> 216, same errors) | nothing there |
+| X, hexadecapole (ell = 4) | ok | -- | -- | adds nothing (ln A_s 0.0300 vs 0.0298) | nothing there |
+| X, k <= 1-1.5/sigma at sigma <= 25 | fails (chi^2/dof 4-630) | -- | -- | the large Fisher prize of the one-loop subsection | needs loops |
+| q != 2 first layer, E(q) | tree K4, cubic + A_TN, NNLO: none within V = 60 errors at sigma <= 25 | | sigma_8 response 2.5-3.5x the data | | out (earlier subsections) |
+| q-dependence of the cross-spectra P_{U^q d} | X_q / <U^q> = (q/2) x the same response at tree level: the q-dependence is the one-point (E-type) information | | | | nothing new at tree level |
+| S21m(q = 2) | ok | ok | ok | b2, bG2 only; sigma_1 = 12.5 adds -3% (one-loop subsection) | in; its noise (connected 4-point) failed earlier |
+| third layer, S2 at q != 2, cross-field second layer | 6-point and beyond, or the modulus noise again | | | | not tree level |
+
+Where the sigma = 12.5 misfit sits (at the baseline best fit, k <= 0.5/sigma): per field, data/model - 1 of the
+monopole rises from 0 at k = 0.013 to +5% at k = 0.036 for every (l, m); the quadrupole is -2 to -8% for the m = l
+(transverse) fields and ~0 for m = 0. A free amplitude per field, -0.00 to -0.10 growing with m/l, brings the joint
+chi^2 from 412 to 47 on 84 points (one amplitude for all fields: 321; per l: 295; per m/l: 151). The short modes of
+these fields are at k ~ 0.13-0.22: this is the nonlinear, anisotropic (FoG-like) response of the halo field in
+redshift space, not captured by the tree kernels with a Gaussian damping and one sigma_v.
+
+Reading:
+- **At tree level the WST's non-Gaussian information for halos in redshift space is exhausted** by the deep-squeezed
+  response at sigma >= 17.7 (k_L <= 0.5/sigma) and the bias information of S21m(q = 2). Every other piece either fails
+  the joint check / the gate (X at sigma = 12.5 or at k > 0.5/sigma, E(q)) or carries nothing (ell = 4, sigma >=
+  35.4, the q-dependence of X).
+- **The missing gain is a 3-10% amplitude per field at sigma = 12.5** (and at sigma 17.7-25 beyond k = 0.5/sigma).
+  Since the information of X is its amplitude (with free amplitudes X adds ~0 to P_l + S21m), a model of those
+  amplitudes to ~1% is what the b1 lever (ln A_s -23% in Fisher, -40 to -56% with the reach of the one-loop subsection)
+  costs. That is one-loop (or beyond) RSD modelling of the short modes at k ~ 0.15-0.2 for a biased tracer: the same
+  threshold at which bispectrum analyses move from tree level (k_max ~ 0.08, ~10-15% on sigma_8 in BOSS) to one loop
+  (k_max ~ 0.2). The WST at tree level is where the tree-level bispectrum is, not below it.
+- Cheapest routes beyond, in order: (i) the one-loop *response* of X rather than a one-loop bispectrum: the amplitude
+  of X_a is the response of the band power of field a to a long mode (position-dependent band power), i.e. the
+  separate-universe response of the one-loop P_s(k, mu) that the P_l emulator already provides (growth, dilation, PBS
+  bias, Kaiser and FoG responses as derivatives of the emulated P_s), to be gated on the derivative boxes and the joint
+  check; (ii) P_{|X|^2 d} (skew-spectrum form of X) in the ongoing 5000-box measurement: it removes the chaos-projection
+  part of the amplitude error (O(kappa_4) ~ 1-3% at sigma = 12.5) at no cost, one extra FFT per field; (iii)
+  simulation-calibrated amplitudes (the derivative boxes give the cosmology response; the bias dependence of a galaxy
+  sample does not transfer).

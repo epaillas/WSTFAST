@@ -787,6 +787,7 @@ def response_information(args, fr):
         return np.array([multipoles(r[i] * z1[None, :] * pk(kk)[:, None]) for i in range(len(RESPONSE_FIELDS))]), pk
 
     base, pk0 = tree(fiducial)
+    tree0 = base  # the tree model at the fiducial (``base`` is reused for the P_l block inside forecast_case)
     dtree = {name: (tree({**fiducial, name: fiducial[name] + h})[0] - tree({**fiducial, name: fiducial[name] - h})[0])
              / (2 * h) for name, h in RESPONSE_STEPS.items()}
     columns = dict(c=multipoles((kk**2 * pk0(kk))[:, None] * np.ones_like(mu)[None, :]),
@@ -816,6 +817,33 @@ def response_information(args, fr):
     for x in xs:
         print(f"model check, k <= {x} / sigma: chi^2/dof per field " + ", ".join(
             f"{sigma(j):.1f}/{l}/{m}: {check[x, a]:.1f}" for a, (j, l, m) in enumerate(RESPONSE_FIELDS)), flush=True)
+    # The same for a scale set in its joint covariance (the fields are 85-97% correlated with each other and with P_0:
+    # a coherent pattern across fields that each field tolerates is what the joint fit sees), with the counterterm and
+    # constant of every field marginalised analytically (the widths of fit.py --pud-marg).
+    from wstfast.data import precision_matrix as _precision
+    for x in xs:
+        for scales in ((5, 6), (4, 5, 6), tuple(args.response_scales)):
+            fields = [a for a, (j, l, m) in enumerate(RESPONSE_FIELDS) if j in scales and np.isfinite(check[x, a])]
+            if not fields:
+                continue
+            cuts = [cut(a, x) for a in fields]
+            vector = np.concatenate([data[a][:, c] for a, c in zip(fields, cuts)], axis=1)
+            residual = vector.mean(0) - np.concatenate([base[a][c] for a, c in zip(fields, cuts)])
+            sample = np.cov(vector, rowvar=False) / args.volume * (n - 1) / (n - vector.shape[1] - 2)
+            chi2 = {}
+            for marg in (("c", "e"), ("A", "c", "e")):  # "A": a free amplitude per field (width 1 = 100%)
+                cov, offset = sample.copy(), 0
+                for a, c in zip(fields, cuts):
+                    for kind, width in (("c", 3000.0), ("e", 30000.0), ("A", 1.0)):
+                        if kind in marg:
+                            column = np.zeros(vector.shape[1])
+                            column[offset:offset + c.sum()] = (base[a] if kind == "A" else columns[kind])[c]
+                            cov += width**2 * np.outer(column, column)
+                    offset += int(c.sum())
+                chi2["+".join(marg)] = float(residual @ _precision(cov) @ residual)
+            print(f"joint check, k <= {x} / sigma, sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}: chi^2 "
+                  + ", ".join(f"{v:.1f} ({k} marginalised)" for k, v in chi2.items())
+                  + f" on {vector.shape[1]} points ({len(fields)} fields)", flush=True)
 
     details = {}
 
@@ -847,9 +875,9 @@ def response_information(args, fr):
                for name in [*vary, "b1", "b2", "bG2", "sv"]}
         offset, linear = 0, []
         for a, c in zip(fields, cuts):
-            for kind in nuisances:
+            for kind in nuisances:  # "A": a free amplitude of the field (its fiducial model as the column)
                 column = np.zeros(nx)
-                column[offset:offset + c.sum()] = columns[kind][c]
+                column[offset:offset + c.sum()] = (tree0[a] if kind == "A" else columns[kind])[c]
                 jac[f"{kind}_{a}"] = column
                 linear.append(f"{kind}_{a}")
             offset += int(c.sum())
@@ -883,11 +911,12 @@ def response_information(args, fr):
              "P_l + S21m(q = 2, sigma_1 >= 17.7)": ((), xs[0], (), False, s21m)}
     for x in xs:
         for scales in ((5, 6), tuple(args.response_scales)):
-            cases[f"P_l + S21m + X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, c+e free, validated fields"] = \
-                (scales, x, ("c", "e"), True, s21m)
+            for nuisances in (("c", "e"), ("A", "c", "e")):
+                cases[f"P_l + S21m + X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, "
+                      f"{'+'.join(nuisances)} free, validated fields"] = (scales, x, nuisances, True, s21m)
     for x in xs:
         for scales in ((5, 6), (4, 5, 6), tuple(args.response_scales)):
-            for nuisances in (("c", "e"), ("e",)):
+            for nuisances in (("c", "e"), ("e",), ("A", "c", "e")):
                 for validated in (True, False):
                     label = (f"+ X sigma {'/'.join(f'{sigma(j):.1f}' for j in scales)}, k <= {x}/sigma, "
                              f"{'+'.join(nuisances)} free{', validated fields' if validated else ''}")
