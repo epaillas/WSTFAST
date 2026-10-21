@@ -1211,3 +1211,32 @@ So the P_l / WST nuisance tension was not the cause: the bands, which share the 
 same AP direction. No chain run (none within ~0.5 sigma). Stage B (the union emulator, bands to k84 = 0.18 with sigma =
 12.5) is pending on Perlmutter; given that the AP direction is common to every WST block, it is not expected to change
 the conclusion, and is the user's call.
+
+#### P_l alone at the joint fit's nuisance values does not slide (2026-10-21)
+
+P_l alone with AP (ap3_v5, V = 60, n_s free), profiles with shared nuisances fixed one at a time at the values of the
+truth-fixed AP baseline fit (b1 1.956, b2 -0.618, bG2 -0.451, bGamma3 1.029, alpha0 -0.017, alpha2 -12.50, cubic offsets
+-0.224 / 0.034 / 0.227). Ridge direction: omega_cdm down, ln A_s up, n_s up; the joint AP baseline sits at 0.1164 / 3.126
+/ 0.998 (chain mean).
+
+| fixed | chi2 | omega_cdm | ln A_s | n_s | h |
+|---|---|---|---|---|---|
+| none | 17.0 | 0.1194 | 3.109 | 0.9625 | 0.6706 |
+| b1 | 19.1 | 0.1224 | 3.040 | 0.9492 | 0.6726 |
+| b2 | 17.0 | 0.1194 | 3.109 | 0.9622 | 0.6706 |
+| bG2 | 18.5 | 0.1194 | 3.117 | 0.9679 | 0.6715 |
+| bGamma3 | 18.4 | 0.1191 | 3.120 | 0.9721 | 0.6712 |
+| alpha0 | 17.6 | 0.1205 | 3.096 | 0.9575 | 0.6717 |
+| alpha2 | 17.0 | 0.1193 | 3.109 | 0.9631 | 0.6706 |
+| cubic offsets | 17.0 | 0.1194 | 3.109 | 0.9625 | 0.6706 |
+| bG2 + bGamma3 | 18.3 | 0.1190 | 3.122 | 0.9740 | 0.6710 |
+| all | 21.6 | 0.1192 | 3.075 | 0.9738 | 0.6716 |
+
+No shared nuisance moves P_l along the ridge: bG2 / bGamma3 nudge n_s up by <= 0.4 sigma (ln A_s +0.2 sigma) with
+omega_cdm unchanged, b1 and alpha0 push the other way, b2 / alpha2 / cubic offsets do nothing; with all of them fixed
+P_l stays at omega_cdm 0.1192 (-0.4 sigma), far from the joint 0.1164. So the slide is not P_l dragged by the nuisances
+the WST fixes. It needs S21m's own cosmology dependence acting jointly: per entry the S21m prediction moves little along
+the ridge (~0.1 err) but coherently over ~110 entries, and the joint fit trades that against P_l's non-shared
+counterterms (c0_pk / c2_pk / c4_pk, which re-adjust along the ridge). The per-entry projection (previous subsection)
+credits P_0 / P_2 because the theory change lives there, not because P_l prefers the ridge. Remaining test: the n_s
+derivative boxes (Perlmutter), since S21m's amplitude and omega_m responses passed.
