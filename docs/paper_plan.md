@@ -1154,3 +1154,28 @@ set: e.g. s8_p with AP, P_l -> P_l + S21m: ln A_s +0.067 -> +0.100, n_s +0.014 -
 Reading: S21m has an offset at the truth (a level, not a slope) that projects on the ln A_s - n_s - omega_cdm ridge; the
 n_s response is untested (no n_s derivative boxes locally; Perlmutter down until 2026-10-22). Next: the n_s boxes, and
 the S21m residual at the truth projected on the ridge direction, block by block.
+
+#### Where the ridge offset sits in the data vector (2026-10-21)
+
+Baseline with AP: residual r = data - theory at the truth (cosmology fixed, nuisances re-profiled, chi2 62.4) and the
+ridge Delta t = theory(free best fit, chi2 58.7) - theory(truth). Matched-filter projection of r on the ridge,
+r^T C^-1 Delta t / |Delta t|_C = 1.92 sigma (ridge length 1.76 sigma), split per entry as r_i (C^-1 Delta t)_i / |Delta t|_C:
+
+| block | share [sigma] | rms r / err | rms Delta t / err |
+|---|---|---|---|
+| P_0 | +0.86 | 0.59 | 0.36 |
+| P_2 | +0.62 | 0.76 | 0.17 |
+| P_4 | -0.11 | 0.86 | 0.05 |
+| S21m sigma1 17.7, l = 1 / 2 / 3 / 4 | +0.02 / -0.12 / -0.18 / +0.46 | 0.22 / 0.50 / 0.61 / 0.58 | ~0.1 |
+| S21m sigma1 25, l = 1 / 2 / 3 / 4 | -0.00 / -0.06 / +0.14 / +0.31 | 0.17 / 0.38 / 0.51 / 0.59 | ~0.1 |
+| X (all) | -0.01 | <= 0.37 | <= 0.09 |
+
+S21m carries +0.56 of the 1.92 sigma, P_l +1.37, X 0. Within S21m no entry dominates and the m-blocks cancel: by
+(sigma1, l, |m1|) the largest are 17.7 l = 3 |m1| = 3 (+0.62), l = 3 |m1| = 2 (-0.45), l = 2 |m1| = 2 (-0.35), l = 4
+|m1| = 3 (+0.30); top entries S21m_j5_j9_l3_m3_m3 +0.47 (r = +0.65 err), _l2_m2_m2 -0.28, _l3_m0_m3 -0.26 (r = +1.34
+err). Along the ridge the S21m prediction barely moves (|Delta t| ~ 0.1 err per entry): the slide happens in P_0 / P_2,
+whose residuals at the truth (with the nuisances the joint fit sets) point along it. So no S21m entry "carries" an offset;
+S21m acts through the nuisances it fixes for P_l. The shared ones that move most between P_l alone and the joint fit at
+the truth are bG2 (+0.07 +- 0.28 -> -0.42; X and S21m agree on it) and, through the P_l bG2 - bGamma3 degeneracy, bGamma3
+(-0.34 -> +1.0), plus b2 (-0.46 -> -0.66); splitting bG2 / bGamma3 (previous subsection) does not remove the bias, so
+the question becomes which P_l nuisances, at the values the WST demands, put P_l's residual on the ridge.
