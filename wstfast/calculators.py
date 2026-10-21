@@ -1083,7 +1083,7 @@ class ResponseTheory(Calculator):
         self.bias_params = nuisance.bias()
         sv = float(table["center"][list(table["params"]).index("sv")])
         own = {"sv_U": Parameter("sv_U", value=sv, fixed=nuisance.spec.space == "real",  # no velocities in real space
-                                 prior=dict(limits=[0.0, 20.0]), ref=dict(dist="norm", loc=max(sv, 0.5), scale=0.5),
+                                 prior=dict(limits=[0.0, 8.0]), ref=dict(dist="norm", loc=max(sv, 0.5), scale=0.5),
                                  latex=r"\sigma_v^U")}
         for label in (table["labels"] if table.get("linear", True) else []):
             own[f"cU_{label}"] = Parameter(f"cU_{label}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
