@@ -1090,3 +1090,21 @@ ln A_s +0.8 profile, +0.52 chain). Without AP the same cut is unbiased. No AP ch
 unbiased). The pull is S21m's at every scale tested once P_l carries AP; the next suspects are the shared nuisances
 (bG2 / bGamma3, which S21m pins far from P_l's values) and S21m's amplitude dependence (ln A_s), not the first-layer
 reach.
+
+#### Shared bG2 / bGamma3 are not the cause either (2026-10-21)
+
+Baseline with AP (all of S21m, ap3_v5, V = 60, n_s free), profiles; shifts from the truth in profile sigma:
+
+| variant | omega_cdm | ln A_s | n_s | h | chi2 / dof |
+|---|---|---|---|---|---|
+| shared biases (the chain's model; chain mean) | 0.1164 (-1.40) | 3.126 (+1.19) | 0.998 (+1.56) | 0.6705 (-0.17) | 58.7 / 188 |
+| S21m with its own bG2_s21, bGamma3_s21 (same priors; P_l and X keep bG2, bGamma3) | 0.1163 (-1.4) | 3.137 (+1.4) | 0.998 (+1.6) | 0.6703 (-0.2) | 60.9 / 186 |
+| bG2 = -0.271, bGamma3 = 0.520 fixed (coevolution at b1 = 1.95) | 0.1150 (-2.0) | 3.119 (+1.1) | 0.993 (+1.7) | 0.6701 (-0.3) | 67.8 / 190 |
+
+Splitting the biases changes nothing: S21m alone fits bG2_s21 = -0.43 +- 0.07 and leaves bGamma3_s21 free (0.11 +- 0.99),
+while P_l + X fit bG2 = -0.42 +- 0.07, bGamma3 = 1.00 +- 0.18. So the two sides agree on bG2, and bGamma3 is set by
+P_l + X, not S21m (correcting the previous subsection: the P_l + S21m truth fit's bGamma3 = 1.05 came from P_l, not S21m).
+Coevolution values make it worse. The cosmology pull of S21m with AP is not routed through the shared second- and
+third-order biases. Remaining suspects: S21m's amplitude dependence (ln A_s, the most persistent shift) and its
+coupling to h / omega_cdm through AP of P_l (the bias appears only when P_l carries AP); profile scripts in this
+session's scratchpad (split_bias.py patches S21mTheory to own bG2 / bGamma3).
