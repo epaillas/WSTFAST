@@ -198,7 +198,8 @@ def main():
     residual = np.asarray(likelihood.flatdata) - np.asarray(likelihood.flattheory)
     chi2 = chi_squared(residual, covariance)
     ndata, meta = fit["ndata"], problem["meta"]
-    options_out = {key: (str(value) if isinstance(value, Path) else list(value) if isinstance(value, tuple) else value)
+    options_out = {key: (str(value) if isinstance(value, Path) else
+                         [str(v) if isinstance(v, Path) else v for v in value] if isinstance(value, tuple) else value)
                    for key, value in dataclasses.asdict(options).items() if key != "layer2_config"}
     summary = dict(options_out, bestfit=best, chi2=chi2, ndata=ndata, nvaried=len(varied),
                    nrealizations=fit["nreal"], labels=fit["labels"], model=problem["spec"].to_dict(),
