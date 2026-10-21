@@ -665,6 +665,14 @@ def run_measure(args, geometries, setups, pk):
                     wx = spectra.window(WINDOW_EDGES)
                     np.savez(window_path, pk=np.asarray(power["window"].value()), x=np.asarray(wx.value()),
                              edgesin=WINDOW_EDGES, k=power["k"], kx=spectra.k, ells=(0, 2, 4))
+                    del wx
+                del spectra, power  # release jaxpower's device buffers before the next WST
+                import gc
+
+                import jax
+
+                gc.collect()
+                jax.clear_caches()
             metadata = dict(redshift=float(np.mean(args.zrange)), zrange=list(args.zrange), boxsize=g.boxsize,
                             nmesh=g.nmesh, space=cap, nparticles=int(len(positions)), shotnoise=shotnoise,
                             tracer="LRG_complete", mock=mock, nrandoms=int(len(rpositions)), cap=cap,
