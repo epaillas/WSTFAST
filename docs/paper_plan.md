@@ -1108,3 +1108,23 @@ Coevolution values make it worse. The cosmology pull of S21m with AP is not rout
 third-order biases. Remaining suspects: S21m's amplitude dependence (ln A_s, the most persistent shift) and its
 coupling to h / omega_cdm through AP of P_l (the bias appears only when P_l carries AP); profile scripts in this
 session's scratchpad (split_bias.py patches S21mTheory to own bG2 / bGamma3).
+
+#### The AP bias lives on the ln A_s - n_s - omega_cdm ridge (2026-10-21)
+
+Baseline with AP (ap3_v5, V = 60), profiles with one parameter fixed at the truth (shifts in profile sigma):
+
+| variant | omega_cdm | ln A_s | n_s | h | chi2 / dof |
+|---|---|---|---|---|---|
+| all four free (chain mean; profile chi2 ~ 58.7) | 0.1164 (-1.40) | 3.126 (+1.19) | 0.998 (+1.56) | 0.6705 (-0.17) | 58.7 / 188 |
+| ln A_s fixed | 0.1199 +- 0.0019 (-0.5) | - | 0.975 +- 0.015 (+0.85) | 0.6728 +- 0.0031 (+0.55) | 62.6 / 189 |
+| n_s fixed | 0.1205 +- 0.0018 (-0.2) | 3.072 +- 0.035 (+0.3) | - | 0.6729 +- 0.0032 (+0.55) | 63.2 / 189 |
+| ln A_s fixed, no AP | 0.1211 +- 0.0020 (+0.1) | - | 0.969 +- 0.015 (+0.45) | 0.6719 +- 0.0030 (+0.3) | 63.5 / 189 |
+| P_l alone, AP, ln A_s fixed | 0.1222 +- 0.0022 (+0.6) | - | 0.945 +- 0.017 (-1.0) | 0.6725 +- 0.0033 (+0.4) | 19.8 / 33 |
+
+Fixing either ln A_s or n_s removes most of the bias (omega_cdm within 0.5 sigma of the truth): the shift is a slide along
+one direction, ln A_s up / n_s up / omega_cdm down, which the four-parameter fit takes for Delta chi2 ~ 4 (62.6 or 63.2 ->
+58.7). The data, through S21m, prefer that direction at about 2 sigma: S21m's dependence on amplitude and tilt (which
+the ridge trades against each other at S21m's scales) is slightly off, at the level the tree-level amplitude dependence
+already failed elsewhere (sigma = 12.5 bands, halo E(q)). AP makes it visible because P_l's own pull along the ridge
+(opposite sign) goes away. Next: compare d S21m / d ln A_s, d n_s, d omega_m with the Quijote derivative boxes block by
+block (sigma1 = 17.7, 25), which tests the amplitude dependence directly.
