@@ -55,6 +55,9 @@ def parse_args(argv=None):
                              "per-scale l cut: 0.2 keeps sigma = 12.5 at l <= 2 and sigma >= 17.7 at l <= 6)")
     parser.add_argument("--s21-min-scale", type=float, default=defaults.s21_min_scale,
                         help="smallest sigma_j1 [Mpc/h] of S21m")
+    parser.add_argument("--s21-kmax", type=float, default=defaults.s21_kmax,
+                        help="keep the S21m coefficients whose first-layer field has its 84th-percentile wavenumber "
+                             "below this [h/Mpc] (a per-scale l cut of the first layer: 0.15 drops sigma1 = 17.7 at l = 4)")
     parser.add_argument("--s21-min-scale2", type=float, default=defaults.s21_min_scale2,
                         help="smallest sigma_j2 [Mpc/h] of S21m")
     parser.add_argument("--s21-min-ratio", type=float, default=defaults.s21_min_ratio,

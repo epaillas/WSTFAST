@@ -1067,3 +1067,26 @@ Profiles (ap3_v5, V = 60, n_s free; best fit omega_cdm / ln A_s / n_s / h; P_l +
 - Not changed: no fix applied, no chain rerun (the AP polynomial is not at fault). Options: cut S21m to sigma1 = 25
   (-0.6 sigma with AP; costs part of the gain), or a k84 cut of the sigma1 = 17.7 first-layer fields as for the bands,
   or one-loop S21m at 17.7.
+
+#### A k84 cut of the S21m first layer does not remove the AP bias (2026-10-21)
+
+New option `fit.py --s21-kmax` (`FitOptions.s21_kmax`): keep the S21m coefficients whose first-layer field (sigma_j1, l)
+has `band_k84` below the cut. The sigma1 = 17.7 fields reach k84 = 0.113 / 0.130 / 0.145 / 0.158 (l = 1-4), sigma1 = 25
+<= 0.111, so the band cut (0.18) would drop nothing; tested tighter ones. Baseline with AP (P_l + S21m + X, ap3_v5,
+V = 60, n_s free), profile best fits and shifts from the truth (sigma = profile errors):
+
+| S21m kept | omega_cdm | ln A_s | n_s | h | chi2 / dof |
+|---|---|---|---|---|---|
+| all (chain mean) | 0.1164 (-1.40) | 3.126 (+1.19) | 0.998 (+1.56) | 0.6705 (-0.17) | 58.7 / 188 |
+| k84 <= 0.15 (drops 17.7 l = 4) | 0.1161 (-1.45) | 3.139 (+1.4) | 0.999 (+1.6) | 0.6700 (-0.3) | 57.4 / 168 |
+| k84 <= 0.14 (drops 17.7 l = 3, 4) | 0.1172 (-1.1) | 3.131 (+1.3) | 0.993 (+1.3) | 0.6708 (-0.1) | 53.1 / 156 |
+| k84 <= 0.12 (17.7 l = 1 only) | 0.1180 (-0.8) | 3.129 (+1.2) | 0.988 (+1.0) | 0.6714 (+0.1) | 48.8 / 150 |
+| sigma1 = 25 only | 0.1178 (-0.85) | 3.131 (+1.25) | 0.989 (+1.1) | 0.6712 (0.0) | 48.8 / 149 |
+| k84 <= 0.14, no AP | 0.1209 (0.0) | 3.084 (+0.4) | 0.971 (+0.3) | 0.6716 (+0.1) | 54.8 / 156 |
+
+The bias shrinks with the cut but does not go away: ln A_s stays at +1.2 sigma and n_s at +1 sigma even with a single
+sigma1 = 17.7 multipole, or with no sigma1 = 17.7 at all (profile shifts run ~0.3 sigma above chain means: P_l AP
+ln A_s +0.8 profile, +0.52 chain). Without AP the same cut is unbiased. No AP chain run (none of the cuts is
+unbiased). The pull is S21m's at every scale tested once P_l carries AP; the next suspects are the shared nuisances
+(bG2 / bGamma3, which S21m pins far from P_l's values) and S21m's amplitude dependence (ln A_s), not the first-layer
+reach.

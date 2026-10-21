@@ -451,6 +451,9 @@ class FitOptions:
     #: at l <= 2 and sigma >= 17.7 at l <= 6 (the q = 2 bands matched to P_l to k = 0.2).
     s1_kmax: float | None = None
     s21_min_scale: float = 17.6
+    #: Keep only the S21m coefficients whose first-layer field (sigma_j1, l) has its 84th-percentile wavenumber
+    #: (``band_k84``) below this [h/Mpc]: the S21m analogue of ``s1_kmax``.
+    s21_kmax: float | None = None
     s21_min_scale2: float = 70.0
     s21_min_ratio: float = 2.8
     band_min_scale: float = 12.5
@@ -845,6 +848,10 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         coefficients = [c for c in select_coefficients(config, s21_min_scale=options.s21_min_scale,
                                                        s21_min_ratio=options.s21_min_ratio,
                                                        s21_min_scale2=options.s21_min_scale2) if c.kind == "S21"]
+        if options.s21_kmax is not None:
+            coefficients = [c for c in coefficients if band_k84(config, Coefficient("S1", c.ell, c.j)) <= options.s21_kmax]
+            if not coefficients:
+                raise SystemExit("no S21m coefficient passes --s21-kmax")
         emulated21 = [c for c in select_coefficients(config, s21_min_scale=0.0, s21_min_ratio=0.0)
                       if c.kind == "S21" and c.label in settings.get("s21_coefficients", [])]
         emulated21.sort(key=lambda c: settings["s21_coefficients"].index(c.label))
