@@ -1038,3 +1038,32 @@ sigma), and its AP pushes about one sigma further along the omega_cdm - ln A_s -
 Open: whether that is the AP polynomial of the S21m layers (ap_order 3 in ln q, only tested on nodes) or the AP model
 of S21m itself; next check: exact (unexpanded) S21m AP vs the ap3 polynomial at the AP chain's best-fit q, block by block
 (sigma1 = 17.7 vs 25).
+
+#### The baseline AP bias is not the S21m AP polynomial, nor the S21m AP model (2026-10-21)
+
+Profiles (ap3_v5, V = 60, n_s free; best fit omega_cdm / ln A_s / n_s / h; P_l + S21m with AP: 0.1151 / 3.163 / 1.000
+/ 0.6692, chi2 40.3):
+
+- **Polynomial vs exact AP.** The theory at the AP chain's best fit (ln q_par = 0.0067, ln q_perp = 0.0034) with every
+  AP piece exact (exact CLASS basis, APNodes forced to a single node at x*, where the least-squares fit is exact):
+  per block max |Delta| / sigma <= 0.019 (S21m sigma1 = 25, l = 4), 0.012 (P_l), 0 (X); whitened |Delta|^2 = 0.007;
+  chi2 58.67 vs 58.71. The AP effect itself at that point is |Delta|^2 = 228. The order-3 polynomial is exact here.
+- **AP of S21m switched off piece by piece** (P_l keeps its AP): cumulants (Edgeworth) 0.1151 / 3.163 / 1.000; first-
+  layer linear blocks 0.1151 / 3.163 / 1.000; second-layer S21 terms 0.1159 / 3.150 / 0.995; only the lambda_2 volume
+  factor 0.1156 / 3.153 / 0.996; all of S21m's AP 0.1159 / 3.150 / 0.995. The S21m AP model moves omega_cdm by <= 0.25
+  sigma: the bias is there without it.
+- The question "exact AP at the truth vs no AP" is empty on these boxes: the fiducial is the truth, q = 1 there, and
+  AP changes only the derivatives of the model.
+- **What it is.** S21m without AP already pulls omega_cdm low (P_l + S21m no AP: 0.1182, -0.8 sigma), while P_l alone
+  without AP is biased the other way (+0.66 sigma omega_cdm, -0.96 n_s): the no-AP baseline was unbiased by
+  cancellation. AP removes P_l's own pull (P_l AP 0.1194 / 3.109 / 0.962 / 0.6706) and exposes S21m's. By scale:
+  S21m at sigma1 = 25 only, AP: 0.1186 / 3.131 / 0.980 (-0.6 sigma; no AP 0.1220): the pull comes mostly from sigma1 =
+  17.7. Delta chi2 (truth - best fit, nuisances re-profiled) = 4.3, spread: P_2 +2.8, S21m +1.7 (sigma1 17.7 l = 2 +1.1,
+  l = 3 -2.4, l = 4 +1.8; sigma1 25 l = 4 +1.6). At the truth P_l alone wants bG2 = 0.07 +- 0.28, bGamma3 = -0.34 +-
+  0.74 and P_l + S21m bG2 = -0.46, bGamma3 = 1.05; fixing them: P_l AP at S21m's values 0.1189 (-0.5 sigma: part of
+  it), P_l + S21m AP at P_l's values 0.1123, chi2 74.8 (S21m insists). So S21m at sigma1 = 17.7 prefers low omega_cdm /
+  high n_s at its own biases: a model bias of the 17.7 Mpc/h S21m, not of AP (cf. the q = 2 bands, biased from k84 ~ 0.2:
+  the 17.7 first-layer fields reach those scales).
+- Not changed: no fix applied, no chain rerun (the AP polynomial is not at fault). Options: cut S21m to sigma1 = 25
+  (-0.6 sigma with AP; costs part of the gain), or a k84 cut of the sigma1 = 17.7 first-layer fields as for the bands,
+  or one-loop S21m at 17.7.
