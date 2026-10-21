@@ -1179,3 +1179,35 @@ S21m acts through the nuisances it fixes for P_l. The shared ones that move most
 the truth are bG2 (+0.07 +- 0.28 -> -0.42; X and S21m agree on it) and, through the P_l bG2 - bGamma3 degeneracy, bGamma3
 (-0.34 -> +1.0), plus b2 (-0.46 -> -0.66); splitting bG2 / bGamma3 (previous subsection) does not remove the bias, so
 the question becomes which P_l nuisances, at the values the WST demands, put P_l's residual on the ridge.
+
+### Full-WST halo vector: q = 2 bands in place of P_l (2026-10-21, stage A)
+
+Plan: `~/.claude/plans/can-we-try-a-refactored-grove.md`. With ap3_v5 (no sigma = 12.5 or l >= 5 cumulants) the bands are
+sigma >= 17.7, l <= 4 (k84 <= 0.158, near the "0.15" rung of the reach ladder; 75 m-resolved entries, 47 principal
+components after the 1e-4 cut). Profiles, n_s free, V = 60, runs `outputs/inference/rsd/q2/{wstA,wstAnoX,wstA25,
+wstAnoX25,pk015}_{ap,noap}_V60` (the v5 cumulant correction cache was built on the way). Profile best fits minus the truth
+(the Minuit errors of the band fits are not usable, e.g. sigma(omega_cdm) = 0.0007; for scale, the v5 baseline chain
+widths are 0.0034 / 0.055 / 0.023 / 0.0043):
+
+| vector | AP | Delta omega_cdm | Delta ln A_s | Delta n_s | Delta h | chi2 / ndata |
+|---|---|---|---|---|---|---|
+| bands + S21m(17.7, 25) + X | yes | -0.0042 | +0.066 | +0.026 | -0.0038 | 48.4 / 235 |
+| bands + S21m(17.7, 25) + X | no | -0.0021 | +0.033 | +0.010 | -0.0046 | |
+| bands + S21m(17.7, 25) | yes | -0.0062 | +0.107 | +0.032 | -0.0053 | 22.4 / 155 |
+| bands + S21m(17.7, 25) | no | -0.0047 | +0.083 | +0.021 | -0.0073 | 24.1 / 155 |
+| bands + S21m(25) + X | yes | -0.0033 | +0.061 | +0.022 | -0.0034 | 34.5 / 181 |
+| bands + S21m(25) + X | no | +0.0033 | -0.015 | -0.022 | +0.0010 | 32.3 / 181 |
+| bands + S21m(25) | yes | -0.0025 | +0.069 | +0.009 | -0.0038 | 10.8 / 101 |
+| bands + S21m(25) | no | -0.0009 | +0.046 | -0.001 | -0.0033 | 10.7 / 101 |
+| P_l to 0.15 | yes | -0.0015 | +0.041 | 0.000 | -0.0017 | 3.2 / 36 |
+| P_l to 0.15 | no | -0.0004 | +0.025 | -0.008 | -0.0012 | 3.1 / 36 |
+| (v5 baseline P_l to 0.2 + S21m + X, AP, chain mean) | yes | -0.0045 | +0.065 | +0.035 | -0.0006 | 58.7 / 236 |
+
+Replacing P_l by the bands does not remove the AP bias: with AP every WST vector slides along the same ridge (omega_cdm
+-0.0025 to -0.006, ln A_s +0.06 to +0.11, n_s up), about 1 to 2 v5 sigma, as the P_l baseline did; the sigma1 = 17.7 S21m
+makes it worse (bands + S21m: -0.0062 / +0.107 with it, -0.0025 / +0.069 without), and X pulls back toward the truth.
+Without AP the vectors are biased too, but less, and not consistently in sign (bands + S21m(25) + X: +0.0033 / -0.015).
+So the P_l / WST nuisance tension was not the cause: the bands, which share the first-layer model with S21m, show the
+same AP direction. No chain run (none within ~0.5 sigma). Stage B (the union emulator, bands to k84 = 0.18 with sigma =
+12.5) is pending on Perlmutter; given that the AP direction is common to every WST block, it is not expected to change
+the conclusion, and is the user's call.
