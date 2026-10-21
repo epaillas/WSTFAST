@@ -990,3 +990,51 @@ Reading: the n_s-free gain saturated at ~2200 boxes; the n_s-fixed one kept grow
 covariance noise, the gain being small against P_l's own marginal). At the full set the covariance noise is no longer
 a factor (Percival 1.5% of sigma). The validated P(k) + WST complement is worth 8-10% with n_s fixed and 14-23% with
 n_s free, at V = 60, and it removes P_l's ~1 sigma parameter pulls.
+
+### AP for the modulus cross-spectra X, and AP chains of P_l and the baseline (2026-10-21)
+
+**Model (da5f418).** `ModulusCrossRSD.spectra(ap=(q_par, q_perp))`: the p integral runs over true wavevectors, the
+filters and harmonics of every leg at the observed ones (true x (q_perp, q_perp, q_par)), the spectra and the shot
+noise (N q_par q_perp^2) true, the long mode at the true k' of the observed (k, mu), the multipole weights on the
+observed mu, and X = r Z1(k') P_L(k') / (q_par q_perp^2) (Sec. haloap). `response_taylor(ap_omega_b=)` puts AP inside
+every evaluation, so the quadratic Taylor table in (omega_cdm, h) carries it; `fit.py --stats pud --ap` works on boxes
+(the survey window branch still refuses --ap). Checks: q = 1 reproduces the old response exactly; an isotropic dilation
+matches X_obs(k; sigma) = X_true(k / a; sigma a) / a^3 to 1e-5; an independent observed-frame quadrature agrees to
+5e-6 at q != 1 and in d X / d ln q_par, d ln q_perp to 5e-5 (d ln X0 / d ln q ~ -1.3 and -1.8 at k = 0.016); Taylor
+table vs direct evaluation: dchi2 <= 0.03 to 4 sigma in omega_cdm or h (0.19 at a 2-sigma corner in five parameters),
+as accurate as the no-AP table.
+
+**Emulator.** `outputs/emulators/rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_v5.{h5,json,validation.json}`: S1 at
+sigma >= 17.6 (l <= 4), S21 at sigma1 = 17.7 and 25 (the v5 baseline; ap3_base and ap3_bands12 only have sigma1 = 25),
+AP order 3, 369 nodes; Perlmutter CPU node, 48 ranks (OOM in the last round again), resumed with 32 ranks, which this
+time also fitted and validated (EXIT 0; scripts in `$SCRATCH/wstfast_v5`). Validation max rel. error: S21m 2.5e-4,
+P_l 0.6%. Without --ap it reproduces the no-AP baseline best fit exactly.
+
+**Chains** (n_s free, V = 60, 5000 boxes, NUTS, R - 1 < 0.03, ESS >= 356): `pud/pns_ap_chain_n5000_V60`,
+`pud/sx05mns_ap_chain_n5000_V60`; plots `outputs/plots/triangle_pk_ap_n5000_V60.png`,
+`outputs/plots/triangle_pk_s21_pud_ap_n5000_V60.png`. Mean +- sigma (shift from the truth in sigma):
+
+| run | omega_cdm | ln A_s | n_s | h | chi2 |
+|---|---|---|---|---|---|
+| P_l, no AP | 0.1239 +- 0.0045 (+0.66) | 3.052 +- 0.061 (-0.16) | 0.935 +- 0.028 (-0.96) | 0.6741 +- 0.0055 (+0.55) | 17.1 |
+| P_l, AP | 0.1204 +- 0.0040 (-0.12) | 3.092 +- 0.060 (+0.52) | 0.956 +- 0.027 (-0.23) | 0.6713 +- 0.0040 (+0.05) | 17.0 |
+| baseline, no AP | 0.1203 +- 0.0034 (-0.19) | 3.072 +- 0.053 (+0.21) | 0.974 +- 0.023 (+0.53) | 0.6709 +- 0.0043 (-0.05) | 61.5 |
+| baseline, AP | 0.1164 +- 0.0032 (**-1.40**) | 3.126 +- 0.055 (**+1.19**) | 0.998 +- 0.023 (**+1.56**) | 0.6705 +- 0.0036 (-0.17) | 58.7 |
+
+AP tightens P_l (h -27%, omega_cdm -11%) and removes its ~1 sigma pulls. With AP the baseline gains -20 / -9 / -18 /
+-10% over P_l (omega_cdm / ln A_s / n_s / h), but it is biased.
+
+**Which block (profiles, ap3_v5, V = 60).** Best fits omega_cdm / ln A_s / n_s / h:
+
+| data | no AP | AP |
+|---|---|---|
+| P_l | (chain above) | 0.1194 / 3.109 / 0.962 / 0.6706 |
+| P_l + X | 0.1232 / 3.066 / 0.953 / 0.6743 | 0.1192 / 3.113 / 0.976 / 0.6719 |
+| P_l + S21m(17.7, 25) | 0.1182 / 3.118 / 0.981 / 0.6686 | **0.1151 / 3.163 / 1.000 / 0.6692** |
+| baseline | 0.1196 / 3.090 / 0.978 / 0.6702 | (chain above) |
+
+With AP, X sits on P_l; the bias comes from S21m with AP. S21m already pulls omega_cdm low without AP (0.1182, -0.8
+sigma), and its AP pushes about one sigma further along the omega_cdm - ln A_s - n_s degeneracy (chi2 43.1 -> 40.3).
+Open: whether that is the AP polynomial of the S21m layers (ap_order 3 in ln q, only tested on nodes) or the AP model
+of S21m itself; next check: exact (unexpanded) S21m AP vs the ap3 polynomial at the AP chain's best-fit q, block by block
+(sigma1 = 17.7 vs 25).
