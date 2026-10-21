@@ -1128,3 +1128,29 @@ the ridge trades against each other at S21m's scales) is slightly off, at the le
 already failed elsewhere (sigma = 12.5 bands, halo E(q)). AP makes it visible because P_l's own pull along the ridge
 (opposite sign) goes away. Next: compare d S21m / d ln A_s, d n_s, d omega_m with the Quijote derivative boxes block by
 block (sigma1 = 17.7, 25), which tests the amplitude dependence directly.
+
+#### Derivative boxes: S21m's amplitude and omega_m response is right; its offset sits on the ridge (2026-10-21)
+
+Local Quijote derivative sets (halos, same measurement, 200 boxes each, seeds 0-199 shared by + and -): s8_p / s8_m
+(sigma8 0.849 / 0.819: ln A_s 3.0963 / 3.0243) and Om_p / Om_m (Omega_m 0.3275 / 0.3075 at fixed sigma8: omega_cdm
+0.12543 / 0.11642, ln A_s 3.0156 / 3.1081). Profiles of each set's mean with the fiducial covariance at V = 60
+(`--covariance-data-dir`, ap3_v5, n_s free); AP only for s8 (same geometry as the fiducial). The + minus - differences
+cancel the common seed noise:
+
+| fit | s8: Delta ln A_s (true +0.0720) | s8: Delta n_s, Delta omega_cdm (true 0) | Om: Delta omega_cdm (true +0.0090) | Om: Delta ln A_s (true -0.0925) |
+|---|---|---|---|---|
+| P_l, no AP | +0.0598 | -0.0063, +0.0009 | +0.0102 | -0.1143 |
+| P_l, AP | +0.0675 | -0.0025, +0.0003 | | |
+| P_l + S21m, no AP | +0.0609 | -0.0045, +0.0006 | +0.0097 | -0.1117 |
+| P_l + S21m, AP | +0.0670 | -0.0015, +0.0001 | | |
+| baseline, no AP | +0.0565 | -0.0052, +0.0008 | +0.0096 | -0.1037 |
+| baseline, AP | +0.0622 | -0.0020, +0.0003 | | |
+
+Every combination recovers the amplitude and omega_m steps to 80-95% / 105-125% (about 0.1-0.3 sigma of V = 60 over
+1-2 sigma steps), and adding S21m does not degrade them (P_l + S21m with AP = P_l with AP). So S21m's first derivatives
+in ln A_s and omega_cdm are right at this precision: the AP bias is not a wrong amplitude response. The absolute fits
+of the four sets (noisier: 200 shared seeds) repeat the fiducial pattern, and S21m pushes along the same ridge in every
+set: e.g. s8_p with AP, P_l -> P_l + S21m: ln A_s +0.067 -> +0.100, n_s +0.014 -> +0.039, omega_cdm -0.0038 -> -0.0063.
+Reading: S21m has an offset at the truth (a level, not a slope) that projects on the ln A_s - n_s - omega_cdm ridge; the
+n_s response is untested (no n_s derivative boxes locally; Perlmutter down until 2026-10-22). Next: the n_s boxes, and
+the S21m residual at the truth projected on the ridge direction, block by block.
