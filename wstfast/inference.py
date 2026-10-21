@@ -526,6 +526,9 @@ class FitOptions:
     #: Marginalise the per-field counterterm and constant of X analytically (Gaussian priors of widths
     #: ``pud_marg_widths``, ~10 times the largest best-fit values: effectively flat) instead of fitting them.
     pud_marg: bool = False
+    #: Expansion point of the X Taylor table: a fit summary.json whose best-fit b1, b2, bG2 (and sv_U, floored at 1) replace
+    #: RESPONSE_CENTER's (the halo values), so that the quadratic table is not extrapolated for another tracer.
+    pud_center: Path | None = None
     pud_marg_widths: tuple = (3000.0, 30000.0)
 
 
@@ -956,6 +959,11 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                 from .config import ABACUS_COSMOLOGY
 
                 center.update({n: ABACUS_COSMOLOGY[n] for n in ("omega_cdm", "logA", "h", "n_s")}, b1=2.0)
+            if getattr(options, "pud_center", None) is not None:
+                best = json.loads(Path(options.pud_center).read_text())["bestfit"]
+                center.update({n: float(best[n]) for n in ("b1", "b2", "bG2") if n in best})
+                if "sv_U" in best:
+                    center["sv"] = max(float(best["sv_U"]), 1.0)
             table = response_taylor(config, fields, response.k, shot, settings["z"], center=center, fiducial=fiducial,
                                     window=spectra_window["x"][rows], edgesin=spectra_window["edgesin"])
         table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields],
