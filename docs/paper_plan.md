@@ -1240,3 +1240,23 @@ the ridge (~0.1 err) but coherently over ~110 entries, and the joint fit trades 
 counterterms (c0_pk / c2_pk / c4_pk, which re-adjust along the ridge). The per-entry projection (previous subsection)
 credits P_0 / P_2 because the theory change lives there, not because P_l prefers the ridge. Remaining test: the n_s
 derivative boxes (Perlmutter), since S21m's amplitude and omega_m responses passed.
+
+### What the AP baseline must give up to be unbiased (2026-10-22)
+
+NUTS chains with AP, n_s free, V = 60, 5000 boxes, ap3_v5 (all R - 1 <= 0.03, ESS >= 335; the first P_l + X run had a
+stuck chain, kept as `pud/px05mns_ap_chain_n5000_V60_stuck`, rerun with --seed 7). Mean +- sigma (shift from the truth;
+change of sigma against P_l with AP); plot `outputs/plots/triangle_ap_cuts_n5000_V60.png`:
+
+| vector | omega_cdm | ln A_s | n_s | h | chi2 / ndata |
+|---|---|---|---|---|---|
+| P_l (`pns_ap`) | 0.1204 +- 0.0040 (-0.12) | 3.092 +- 0.060 (+0.52) | 0.956 +- 0.027 (-0.23) | 0.6713 +- 0.0040 (+0.05) | 17.0 / 48 |
+| P_l + X (`px05mns_ap`) | 0.1202 +- 0.0039 (-0.20; -4%) | 3.095 +- 0.056 (+0.60; -7%) | 0.970 +- 0.025 (+0.31; -10%) | 0.6726 +- 0.0040 (+0.37; 0%) | 37.2 / 128 |
+| P_l + S21m(25) + X (`sx05mns25_ap`) | 0.1199 +- 0.0040 (-0.26; -1%) | 3.102 +- 0.057 (+0.72; -5%) | 0.976 +- 0.026 (+0.51; -6%) | 0.6727 +- 0.0040 (+0.41; +1%) | 46.9 / 182 |
+| P_l + S21m(17.7, 25) + X (`sx05mns_ap`) | 0.1164 +- 0.0032 (-1.40; -20%) | 3.126 +- 0.055 (+1.19; -9%) | 0.998 +- 0.023 (+1.56; -17%) | 0.6705 +- 0.0036 (-0.17; -10%) | 58.7 / 236 |
+
+Answer: with AP, the gain over P_l and the bias come from the same block. Dropping S21m at sigma1 = 17.7 makes the vector
+unbiased (all shifts <= 0.72 sigma, at the level of P_l alone, whose ln A_s is already +0.52), but it then gains only
+1-6% (with X alone 0-10%): the sigma1 = 25 S21m adds nothing once AP is on. Intermediate cuts of the 17.7 block (k84 <=
+0.12-0.15, profiles above) stay biased by ~0.8-1.4 sigma in omega_cdm. There is no cheap sacrifice: the cheapest unbiased
+AP vector is P_l + X (-4 / -7 / -10 / 0%), and every configuration that keeps the 17-23% gain keeps the ~1.5 sigma bias.
+Without AP the full baseline is unbiased with -23 / -14 / -21 / -20% (by the cancellation of the S21m and P_l pulls).
