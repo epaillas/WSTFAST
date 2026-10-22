@@ -1260,3 +1260,50 @@ unbiased (all shifts <= 0.72 sigma, at the level of P_l alone, whose ln A_s is a
 0.12-0.15, profiles above) stay biased by ~0.8-1.4 sigma in omega_cdm. There is no cheap sacrifice: the cheapest unbiased
 AP vector is P_l + X (-4 / -7 / -10 / 0%), and every configuration that keeps the 17-23% gain keeps the ~1.5 sigma bias.
 Without AP the full baseline is unbiased with -23 / -14 / -21 / -20% (by the cancellation of the S21m and P_l pulls).
+
+### Diagnosis of the AP baseline bias: the short-mode spectrum inside S21m (2026-10-22)
+
+Scratch patches of `S21mTheory` (this session's scratchpad: `s21_pieces.py`, `decouple.py`, `shortmode_check.py`),
+profiles of the AP baseline (P_l + S21m(17.7, 25) + X, ap3_v5, n_s free, V = 60); best fit omega_cdm / ln A_s / n_s / h,
+reference (chain mean) 0.1164 / 3.126 / 0.998 / 0.6705, truth 0.1209 / 3.061 / 0.962 / 0.6711:
+
+| S21m variant | omega_cdm | ln A_s | n_s | h | note |
+|---|---|---|---|---|---|
+| free response amplitude (1 + A_j) per scale | 0.1161 | 3.138 | 0.999 | 0.6702 | A_j5 = 0.001 +- 0.031, A_j6 = 0.003 +- 0.043 |
+| Edgeworth factors off (+ A_j) | 0.1164 | 3.134 | 0.998 | 0.6704 | |
+| own FoG counterterm for sigma1 = 25 | 0.1162 | 3.133 | 1.000 | 0.6703 | dc_v = -0.18 +- 0.20 |
+| free response amplitude per field (28) | 0.1183 | 3.124 | 0.983 | 0.6712 | all A within 1 sigma of 0; chi2 58.7 -> 43.9 |
+| own b1, b2 | 0.1164 | 3.135 | 0.997 | 0.6702 | b1_s21 = 1.85 +- 0.13 |
+| own bG2 | 0.1162 | 3.138 | 0.999 | 0.6703 | |
+| own alpha0 | 0.1183 | 3.116 | 0.986 | 0.6718 | alpha0_s21 = 0.15 +- 0.12 |
+| own alpha0 + bG2, or b1 + alpha0 | 0.1183 | 3.116 | 0.986 | 0.6718 | same as alpha0 alone |
+| **own b1, b2, bG2, bGamma3, alpha0, alpha2** | **0.1190** | **3.106** | **0.980** | **0.6717** | b1 1.74 +- 0.13, b2 -0.18 +- 0.24, bG2 -0.26 +- 0.10, alpha0 0.27 +- 0.15 |
+| S21m alone | 0.124 +- 0.023 | 2.99 +- 0.30 | 1.00 +- 0.18 | 0.7311 (bound) | chi2 7 / 64: no cosmology of its own |
+
+The response amplitude of S21m is right to 3% overall and per field; the Edgeworth factors and the FoG split do nothing.
+The bias is mediated by the nuisances S21m shares with P_l and X: with its own copies it drops to the P_l + X level
+(-0.5 / +0.8 / +0.7 / +0.15 sigma), and the decoupled S21m asks for a lower b1 and 15-27% more shot noise; alpha0 alone
+carries two thirds of it. The profile widths of the decoupled variants (0.0038 / 0.057 / 0.025 / 0.0039) are those of
+P_l + X: the sigma1 = 17.7 gain over P_l with AP ran through alpha0 (and b1), i.e. S21m was pinning the stochastic
+amplitude of P_l, at a biased value.
+
+**Why.** S21m's short modes (p ~ 0.05-0.3 h/Mpc at sigma1 = 17.7) carry the tree halo spectrum P_L Z1^2 (1 - c_v k_z^2 /
+k_NL^2)^2 + N (1 + alpha0), while P_l uses the one-loop P_s with c0, c2, c4 and alpha2 k^2 mu^2. At the AP chain's
+best fit (b1 1.92, alpha0 0.10, alpha2 -13, c_v 1.24) the two differ by -1 to +2% at p = 0.05 but by +15% / +24% (mu =
+0.85 / 1) at p = 0.1, +42% / +73% at 0.15 and +75% / +142% at 0.2 (`shortmode_check.py`): the per-leg counterterm is
+(1 - 0.55)^2 = 0.2 at p = 0.2 along the line of sight, far outside its regime, and S21m has no alpha2 (-26% of N there).
+Fitting the S21m form to the one-loop P_s under the sigma1 = 17.7 filter weights gives b1_eff 1.85, alpha0_eff +0.23,
+c_v_eff ~ 0 (rms 1.3%; with c_v held at 1.24: b1 1.77, alpha0 +0.84, rms 11%) -- the b1 down / alpha0 up that the
+decoupled S21m asked for. So the tree + c_v + Poisson short-mode model of S21m is inconsistent with the one-loop P_s of
+the same fit at the sigma1 = 17.7 scales; S21m is insensitive to the amplitude of that spectrum but not to its shape
+(P_L Z1^2 against N across p and mu_p), and resolves the inconsistency through b1 and alpha0. Without AP the resulting
+cosmology pull cancelled against P_l's own; with AP it does not.
+
+**Fix (not done).** Use the one-loop P_s(p, mu) of the P_l model (counterterms, alpha0, alpha2 included) as the short-mode
+spectrum of the modulus response and noise in `second_layer.ModulusSpectra` (the response-function approximation of the
+squeezed bispectrum, B ~ R P_L(K) P_nl(p)), in place of P_L Z1^2 with the c_v legs; the norms likewise. The P_s grid of
+the basis already covers p <= 0.3 (the sigma1 = 17.7 filters are e^-28 there). It changes the S21m basis columns (the
+biases enter through P_s, quadratic in beta, plus the counterterm and stochastic rows) and needs a new emulator; the X
+response (`covariance_rsd.ModulusCrossRSD`) has the same short-mode model but survives through its marginalised cU / eU
+(eU at sigma = 17.7 is 14-23 sigma from zero, of order N -- the same mismatch). Until then the sigma1 = 17.7 S21m cannot
+be used with shared b1 / alpha0: the AP options are P_l + X (unbiased, -4 / -7 / -10 / 0%) or the decoupled S21m (no gain).
