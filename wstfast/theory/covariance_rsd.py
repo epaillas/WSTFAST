@@ -31,15 +31,85 @@ import numpy as np
 
 from .bias import galaxy_kernel
 from .covariance import HalfLattice, chaos_covariances, components
-from .bias import linear_components
+from .bias import linear_components, monomials
 from .first_layer import spherical_harmonic
-from .second_layer import ModulusSpectra
+from .second_layer import LoopModulusSpectra
 
 
-class ModulusCrossRSD(ModulusSpectra):
+class ModulusCrossRSD(LoopModulusSpectra):
     """Response r_a and Gaussian-chaos cross noise g_ab of every pair of first-layer fields of a biased, discrete
     tracer at fixed biases, on the (K, mu_K) grid: the fixed-beta, cross-field version of second_layer.ModulusSpectra
-    (whose auto terms it reproduces: r_a^2 P_L(K) and g_aa)."""
+    (whose auto terms it reproduces: r_a^2 P_L(K) and g_aa); ``loop_spectra`` the same for the one-loop short modes of
+    ``second_layer.LoopModulusSpectra`` (needs the P_s ``grid``)."""
+
+    def loop_spectra(self, rows, pk, f: float, beta, counterterms, shotnoise: float, alpha0: float = 0.0,
+                     alpha2: float = 0.0, ap=None):
+        """As ``spectra``, with the one-loop short-mode spectrum of the P_s grid ``rows`` (``layout.GRID_TERMS``) at
+        the bias vector ``beta``, the counterterms (c0, c2, c4) and the stochastic terms of the shot noise N =
+        ``shotnoise``: P_s = tree + loop - 2 (c0 + c2 mu^2 + c4 mu^4) p^2 P_L + N (1 + alpha0) + N alpha2 p^2 mu^2; the
+        loop and counterterm pieces respond through the tree response function at ``reference_b1`` and the stochastic
+        ones as the Poisson term (``LoopModulusSpectra``). With ``ap``, as ``spectra``."""
+        if self.grid_k is None:
+            raise ValueError("the one-loop short modes need the P_s grid (ModulusCrossRSD(grid=...))")
+        beta = np.asarray(beta, "f8")
+        beta_ref = np.array([1.0, self.reference_b1, 0.0, 0.0, 0.0])
+        stretch = np.ones(3) if ap is None else np.array([ap[1], ap[1], ap[0]], "f8")
+        N = float(shotnoise) * stretch.prod()
+        rows = np.asarray(rows, "f8")
+        m2 = np.asarray(monomials(beta, 2))
+        weights = [None, *counterterms, N * (1 + float(alpha0)), N * float(alpha2)]
+
+        def spectrum(u):  # P_s(p) of the pieces at fixed nuisances
+            return u[0] @ m2 + sum(wt * u[i][:, 0] for i, wt in enumerate(weights) if i)
+
+        p, w = self.p, self.weights
+        up, loopp, plinp = self.pieces(rows, self._interp_p, self.pvec)
+        psp = spectrum(up)
+        z1p = linear_components(self.pvec, f)
+        pobs = np.sqrt(np.sum((self.pvec * stretch) ** 2, axis=-1))
+        harmonics = (self.harmonics if ap is None else
+                     {(ell, m): spherical_harmonic(ell, m, self.pvec * stretch) for _, ell, m in self.fields})
+        radial = {s: np.exp(-0.5 * (s * pobs) ** 2) for s, _, _ in self.fields}
+        norms, kernels = [], []
+        for s, ell, m in self.fields:
+            c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
+            rp = (s * pobs) ** ell * radial[s]
+            norms.append(np.sum(w * rp**2 * c2w * np.abs(harmonics[ell, m]) ** 2 * psp))
+            kernels.append((-1) ** ell * c2w * rp)
+        norms = np.array(norms)
+        nf, nk, nmu = len(self.fields), self.k.size, self.mu.size
+        r = np.zeros((nf, nk, nmu))
+        g = np.zeros((nf, nf, nk, nmu))
+        for i, kk in enumerate(self.k):
+            for a, mk in enumerate(self.mu):
+                kvec = np.array([kk * np.sqrt(1 - mk**2), 0.0, kk * mk]) / stretch
+                qvec = kvec - self.pvec
+                qn = np.sqrt(np.sum(qvec**2, axis=-1))
+                qobs = qvec * stretch
+                qno = np.sqrt(np.sum(qobs**2, axis=-1))
+                uq, loopq, plinq = self.pieces(rows, self._interpolation(qn, qvec[:, 2] / np.maximum(qn, 1e-30)), qvec)
+                psq = spectrum(uq)
+                z1q = linear_components(qvec, f)
+                minus = np.broadcast_to(-kvec, qvec.shape)
+                z2q = galaxy_kernel(np.stack([qvec, minus], axis=-2), f)
+                z2p = galaxy_kernel(np.stack([minus, self.pvec], axis=-2), f)
+                r0q, r0p = 2 * (z2q @ beta_ref) / (z1q @ beta_ref), 2 * (z2p @ beta_ref) / (z1p @ beta_ref)
+                correction_q = loopq @ m2 + sum(wt * uq[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
+                correction_p = loopp @ m2 + sum(wt * up[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
+                long = (2 * (plinq * (z2q @ beta) * (z1q @ beta) + plinp * (z2p @ beta) * (z1p @ beta))
+                        + 2 * (r0q * correction_q + r0p * correction_p))
+                stochastic = 0.5 * (2 * weights[4] + weights[5] * (up[5][:, 0] + uq[5][:, 0]))  # the pair's stochastic power
+                z1k = linear_components(kvec, f) @ beta
+                pair = w * psp * psq
+                cache, kern = {}, []
+                for index, (s, ell, m) in enumerate(self.fields):
+                    if (ell, m) not in cache:
+                        cache[ell, m] = np.real(harmonics[ell, m] * np.conj(spherical_harmonic(ell, m, qobs)))
+                    kern.append(kernels[index] * (s * qno) ** ell * np.exp(-0.5 * (s * qno) ** 2) * cache[ell, m])
+                kern = np.array(kern)  # (nf, np)
+                r[:, i, a] = (kern @ (w * long) / 2 + z1k * (kern @ (w * stochastic)) / 2) / norms
+                g[:, :, i, a] = (kern * pair) @ kern.T / 2 / np.outer(norms, norms)
+        return r, g, norms
 
     def spectra(self, pk, f: float, sigma_v: float, beta, shotnoise: float, ap=None):
         """Return r (nfield, nk, nmu), g (nfield, nfield, nk, nmu) and the block normalisations n lambda (nfield,).

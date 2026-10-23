@@ -579,7 +579,8 @@ def exact_basis(settings: dict, vary):
                  space=ModelSpec.from_settings(settings).space, s21_damping=settings.get("s21_damping"),
                  cubic_biases=settings.get("cubic_biases", False), fog=settings.get("fog", False),
                  s21_lattice=tuple(settings.get("lattice", (1000.0, 256))), s21_cellsize=settings.get("s21_cellsize", 0.0),
-                 s21_projected=settings.get("s21_projected", True), ap_order=settings.get("ap_order", 0))
+                 s21_projected=settings.get("s21_projected", True), ap_order=settings.get("ap_order", 0),
+                 s21_loop=settings.get("s21_loop", False), s21_reference_b1=settings.get("s21_reference_b1", 2.0))
 
 
 def s21m_selection(options, config, settings):
@@ -887,8 +888,9 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                                s21_field_rows=[basis_fields.index(field) for field in fields])
         layer2 = (load_layer2(options, S1mProjection(config, first_layer, grid, **lattice), coefficients, first_layer, q0,
                               s21m_kwargs) if getattr(options, "s21_layer2", None) is not None else None)
+        # one-loop short modes: the counterterms of P_l when it is fitted, else the S1m ones
         theories.append(S21mTheory(S1mProjection(config, first_layer, grid, **lattice), coefficients, first_layer, q=q0,
-                                   layer2=layer2, **s21m_kwargs))
+                                   layer2=layer2, counterterms="_pk" if "pk" in options.stats else "", **s21m_kwargs))
         vectors.append(s21m.vectors)
         labels += [f"{prefix}S21m_j{coefficients[i].j}_j{coefficients[i].j2}_l{coefficients[i].ell}_m{m1}_m{m2}"
                    for i, m1, m2 in s21m_entries(coefficients)]
@@ -954,8 +956,10 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         if options.ap and window is not None:
             raise SystemExit("the survey modulus cross-spectra have no AP model yet")
         if window is None:
+            loop = (dict(ir=settings["ir"], kmax=settings["kmax"], reference_b1=settings.get("s21_reference_b1", 2.0))
+                    if spec.s21_loop else None)  # the short-mode model of S21m, shared nuisances
             table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real",
-                                    ap_omega_b=fiducial_omega_b(settings) if options.ap else None)
+                                    ap_omega_b=fiducial_omega_b(settings) if options.ap else None, loop=loop)
         else:  # survey: the tree response through the cap's cross-spectrum window, about the emulator's fiducial
             spectra_window = np.load(Path(options.data_dir) / f"spectra_window_{space}.npz")
             nk = spectra_window["kx"].size
@@ -975,7 +979,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
                                     window=spectra_window["x"][rows], edgesin=spectra_window["edgesin"])
         table.update(mask=response.mask, labels=[f"j{j}_l{ell}_m{m}" for j, ell, m in fields],
                      linear=not options.pud_marg)
-        theories.append(ResponseTheory(basis, nuisance, table))
+        theories.append(ResponseTheory(basis, nuisance, table, counterterms="_pk" if "pk" in options.stats else ""))
         if options.pud_marg:  # the columns of the linear nuisances, at their place in the data vector
             start, offset = len(labels), 0
             for mk in response.mask:
@@ -1012,8 +1016,21 @@ RESPONSE_CENTER_REAL = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm
                         "b1": 1.0, "b2": 0.0, "bG2": 0.0, "sv": 0.0}
 
 
+#: The one-loop short modes (``response_taylor(loop=)``): the biases, the counterterms of the P(k) model and its
+#: stochastic terms in place of the velocity dispersion; the centre at typical halo values (X is linear in the
+#: counterterms and stochastic terms, so their centre only sets the cross terms with the cosmology).
+RESPONSE_PARAMS_LOOP = ("omega_cdm", "logA", "h", "n_s", "b1", "b2", "bG2", "bGamma3", "c0", "c2", "c4", "alpha0",
+                        "alpha2")
+RESPONSE_CENTER_LOOP = {**{name: QUIJOTE_COSMOLOGY[name] for name in ("omega_cdm", "logA", "h", "n_s")},
+                        "b1": 1.9, "b2": -0.5, "bG2": -0.3, "bGamma3": 0.0, "c0": 5.0, "c2": 5.0, "c4": 5.0,
+                        "alpha0": 0.0, "alpha2": -10.0}
+RESPONSE_STEPS_LOOP = {**RESPONSE_STEPS, "bGamma3": 0.05, "c0": 2.0, "c2": 2.0, "c4": 2.0, "alpha0": 0.05,
+                       "alpha2": 5.0}
+
+
 def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emulators/response_taylor"), real=False,
-                    center=None, fiducial="quijote", window=None, edgesin=None, kmax_theory=0.15, ap_omega_b=None):
+                    center=None, fiducial="quijote", window=None, edgesin=None, kmax_theory=0.15, ap_omega_b=None,
+                    loop=None):
     """Second-order Taylor table of X_a = P_{U_a d} / <U_a> = (2 ell + 1) int r_a Z1 P_L L_ell (ell = 0, 2) on the
     bins ``k`` for the fields (j, l, |m|): the tree response of ``covariance_rsd.ModulusCrossRSD`` (Gaussian damping
     sigma_v of the short modes) with CLASS P_L and f, expanded about RESPONSE_CENTER (``real``: RESPONSE_CENTER_REAL,
@@ -1025,19 +1042,28 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
     window, so the table holds the observed multipoles 0 and 2 at ``k``. ``ap_omega_b``: the bins are observed with
     the Quijote fiducial (``theory.ap``) and every evaluation carries the AP distortions of its (omega_cdm, h) at this
     omega_b (``ModulusCrossRSD.spectra(ap=)``: filters and multipole weights observed, spectra true, volume factor), so
-    the table's derivatives in omega_cdm and h include AP."""
+    the table's derivatives in omega_cdm and h include AP. ``loop`` (dict(ir, kmax, reference_b1), the emulator's
+    settings): the one-loop short modes of ``ModulusCrossRSD.loop_spectra`` (the P_s grid of the P(k) model, BAO
+    resummed with ``ir``), with the counterterms c0, c2, c4 and the stochastic terms alpha0, alpha2 as parameters of the
+    table (RESPONSE_PARAMS_LOOP; no velocity dispersion) about RESPONSE_CENTER_LOOP: X is linear in them, so the
+    quadratic table is exact in them up to their cross terms with the cosmology."""
     import hashlib
 
-    centre = dict(center) if center is not None else RESPONSE_CENTER_REAL if real else RESPONSE_CENTER
+    if loop is not None and (real or window is not None):
+        raise ValueError("the one-loop short modes of X are for redshift-space boxes")
+    centre = dict(center) if center is not None else (RESPONSE_CENTER_LOOP if loop is not None
+                                                      else RESPONSE_CENTER_REAL if real else RESPONSE_CENTER)
     extra = [] if window is None else [hashlib.sha1(np.ascontiguousarray(window)).hexdigest(),
                                        list(map(float, np.ravel(edgesin))), float(kmax_theory)]
     key = hashlib.sha1(json.dumps([[config.sigma(j), l, m] for j, l, m in fields] + [list(map(float, k)),
                                    float(shotnoise), float(z), centre, RESPONSE_STEPS]
                                   + (["real"] if real else []) + ([fiducial] if fiducial != "quijote" else [])
                                   + extra + ([] if ap_omega_b is None else ["ap", float(ap_omega_b)])
+                                  + ([] if loop is None else ["loop", bool(loop["ir"]), float(loop["kmax"]),
+                                                              float(loop.get("reference_b1", 2.0)), RESPONSE_STEPS_LOOP])
                                   ).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"{key}.npz"
-    names = list(RESPONSE_PARAMS)
+    names = list(RESPONSE_PARAMS_LOOP if loop is not None else RESPONSE_PARAMS)
     center = np.array([centre[n] for n in names])
     if path.exists():
         with np.load(path) as data:
@@ -1058,7 +1084,13 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
         ktheory, ells = kin[:nin], (0, 2, 4)
         columns = np.concatenate([e * kin.size + np.arange(nin) for e in range(3)])
         wsel = np.asarray(window)[:, columns]  # (2 nk, 3 nin): the theory beyond kmax_theory is dropped
-    model = ModulusCrossRSD([(config.sigma(j), l, m) for j, l, m in fields], ktheory, mu)
+    grid = None
+    if loop is not None:
+        from .theory.spectrum import SpectrumGrid
+
+        grid = SpectrumGrid(kmax=float(loop["kmax"]), ir=bool(loop["ir"]))
+    model = ModulusCrossRSD([(config.sigma(j), l, m) for j, l, m in fields], ktheory, mu, grid=grid,
+                            reference_b1=float((loop or {}).get("reference_b1", 2.0)))
     legendre = np.array([(2 * e + 1) * eval_legendre(e, mu) * wmu for e in ells])  # (nell, nmu)
 
     def multipoles(grid):  # (..., nk, nmu) -> (..., 2 nk) at k, ell-major (through the window for a survey)
@@ -1080,25 +1112,37 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
                 cosmo = Cosmology(omega_cdm=p["omega_cdm"], omega_b=QUIJOTE_COSMOLOGY["omega_b"], h=p["h"], n_s=p["n_s"],
                                   logA=p["logA"], m_ncdm=[], N_eff=3.046, engine="class")
                 of = "delta_m"
-            cosmologies[key] = (cosmo.get_fourier().pk_interpolator(of=of).to_1d(z=z),
-                                0.0 if real else float(cosmo.growth_rate(z)))
+            pk = cosmo.get_fourier().pk_interpolator(of=of).to_1d(z=z)
+            f = 0.0 if real else float(cosmo.growth_rate(z))
+            rows = None
+            if loop is not None:  # the P_s grid rows of the one-loop short modes (as calculators.Basis)
+                klin = np.geomspace(1e-4, 10.0, 1024)
+                rows = grid(klin, pk(klin), f, h=p["h"], r_bao=float(cosmo.rs_drag))
+            cosmologies[key] = (pk, f, rows)
         return cosmologies[key]
+
+    def spectra(p, pk, f, rows, ap=None):
+        if loop is None:
+            beta = np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0])
+            return model.spectra(pk, f, p["sv"], beta, shotnoise, ap=ap)[0]
+        beta = np.array([1.0, p["b1"], p["b2"], p["bG2"], p["bGamma3"]])
+        return model.loop_spectra(rows, pk, f, beta, [p["c0"], p["c2"], p["c4"]], shotnoise, alpha0=p["alpha0"],
+                                  alpha2=p["alpha2"], ap=ap)[0]
 
     def evaluate(values):
         p = dict(zip(names, values))
-        pk, f = power(p)
-        beta = np.array([1.0, p["b1"], p["b2"], p["bG2"], 0.0])
+        pk, f, rows = power(p)
         if ap_omega_b is None:
-            r, _, _ = model.spectra(pk, f, p["sv"], beta, shotnoise)
+            r = spectra(p, pk, f, rows)
             return multipoles(r * (p["b1"] + f * mu**2)[None, None, :] * pk(ktheory)[None, :, None])
         from .theory.ap import ap_ratios, observed_to_true
 
         qpar, qperp = (float(q) for q in ap_ratios(z, p["h"], ap_omega_b, p["omega_cdm"]))
-        r, _, _ = model.spectra(pk, f, p["sv"], beta, shotnoise, ap=(qpar, qperp))
+        r = spectra(p, pk, f, rows, ap=(qpar, qperp))
         kt, mut, volume = (np.asarray(x) for x in observed_to_true(ktheory[:, None], mu[None, :], qpar, qperp))
         return multipoles(r * volume * (p["b1"] + f * mut**2)[None] * pk(kt.ravel()).reshape(kt.shape)[None])
 
-    steps = np.array([RESPONSE_STEPS[n] for n in names])
+    steps = np.array([(RESPONSE_STEPS_LOOP if loop is not None else RESPONSE_STEPS)[n] for n in names])
     x0 = evaluate(center)
     npar = len(names)
     plus, minus = {}, {}
@@ -1117,7 +1161,7 @@ def response_taylor(config, fields, k, shotnoise, z, cache_dir=Path("outputs/emu
             value = (evaluate(center + ei + ej) - evaluate(center + ei - ej) - evaluate(center - ei + ej)
                      + evaluate(center - ei - ej)) / (4 * steps[i] * steps[j])
             hess[i, j] = hess[j, i] = value
-    pk0, _ = power(dict(zip(names, center)))
+    pk0 = power(dict(zip(names, center)))[0]
     ct = multipoles((ktheory**2 * pk0(ktheory))[:, None] * np.ones_like(mu)[None, :])
     cst = multipoles(np.ones((ktheory.size, mu.size)))
     path.parent.mkdir(parents=True, exist_ok=True)

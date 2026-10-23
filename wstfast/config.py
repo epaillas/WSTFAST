@@ -87,7 +87,10 @@ class ModelSpec:
       velocity damping;
     - ``ap_order``: order of the Alcock-Paczynski polynomial of the observed-frame cumulants and S21m terms (needs
       ``fog``; 0: none, the projections still carry AP);
-    - ``cubic``: the cubic biases of the tree trispectrum (biased tracers).
+    - ``cubic``: the cubic biases of the tree trispectrum (biased tracers);
+    - ``s21_loop``: the one-loop short modes of the S21m modulus spectra (``theory.second_layer.LoopModulusSpectra``):
+      the P_s grid of the P(k) model, with its counterterms and stochastic terms, in place of the tree spectrum with
+      the Fingers-of-God legs (needs ``fog``, which then acts on the S1m cumulants only).
 
     Validated once here; an emulator stores it in its settings (``to_dict``, read back by ``from_settings``).
     """
@@ -98,6 +101,7 @@ class ModelSpec:
     fog: bool = False
     ap_order: int = 0
     cubic: bool = False
+    s21_loop: bool = False
 
     def __post_init__(self):
         if self.tracer not in ("biased", "matter"):
@@ -112,6 +116,8 @@ class ModelSpec:
             raise ValueError(f"ap_order must be in 0..{MAX_AP_ORDER}")
         if self.ap_order and not self.fog:
             raise ValueError("ap_order needs fog=True")
+        if self.s21_loop and not self.fog:
+            raise ValueError("s21_loop needs fog=True (no velocity damping of the short modes)")
 
     @classmethod
     def matter(cls, space: str = "redshift", **kwargs) -> "ModelSpec":

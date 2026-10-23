@@ -28,6 +28,11 @@ the line-of-sight-oriented fields (small |m1|) has too much power along the line
 removes that anisotropy, which the one-loop EFT spectrum does not (it also stands for the missing non-Gaussian
 noise terms). One free amplitude a per first-layer field absorbs what is left (~10%).
 
+With one-loop short modes (``LoopModulusSpectra``, ``S21mBasis(loop=True)``) the short-mode spectrum of the response,
+the noise and the norms is the one-loop redshift-space tracer spectrum of the P_s grid (``spectrum.SpectrumGrid``: tree +
+loop, the counterterms c0, c2, c4 and the stochastic terms N (1 + alpha0) + N alpha2 k^2 mu^2) in place of P_L Z1^2 D^2 +
+N, so that S21m and P_l share one short-mode model (and its nuisances); see the class.
+
 The second layer is taken Gaussian: Y = U * psi_{sigma2,l}^{M2} has n_2 = 1 or 2 components of variance
 
     lambda_2 = sum_K (mult / V) c_l^2 |Y_l|m2|(mu_K)|^2 (sigma2 K)^{2l} e^{-sigma2^2 K^2} P_UU(K) / <U>^2
@@ -57,7 +62,8 @@ from scipy.special import gammaln
 from ..config import WSTConfig
 from .bias import galaxy_kernel, linear_components, monomial_product, product_coefficients
 from .first_layer import angular_weights, spherical_harmonic, spherical_harmonics
-from .layout import FOG_KNL, S21_SIZES, s21m_assemble
+from .layout import (FOG_KNL, LOOP, S21_LOOP_PIECES, S21_LOOP_RESPONSE_PIECES, S21_SIZES, TREE, product_blocks,
+                     s21m_assemble)
 
 
 #: Effective velocity dispersion of the modulus spectra, in units of the linear sigma_v.
@@ -222,6 +228,170 @@ class ModulusSpectra:
         return grids, contract(np.array(norms))
 
 
+class LoopModulusSpectra(ModulusSpectra):
+    """``ModulusSpectra`` with the one-loop short-mode spectrum of the P_s grid: the short-mode power of every leg is
+
+        P_s(p) = sum_i w_i u_i(p),   pieces u_i (``layout.S21_LOOP_PIECES``): the degree-2 bias monomials of tree + loop
+        (the grid rows TREE and LOOP, weights the monomials of beta), the counterterm shapes -2 mu^{0, 2, 4} p^2 P_L
+        (weights c0, c2, c4), 1 (weight N (1 + alpha0)) and p^2 mu^2 (weight N alpha2),
+
+    interpolated from the grid rows (linear in ln k, Lagrange in mu^2 through the grid's Gauss nodes, as
+    ``spectrum.grid_interpolation``; clamped at the grid's kmax, where the first-layer filters of sigma >= 17.6 Mpc/h are
+    below 1e-6 of their peak), with no velocity damping and no Fingers-of-God legs (the counterterms play that role).
+
+    The response r = sum_i w_i r_i (``layout.S21_LOOP_RESPONSE_PIECES``) keeps the tree-level long-mode coupling:
+    the tree part of the beta piece responds exactly, 2 Z2(q, -K) Z1(q) P_L(q) (P_L the tree row, IR-resummed with the
+    grid; degree 2 in beta); the loop and counterterm pieces respond through the response-function approximation,
+    dP/d delta_L ~ R0(q, K) P(q) with the tree response function R0 = 2 Z2(q, -K) / Z1(q) of a *linearly* biased tracer
+    at ``reference_b1`` (a ratio, weakly dependent on b1; the b2 and bG2 responses of these next-to-leading pieces are
+    dropped): this keeps the loop part of the beta piece at degree 2 and the counterterm pieces at degree 0, so the
+    response columns stay the products of 6 pieces. The stochastic pieces respond as the Poisson term, Z1(K) times the
+    pair's stochastic power ((u_i(p) + u_i(q)) / 2; degree 1). The Gaussian-chaos noise is the product of two one-loop
+    spectra and the norms their first-layer filter integrals, both exact in the pieces. Columns (``layout.s21_loop_blocks``):
+    [R_ij (266) | G_ij (160) | n_i (20)], R_ij = (2 - delta_ij) r_i r_j P_L(K) and G_ij the symmetric products
+    u_i(p) u_j(q) (+ i <-> j) under F^2 / 2, in the order of ``layout.product_blocks``.
+    """
+
+    def __init__(self, fields, k, mu, grid=None, reference_b1: float = 2.0, **kwargs):
+        super().__init__(fields, k, mu, **kwargs)
+        #: b1 of the tree response function of the loop and counterterm pieces (see the class docstring).
+        self.reference_b1 = float(reference_b1)
+        self.set_grid(grid)
+
+    def set_grid(self, grid):
+        """The P_s grid (``spectrum.SpectrumGrid``) whose rows give the short-mode spectrum (its k and mu nodes)."""
+        if grid is None:
+            self.grid_k = None
+            return
+        self.grid_k, self.grid_mu = np.asarray(grid.k, "f8"), np.asarray(grid.mu, "f8")
+        self._interp_p = self._interpolation(self.p, self.mup)
+
+    def _interpolation(self, k, mu):
+        """(lower index, weight of the upper row, Lagrange weights in mu^2) of grid rows at points (k, |mu|)."""
+        from .spectrum import lagrange_matrix
+
+        logk = np.log(self.grid_k)
+        lk = np.clip(np.log(np.maximum(k, 1e-30)), logk[0], logk[-1])
+        i = np.clip(np.searchsorted(logk, lk) - 1, 0, logk.size - 2)
+        t = (lk - logk[i]) / (logk[i + 1] - logk[i])
+        return i, t, lagrange_matrix(self.grid_mu**2, np.abs(mu) ** 2)
+
+    @staticmethod
+    def _rows_at(rows, interp):
+        """Grid rows (nrow, nk, nmu) at the points of ``interp``: (nrow, npoint)."""
+        i, t, lagrange = interp
+        lower = np.einsum("rnm,nm->rn", rows[:, i, :], lagrange)
+        upper = np.einsum("rnm,nm->rn", rows[:, i + 1, :], lagrange)
+        return (1 - t) * lower + t * upper
+
+    def pieces(self, rows, interp, vectors):
+        """The short-mode pieces at points: ``u`` [beta (npoint, 15), c0, c2, c4, 1, k^2 mu^2 (npoint, 1) each], the loop
+        part of the beta piece (npoint, 15) and the tree P_L (npoint,) of the response's exact leg."""
+        values = self._rows_at(rows, interp)  # (18, npoint): TREE, LOOP, ct0, ct2, ct4
+        nt, nl = len(TREE), len(LOOP)
+        beta = np.zeros((values.shape[1], 15))
+        beta[:, list(TREE)] += values[:nt].T
+        loop = np.zeros_like(beta)
+        loop[:, list(LOOP)] += values[nt:nt + nl].T
+        counterterms = [-2 * values[nt + nl + m][:, None] for m in range(3)]
+        k2mu2 = (vectors[:, 2] ** 2)[:, None]
+        u = [beta + loop] + counterterms + [np.ones_like(k2mu2), k2mu2]
+        return u, loop, values[2]  # the shape-1 tree row (b1^2 monomial): the P_L of the response's exact leg
+
+    def __call__(self, rows, pk, f: float, stretches=None, fit=None):
+        """``grids`` (nfield, nk, nmu, 426) and ``norms`` (nfield, 20) of the one-loop short-mode model from the P_s grid
+        ``rows`` (``layout.GRID_TERMS``, (18, nk, nmu), at the basis's amplitude) and the linear ``pk`` of the long mode;
+        with ``stretches`` / ``fit`` as ``ModulusSpectra.__call__`` (first-layer filters in the observed frame)."""
+        single = stretches is None
+        stretches = [np.ones(3)] if single else [np.asarray(x, "f8") for x in stretches]
+        rows = np.asarray(rows, "f8")
+        p, w = self.p, self.weights
+        degrees = [d for _, d in S21_LOOP_PIECES]
+        rdegrees = [d for _, d in S21_LOOP_RESPONSE_PIECES]
+        nblocks, rblocks = product_blocks(S21_LOOP_PIECES), product_blocks(S21_LOOP_RESPONSE_PIECES)
+        up, loopp, plinp = self.pieces(rows, self._interp_p, self.pvec)
+        z1p = linear_components(self.pvec, f)
+        beta_ref = np.array([1.0, self.reference_b1, 0.0, 0.0, 0.0])
+        z1p_ref = z1p @ beta_ref
+        norms, kernels, harmonics = [], [], []  # per stretch
+        for stretch in stretches:
+            pobs = self.pvec * stretch
+            po = np.sqrt(np.sum(pobs**2, axis=-1))
+            harm = self.harmonics if single or np.all(stretch == 1) else spherical_harmonics(self.harmonics, pobs)
+            radial = {s: np.exp(-0.5 * (s * po) ** 2) * self.window(po) for s, _, _ in self.fields}
+            nrm, ker = [], []
+            for s, ell, m in self.fields:
+                c2w = 4 * np.pi / (2 * ell + 1) * (1.0 if m == 0 else 2.0)
+                rp = (s * po) ** ell * radial[s]
+                a = w * rp**2 * c2w * np.abs(harm[ell, m]) ** 2
+                nrm.append(np.concatenate([a @ u for u in up]))
+                ker.append((-1) ** ell * c2w * rp)
+            norms.append(nrm)
+            kernels.append(ker)
+            harmonics.append(harm)
+        kernels = np.array(kernels)  # (nstretch, nfield, np)
+        nk, nmu = self.k.size, self.mu.size
+        ncol = sum(size for _, _, size in rblocks + nblocks)
+        grids = np.zeros((len(stretches) if fit is None else len(fit), len(self.fields), nk, nmu, ncol))
+        contract = (lambda x: x) if fit is None else (lambda x: np.tensordot(fit, x, axes=1))  # noqa: E731
+        for i, kk in enumerate(self.k):
+            pkk = pk(np.array([kk]))[0]
+            for a, mk in enumerate(self.mu):
+                kvec = np.array([kk * np.sqrt(1 - mk**2), 0.0, kk * mk])
+                qvec = kvec - self.pvec
+                qn = np.sqrt(np.sum(qvec**2, axis=-1))
+                uq, loopq, plinq = self.pieces(rows, self._interpolation(qn, qvec[:, 2] / np.maximum(qn, 1e-30)), qvec)
+                z1q = linear_components(qvec, f)
+                minus = np.broadcast_to(-kvec, qvec.shape)
+                z2q, z2p = galaxy_kernel(np.stack([qvec, minus], axis=-2), f), galaxy_kernel(np.stack([minus, self.pvec], axis=-2), f)
+                # tree response function of the reference tracer, 2 Z2 / Z1, of each leg
+                r0q = 2 * (z2q @ beta_ref) / (z1q @ beta_ref)
+                r0p = 2 * (z2p @ beta_ref) / z1p_ref
+                long_beta = (2 * (plinq[:, None] * product_coefficients(z2q, z1q) + plinp[:, None] * product_coefficients(z2p, z1p))
+                             + 2 * (r0q[:, None] * loopq + r0p[:, None] * loopp))
+                longs = [long_beta] + [2 * (r0q[:, None] * uq[m] + r0p[:, None] * up[m]) for m in (1, 2, 3)]
+                stochastic = [0.5 * (up[m] + uq[m]) for m in (4, 5)]  # the pair's stochastic power, times Z1(K) below
+                z1k = linear_components(kvec, f)  # (5,)
+                quads = []
+                for (b, c), _, _ in nblocks:
+                    if b == c:
+                        quads.append(monomial_product(up[b], degrees[b], uq[b], degrees[b]))
+                    else:
+                        quads.append(monomial_product(up[b], degrees[b], uq[c], degrees[c])
+                                     + monomial_product(up[c], degrees[c], uq[b], degrees[b]))
+                quads = w[:, None] * np.concatenate(quads, axis=1)
+                # kernel of every (stretch, field): its filter at the observed q leg, times the p-leg factor
+                kernel = np.empty(kernels.shape)
+                for n, stretch in enumerate(stretches):
+                    qobs = qvec * stretch
+                    qo = np.sqrt(np.sum(qobs**2, axis=-1))
+                    cache = {key: np.real(harmonics[n][key] * np.conj(y))
+                             for key, y in spherical_harmonics(harmonics[n], qobs).items()}
+                    gauss = {s: np.exp(-0.5 * (s * qo) ** 2) * self.window(qo) for s, _, _ in self.fields}
+                    radial = {}
+                    for s, ell, _ in self.fields:
+                        if (s, ell) not in radial:
+                            radial[s, ell] = gauss[s].copy()
+                            for _ in range(ell):
+                                radial[s, ell] *= s * qo
+                    for index, (s, ell, m) in enumerate(self.fields):
+                        np.multiply(kernels[n, index], radial[s, ell], out=kernel[n, index])
+                        kernel[n, index] *= cache[ell, m]
+                # response pieces (nstretch, nfield, size): beta (15), c0, c2, c4 (1), N (5), alpha2 (5)
+                rs = np.split(kernel @ (w[:, None] * np.concatenate(longs, axis=1)) / 2, [15, 16, 17], axis=-1)
+                for u in stochastic:
+                    rs.append((kernel @ (w * u[:, 0]) / 2)[..., None] * z1k)
+                bilinear = []
+                for (b, c), _, _ in rblocks:
+                    factor = 1.0 if b == c else 2.0
+                    bilinear.append(contract(factor * monomial_product(rs[b], rdegrees[b], rs[c], rdegrees[c]) * pkk))
+                noise = contract(np.square(kernel)) @ quads / 2
+                grids[:, :, i, a] = np.concatenate(bilinear + [noise], axis=-1)
+        if single:
+            return grids[0], np.array(norms[0])
+        return grids, contract(np.array(norms))
+
+
 class S21mProjection:
     """Lattice sums from the field grids of ``ModulusSpectra`` to lambda_2 of every S21m entry.
 
@@ -315,14 +485,21 @@ class S21mBasis:
 
     def __init__(self, config, coefficients, boxsize: float = 1000.0, nmesh: int = 256,
                  kmax: float = 0.12, nk: int = 24, nmu: int = 6, sigma_v_factor: float = SIGMA_V_FACTOR,
-                 fog: bool = False, ap: int = 0, ap_nodes: int = 5, **quadrature):
+                 fog: bool = False, ap: int = 0, ap_nodes: int = 5, loop=None, reference_b1: float = 2.0,
+                 **quadrature):
         self.config, self.coefficients, self.fog = config, list(coefficients), bool(fog)
+        #: One-loop short modes (``LoopModulusSpectra``): ``loop`` is the ``spectrum.SpectrumGrid`` whose rows
+        #: ``__call__`` / ``field_grids`` receive; the columns are then those of ``layout.s21_loop_blocks`` (no
+        #: Fingers-of-God orders; ``fog`` is ignored).
+        self.loop = loop is not None
+        if self.loop:
+            self.fog = False
         #: Order of the AP polynomial (0: none): the first-layer filters of the modulus spectra in the observed frame
         #: (``ModulusSpectra(stretches=...)``) and the second-layer projection (``spectrum.APPolynomial`` of an
         #: ``S21mAPProjection``), multiplied as polynomials; see ``__call__``.
         self.ap, self.ap_nodes = int(ap), int(ap_nodes)
-        if self.ap and not self.fog:
-            raise ValueError("ap needs fog=True")
+        if self.ap and not (self.fog or self.loop):
+            raise ValueError("ap needs fog=True or the one-loop short modes")
         #: Velocity damping of the modulus spectra in units of the linear sigma_v. The matter value (2) is too strong
         #: for halos: 1 brings the measured response and noise of the halo moduli into agreement (and removes the
         #: S21m amplitude systematic; scripts/feasibility/modulus_response_noise.py --sigma-v-factor).
@@ -330,8 +507,9 @@ class S21mBasis:
         self.fields = first_layer_fields(self.coefficients)
         x, _ = leggauss(2 * nmu)
         k, mu = np.geomspace(4e-3, kmax, nk), x[nmu:]
-        self.spectra = ModulusSpectra([(config.sigma(j), ell, m) for j, ell, m in self.fields], k, mu,
-                                      **quadrature)
+        fields = [(config.sigma(j), ell, m) for j, ell, m in self.fields]
+        self.spectra = (LoopModulusSpectra(fields, k, mu, loop, reference_b1=reference_b1, **quadrature) if self.loop
+                        else ModulusSpectra(fields, k, mu, **quadrature))
         self.projection = S21mProjection(config, self.coefficients, self.fields, k, mu, boxsize=boxsize, nmesh=nmesh)
         if self.ap:
             from .spectrum import APNodes, APPolynomial
@@ -340,13 +518,14 @@ class S21mBasis:
                                                          nmesh=nmesh), order=self.ap)
             self.nodes = APNodes(self.ap, nodes=self.ap_nodes)
 
-    def __call__(self, klin, pklin, f):
-        """(nentry, sum S21_SIZES [+ FoG orders]); with ``ap``, (nentry, nalpha * ncol), alpha-major: the AP polynomial
-        of the S21m terms, sum_alpha x^alpha T_alpha, where the lambda_2 columns still need the volume factor
-        1 / (q_par q_perp^2) of the second-layer sum (the norms do not; ``s21m_lambda_mask``). The lambda_2 terms are the
-        product of the polynomials of the second-layer projection (D_beta) and of the first-layer grids (G_alpha),
-        truncated at the order; the norms are the first-layer polynomial."""
-        flat, norms = self.field_grids(klin, pklin, f)
+    def __call__(self, klin, pklin, f, rows=None):
+        """(nentry, sum S21_SIZES [+ FoG orders]; one-loop: ``layout.S21_LOOP_COLUMNS``); with ``ap``, (nentry, nalpha *
+        ncol), alpha-major: the AP polynomial of the S21m terms, sum_alpha x^alpha T_alpha, where the lambda_2 columns
+        still need the volume factor 1 / (q_par q_perp^2) of the second-layer sum (the norms do not;
+        ``s21m_lambda_mask``). The lambda_2 terms are the product of the polynomials of the second-layer projection
+        (D_beta) and of the first-layer grids (G_alpha), truncated at the order; the norms are the first-layer
+        polynomial. ``rows``: the P_s grid rows of the one-loop short modes (``loop``)."""
+        flat, norms = self.field_grids(klin, pklin, f, rows=rows)
         proj = self.projection
         if not self.ap:
             lam = np.einsum("eg,ecg->ec", proj.matrix, flat[proj.field_index])
@@ -361,19 +540,26 @@ class S21mBasis:
         return np.concatenate([s21m_assemble(lam[a], norms[a][index], self.fog) for a in range(len(nodes.powers))],
                               axis=1)
 
-    def field_grids(self, klin, pklin, f):
+    def field_grids(self, klin, pklin, f, rows=None):
         """The unprojected S21m pieces: modulus-spectrum grids (nfield, ncol, nk * nmu) of every first-layer field
         (``self.fields``) on the (K, mu_K) grid of ``self.spectra``, and their first-layer norms (nfield, nnorm). The
-        projection to lambda_2 (fixed, or with AP) and ``s21m_assemble`` then give the S21m terms."""
+        projection to lambda_2 (fixed, or with AP) and ``s21m_assemble`` then give the S21m terms. ``rows``: the P_s
+        grid rows (``layout.GRID_TERMS``) of the one-loop short modes (``loop``)."""
         logk, logp = np.log(klin), np.log(pklin)
         pk = lambda x: np.exp(np.interp(np.log(np.maximum(x, 1e-30)), logk, logp))  # noqa: E731
         sigma_v = self.sigma_v_factor * float(np.sqrt(np.trapezoid(pklin, klin) / (6 * np.pi**2)))
+        if self.loop:
+            if rows is None:
+                raise ValueError("the one-loop short modes need the P_s grid rows")
+            spectra = lambda **kw: self.spectra(rows, pk, f, **kw)  # noqa: E731
+        else:
+            spectra = lambda **kw: self.spectra(pk, f, sigma_v, fog=self.fog, **kw)  # noqa: E731
         if self.ap:  # the first-layer filters at q = 1 and the AP nodes, fitted as a polynomial in x = ln q
             stretches = [np.ones(3)] + [np.exp([b, b, a]) for a, b in self.nodes.points]
-            grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog, stretches=stretches, fit=self.nodes.matrix)
+            grids, norms = spectra(stretches=stretches, fit=self.nodes.matrix)
             nalpha, nfield, nk, nmu, ncol = grids.shape
             return np.moveaxis(grids, -1, 2).reshape(nalpha, nfield, ncol, nk * nmu), norms
-        grids, norms = self.spectra(pk, f, sigma_v, fog=self.fog)
+        grids, norms = spectra()
         nfield, nk, nmu, ncol = grids.shape
         return np.moveaxis(grids, -1, 1).reshape(nfield, ncol, nk * nmu), norms
 

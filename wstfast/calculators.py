@@ -259,21 +259,24 @@ class Basis(Calculator):
                  damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                  s21_coefficients=(), tracer: str = "matter", space: str = "redshift", s21_damping: float | None = None,
                  cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256), s21_cellsize: float = 0.0,
-                 s21_projected: bool = True, ap_order: int = 0):
+                 s21_projected: bool = True, ap_order: int = 0, s21_loop: bool = False, s21_reference_b1: float = 2.0):
         self.cosmo = build_cosmology() if cosmo is None else cosmo
         #: What the basis includes (validated there); the keyword arguments below are its fields.
-        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
+        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases,
+                              s21_loop=s21_loop)
 
     def __post_init__(self, cosmo=None, config: WSTConfig = WSTConfig(), coefficients=(), z: float = 0.5,
                       damping: str | float | None = "linear", kmax: float = 0.3, npoints: int = 2**16, ir: bool = False,
                       s21_coefficients=(), tracer: str = "matter", space: str = "redshift", s21_damping: float | None = None,
                       cubic_biases: bool = False, fog: bool = False, s21_lattice=(1000.0, 256),
-                      s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0):
+                      s21_cellsize: float = 0.0, s21_projected: bool = True, ap_order: int = 0,
+                      s21_loop: bool = False, s21_reference_b1: float = 2.0):
         from .theory.first_layer import S1mBasis
         from .theory.second_layer import S21mBasis
         from .theory.spectrum import SpectrumGrid
 
-        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases)
+        self.spec = ModelSpec(tracer=tracer, space=space, ir=ir, fog=fog, ap_order=ap_order, cubic=cubic_biases,
+                              s21_loop=s21_loop)
         self.z, self.tracer = float(z), tracer
         #: The kappa columns also hold the trispectrum of the cubic operators (``layout.CUBIC_KAPPA_SIZES``).
         self.cubic_biases = bool(cubic_biases)
@@ -282,6 +285,10 @@ class Basis(Calculator):
         self.fog = bool(fog)
         if self.fog and s21_damping is not None:
             raise ValueError("fog replaces the velocity damping: drop s21_damping")
+        #: One-loop short modes of the S21m modulus spectra (``second_layer.LoopModulusSpectra``): the P_s grid rows
+        #: (counterterms, stochastic terms) in place of the tree spectrum with Fingers-of-God legs; the S21m columns
+        #: are then ``layout.s21_loop_blocks`` (``layout.s21m_layout``), without Fingers-of-God orders.
+        self.s21_loop = bool(s21_loop)
         self.grid = SpectrumGrid(kmax=kmax, ir=ir)
         self.coefficients = list(coefficients)
         cubic = dict(cubic=True) if self.cubic_biases else {}
@@ -298,7 +305,9 @@ class Basis(Calculator):
         self.cumulant_model = (S1mBasis(config, self.coefficients, damping=damping, npoints=npoints, **cubic)
                                if self.coefficients else None)
         s21_kwargs = {} if s21_damping is None else dict(sigma_v_factor=s21_damping)
-        if self.fog:
+        if self.s21_loop:
+            s21_kwargs.update(loop=self.grid, reference_b1=float(s21_reference_b1))
+        elif self.fog:
             s21_kwargs["fog"] = True
         if self.ap_order:
             s21_kwargs["ap"] = self.ap_order
@@ -327,19 +336,22 @@ class Basis(Calculator):
         h, r_bao = float(self.cosmo.get("params.h")), float(self.cosmo.get("thermodynamics.rs_drag"))
         from .theory.layout import AP_TERMS, amplitude_scalings, s21m_field_powers
 
-        scale = amplitude_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order])
-        self.grid_terms = self.grid(self.klin, pk, f, h=h, r_bao=r_bao) / scale["grid"][:, None, None]
+        scale = amplitude_scalings(ratio, cubic=self.cubic_biases, fog=self.fog, ap_terms=AP_TERMS[self.ap_order],
+                                   s21_loop=self.s21_loop)
+        rows = self.grid(self.klin, pk, f, h=h, r_bao=r_bao)
+        self.grid_terms = rows / scale["grid"][:, None, None]
+        s21_rows = dict(rows=rows) if self.s21_loop else {}
         if self.cumulant_model is not None:
             kappa, skewness = self.cumulant_model.cumulants(self.klin, pk, f)
             self.kappa, self.skewness2 = kappa / scale["kappa"], skewness / scale["skewness"]
         else:
             self.kappa, self.skewness2 = np.zeros((0, 1, scale["kappa"].size)), np.zeros((0, scale["skewness"].size))
         if self.s21_projected:
-            self.s21m_terms = (self.s21_model(self.klin, pk, f) / scale["s21m"] if self.s21_model is not None
+            self.s21m_terms = (self.s21_model(self.klin, pk, f, **s21_rows) / scale["s21m"] if self.s21_model is not None
                                else np.zeros((0, scale["s21m"].size)))
         else:
-            grids, norms = self.s21_model.field_grids(self.klin, pk, f)
-            plam, pnorm = s21m_field_powers(self.fog)
+            grids, norms = self.s21_model.field_grids(self.klin, pk, f, **s21_rows)
+            plam, pnorm = s21m_field_powers(self.fog, self.s21_loop)
             self.s21m_grids = grids / (ratio**plam)[None, :, None]
             self.s21m_norms = norms / ratio**pnorm
             self.s21m_terms = np.zeros((0, scale["s21m"].size))
@@ -368,9 +380,10 @@ RSDBasis = Basis
 def s21m_fields(basis):
     """Field grids (nfield, ncol, ngrid) and norms (nfield, nnorm) of an unprojected biased Basis output, at the
     basis's amplitude (``layout.s21m_field_powers``)."""
-    from .theory.layout import is_fog, s21m_field_powers
+    from .theory.layout import s21m_field_powers, s21m_layout
 
-    plam, pnorm = s21m_field_powers(is_fog(s21m=basis.s21m_terms))
+    loop, fog, _ = s21m_layout(basis.s21m_terms.shape[-1])
+    plam, pnorm = s21m_field_powers(fog, loop)
     a = jnp.exp(basis.dlogA)
     return basis.s21m_grids * (a ** jnp.asarray(plam))[None, :, None], basis.s21m_norms * a ** jnp.asarray(pnorm)
 
@@ -423,10 +436,11 @@ def contract_s21m(emulator, coefficients, basis_coefficients, projection) -> Con
 def basis_rows(basis):
     """Grid rows, kappa, skewness and S21m terms of a biased-tracer Basis at the basis's amplitude (with the
     Fingers-of-God counterterm orders of a ``fog`` basis; see ``layout.collapse_fog``)."""
-    from .theory.layout import amplitude_scalings, basis_layout
+    from .theory.layout import amplitude_scalings, basis_layout, s21m_layout
 
     cubic, fog, nalpha = basis_layout(basis.kappa.shape[-1])
-    scale = amplitude_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog, ap_terms=nalpha)
+    loop = s21m_layout(basis.s21m_terms.shape[-1])[0]
+    scale = amplitude_scalings(jnp.exp(basis.dlogA), cubic=cubic, fog=fog, ap_terms=nalpha, s21_loop=loop)
     return (basis.grid_terms * scale["grid"][:, None, None], basis.kappa * scale["kappa"],
             basis.skewness2 * scale["skewness"], basis.s21m_terms * scale["s21m"])
 
@@ -640,6 +654,35 @@ def tracer_cumulants(kappa, skewness, beta, shotnoise, cubic=None):
     return kappa, 15 * skew**2
 
 
+def s21m_loop_terms(s21, beta, counterterms, noise, alpha2_noise):
+    """Response and noise terms (nentry, 2) of lambda_2 = R / n^2 + (1 + a) G / n^2 of S21m entries with the one-loop
+    short modes (``layout.s21_loop_blocks``; ``second_layer.LoopModulusSpectra``) at the bias vector ``beta``, the
+    counterterms (c0, c2, c4), the constant shot noise ``noise`` = N (1 + alpha0) and ``alpha2_noise`` = N alpha2: every
+    block is contracted with the monomials of its degree and the product of its pieces' weights."""
+    from .theory.bias import monomials
+    from .theory.layout import s21_loop_blocks
+
+    weights = [1.0, *counterterms, noise, alpha2_noise]
+    blocks = s21_loop_blocks()
+    cache = {}
+
+    def monomial(degree):
+        if degree not in cache:
+            cache[degree] = monomials(beta, degree)
+        return cache[degree]
+
+    out, start = {}, 0
+    for name in ("response", "noise", "norms"):
+        total = 0.0
+        for key, degree, size in blocks[name]:
+            factor = weights[key[0]] * weights[key[1]] if name != "norms" else weights[key]
+            total = total + factor * (s21[..., start:start + size] @ monomial(degree))
+            start += size
+        out[name] = total
+    norm2 = out["norms"] ** 2
+    return jnp.stack([out["response"] / norm2, out["noise"] / norm2], axis=-1)
+
+
 def _check(theory, nuisance):
     """Common checks of a theory: a ``NuisanceParameters``, and no AP in real space."""
     if not isinstance(nuisance, NuisanceParameters):
@@ -652,7 +695,7 @@ def _fog_check(basis, params):
     """Whether the basis holds the Fingers-of-God columns, consistently with the nuisance parameters."""
     from .theory.layout import is_fog
 
-    fog = is_fog(basis.kappa, basis.s21m_terms)
+    fog = is_fog(basis.kappa)
     if fog and not params:
         raise ValueError("the basis holds the Fingers-of-God counterterm columns: use a ModelSpec with fog=True")
     if params and not fog:
@@ -829,7 +872,10 @@ class S21mTheory(Calculator):
     ``Basis`` (``wstfast.theory.second_layer``).
 
     Nuisance parameters (``nuisance``): the biases, the Fingers-of-God counterterm c_v, one noise amplitude per
-    first-layer field and, with ``white_noise``, one white term W per first-layer scale (needs ``config``). The
+    first-layer field and, with ``white_noise``, one white term W per first-layer scale (needs ``config``); with the
+    one-loop short modes (``ModelSpec.s21_loop``), also the counterterms of suffix ``counterterms`` ("_pk": those of
+    the P(k) multipoles, the default; "": the S1m ones) and the stochastic terms alpha0, alpha2 of the short-mode
+    spectrum (``s21m_loop_terms``; c_v then acts on the S1m cumulants only). The
     one-point factor (1 + E_1(1))^q / (1 + E_1(q)) uses the linear block variances (``projection``: an
     ``S1mProjection`` of the first-layer S1 coefficients ``first_layer``) and the basis cumulants of those
     coefficients (rows ``cumulant_index``). ``entry_index`` selects the entries of the basis.
@@ -845,7 +891,7 @@ class S21mTheory(Calculator):
     def __init__(self, projection, coefficients, first_layer, basis=None, nuisance=None, q: float = 0.8,
                  shotnoise: float = 0.0, entry_index=None, cumulant_index=None, white_noise: bool = False,
                  config: WSTConfig | None = None, layer2=None, s21_projection=None, s21_field_rows=None, ap=None,
-                 first_ap=None, window=None):
+                 first_ap=None, window=None, counterterms: str = "_pk"):
         from .theory.second_layer import first_layer_fields
 
         self.basis = basis
@@ -854,13 +900,14 @@ class S21mTheory(Calculator):
         self.ap_params = ap.params if ap is not None else {}
         self.fog_params = nuisance.fog()
         self.bias_params = nuisance.bias()
+        self.counterterms = nuisance.counterterms(counterterms) if nuisance.spec.s21_loop else {}
         self.noise = nuisance.noise(first_layer_fields(coefficients))
         self.white_params = nuisance.white([c.j for c in coefficients]) if white_noise else {}
 
     def __post_init__(self, projection, coefficients, first_layer, basis=None, nuisance=None, q: float = 0.8,
                       shotnoise: float = 0.0, entry_index=None, cumulant_index=None, white_noise: bool = False,
                       config: WSTConfig | None = None, layer2=None, s21_projection=None, s21_field_rows=None, ap=None,
-                      first_ap=None, window=None):
+                      first_ap=None, window=None, counterterms: str = "_pk"):
         from .theory.second_layer import first_layer_fields, s21m_entries
 
         # Survey window (survey.SurveyWindow of one cap): S21m x K / (delta W) of the entry's first-layer block, W the
@@ -947,10 +994,11 @@ class S21mTheory(Calculator):
     def __call__(self):
         from .theory.bias import monomials
         from .theory.first_layer import block_edgeworth
-        from .theory.layout import S21_SIZES, split
+        from .theory.layout import S21_SIZES, s21m_layout, split
         from .theory.second_layer import s21m_from_terms
 
         rows, kappa, skewness, s21 = basis_rows(self.basis)
+        loop = s21m_layout(s21.shape[-1])[0]
         if self.s21_projection is not None:
             s21 = self._project_s21()
         kappa, skewness = ap_cumulants(self.basis, kappa, skewness, self.ap, self.ap_params)
@@ -960,7 +1008,10 @@ class S21mTheory(Calculator):
 
             c_v = self.fog_params["c_v"].value
             kappa, skewness, _ = collapse_fog(kappa, skewness, c_s1=c_v)
-            s21 = collapse_fog(s21m=s21, c_s21=c_v)[2]
+            if not loop:
+                s21 = collapse_fog(s21m=s21, c_s21=c_v)[2]
+        if loop != bool(self.counterterms):
+            raise ValueError("the one-loop S21m short modes need a ModelSpec with s21_loop=True, and conversely")
         beta = bias_beta(self.bias_params)
         noise = self.shotnoise * (1 + self.bias_params["alpha0"].value)
         m2, m4 = monomials(beta, 2), monomials(beta, 4)
@@ -971,10 +1022,14 @@ class S21mTheory(Calculator):
             linear = self.matrix @ tree.ravel() + noise * self.shot
         kappa, skewness2 = tracer_cumulants(kappa[self.cumulant_index], skewness[self.cumulant_index], beta,
                                             self.shotnoise, cubic_values(self.bias_params))
-        r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
-        norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
-        terms = jnp.stack([(r0 + noise * r1 + noise**2 * r2) @ m4 / norm2,
-                           (g0 @ m4 + noise * g1 @ m2 + noise**2 * g2[:, 0]) / norm2], axis=1)
+        if loop:
+            c = [self.counterterms[name].value for name in ("c0", "c2", "c4")]
+            terms = s21m_loop_terms(s21[self.entry_index], beta, c, noise, self.shotnoise * self.bias_params["alpha2"].value)
+        else:
+            r0, r1, r2, g0, g1, g2, n0, n1 = split(s21[self.entry_index], S21_SIZES)
+            norm2 = (n0 @ m2 + noise * n1[:, 0]) ** 2
+            terms = jnp.stack([(r0 + noise * r1 + noise**2 * r2) @ m4 / norm2,
+                               (g0 @ m4 + noise * g1 @ m2 + noise**2 * g2[:, 0]) / norm2], axis=1)
         e_q, e_1, start = [], [], 0
         for index, ell in enumerate(self.first_ells):
             lin = linear[start:start + ell + 1]
@@ -1019,24 +1074,25 @@ class S21mTheory(Calculator):
     def _ap_s21(self, s21):
         """S21m terms of a basis with AP-polynomial terms (Basis(ap_order)) at the AP ratios of the trial cosmology
         (q = 1 without ``ap``), the lambda_2 columns times the volume factor of the second-layer sum."""
-        from .theory.layout import ap_evaluate, basis_layout, s21m_lambda_mask
+        from .theory.layout import ap_evaluate, basis_layout, s21m_lambda_mask, s21m_layout
 
         _, fog, nalpha = basis_layout(self.basis.kappa.shape[-1])
         if nalpha == 1:
             return s21
         qpar, qperp = self.ap.ratios(self.ap_params) if self.ap is not None else (1.0, 1.0)
-        mask = jnp.asarray(s21m_lambda_mask(fog))
+        loop, fog, _ = s21m_layout(s21.shape[-1])
+        mask = jnp.asarray(s21m_lambda_mask(fog, loop))
         return ap_evaluate(s21, nalpha, qpar, qperp) * jnp.where(mask, 1.0 / (qpar * qperp**2), 1.0)
 
     def _project_s21(self):
         """S21m terms (nentry, ncol) of the coefficients from the unprojected basis: lambda_2 = matrix @ field grid, with
         the AP ratios of the trial cosmology when ``ap`` is set, then ``layout.s21m_assemble``. With an emulator
         contracted by ``contract_s21m``, lambda_2 = sum_alpha w_alpha(q) P_alpha of its projected terms."""
-        from .theory.layout import is_fog, s21m_assemble, s21m_field_powers
+        from .theory.layout import s21m_assemble, s21m_field_powers, s21m_layout
 
+        loop, fog, _ = s21m_layout(self.basis.s21m_terms.shape[-1])
         if self.s21_contracted:
-            fog = is_fog(s21m=self.basis.s21m_terms)
-            plam, pnorm = s21m_field_powers(fog)
+            plam, pnorm = s21m_field_powers(fog, loop)
             a = jnp.exp(self.basis.dlogA)
             terms = self.basis.s21m_grids * (a ** jnp.asarray(plam))[None, None, :]
             if self.ap is not None:
@@ -1055,7 +1111,7 @@ class S21mTheory(Calculator):
             matrix = self.s21_projection.at(qpar, qperp)
         index = self.s21_projection.field_index
         lam = jnp.einsum("eg,ecg->ec", matrix, grids[index])
-        return s21m_assemble(lam, norms[index], is_fog(s21m=self.basis.s21m_terms))
+        return s21m_assemble(lam, norms[index], fog)
 
     def tree_flatten(self):
         return [self.flattheory], None
@@ -1071,20 +1127,26 @@ class ResponseTheory(Calculator):
     """Cross-spectra X_a = P_{U_a d} / <U_a> of the first-layer modulus fields with the density (multipoles 0, 2):
     the tree-level response r_a Z1 P_L (``covariance_rsd.ModulusCrossRSD``) as a second-order Taylor expansion
     (``table``: ``inference.response_taylor``) in the cosmology, b1, b2, bG2 (shared with the other theories by name)
-    and the velocity dispersion ``sv_U`` of the short modes, plus per field a counterterm ``cU_*`` k^2 P_L and a
-    constant ``eU_*`` (flat priors), or neither with ``table["linear"]`` False (marginalised in the covariance,
-    ``FitOptions.pud_marg``). ``table``: dict(params, center, x0, jac, hess, ct, cst, mask, labels, linear)."""
+    and the velocity dispersion ``sv_U`` of the short modes (or, for a table with the one-loop short modes, in the
+    biases, the counterterms of suffix ``counterterms`` and the stochastic terms, all shared), plus per field a
+    counterterm ``cU_*`` k^2 P_L and a constant ``eU_*`` (flat priors), or neither with ``table["linear"]`` False
+    (marginalised in the covariance, ``FitOptions.pud_marg``). ``table``: dict(params, center, x0, jac, hess, ct, cst,
+    mask, labels, linear)."""
 
     COSMOLOGY = ("omega_cdm", "logA", "h", "n_s")
 
-    def __init__(self, basis, nuisance, table):
+    def __init__(self, basis, nuisance, table, counterterms: str = "_pk"):
         params = get_params(basis)
         self.cosmo_params = {name: params[name] for name in self.COSMOLOGY}
         self.bias_params = nuisance.bias()
-        sv = float(table["center"][list(table["params"]).index("sv")])
-        own = {"sv_U": Parameter("sv_U", value=sv, fixed=nuisance.spec.space == "real",  # no velocities in real space
-                                 prior=dict(limits=[0.0, 8.0]), ref=dict(dist="norm", loc=max(sv, 0.5), scale=0.5),
-                                 latex=r"\sigma_v^U")}
+        names = list(table["params"])
+        self.counterterms = nuisance.counterterms(counterterms) if "c0" in names else {}
+        own = {}
+        if "sv" in names:
+            sv = float(table["center"][names.index("sv")])
+            own["sv_U"] = Parameter("sv_U", value=sv, fixed=nuisance.spec.space == "real",  # no velocities in real space
+                                    prior=dict(limits=[0.0, 8.0]), ref=dict(dist="norm", loc=max(sv, 0.5), scale=0.5),
+                                    latex=r"\sigma_v^U")
         for label in (table["labels"] if table.get("linear", True) else []):
             own[f"cU_{label}"] = Parameter(f"cU_{label}", value=0.0, prior=dict(limits=[-1e4, 1e4]),
                                            ref=dict(dist="norm", loc=0.0, scale=1.0), latex=rf"c^U_{{\rm {label}}}")
@@ -1092,7 +1154,7 @@ class ResponseTheory(Calculator):
                                            ref=dict(dist="norm", loc=0.0, scale=10.0), latex=rf"e^U_{{\rm {label}}}")
         self.response_params = own
 
-    def __post_init__(self, basis, nuisance, table):
+    def __post_init__(self, basis, nuisance, table, counterterms: str = "_pk"):
         self.names = list(table["params"])
         self.center = jnp.asarray(table["center"], dtype="f8")
         self.x0, self.jac, self.hess = (jnp.asarray(table[key], dtype="f8") for key in ("x0", "jac", "hess"))
@@ -1108,6 +1170,8 @@ class ResponseTheory(Calculator):
                 values.append(self.cosmo_params[name].value)
             elif name == "sv":
                 values.append(self.response_params["sv_U"].value)
+            elif name in ("c0", "c2", "c4"):
+                values.append(self.counterterms[name].value)
             else:
                 values.append(self.bias_params[name].value)
         delta = jnp.stack([jnp.asarray(v, dtype="f8") for v in values]) - self.center

@@ -14,6 +14,17 @@ beta = (1, 1, 0, 0, 0) with no shot noise).
 
 - ``fog``: the Fingers-of-God counterterm orders 1 and 2 appended to the blocks they act on (``fog_sizes``), combined
   at a given c_v by ``collapse_fog``.
+- S21m with one-loop short modes (``second_layer.LoopModulusSpectra``; ``S21_LOOP_PIECES``): the short-mode spectrum
+  is the one-loop P_s of the grid, sum_i w_i u_i(p) over the pieces i = the degree-2 bias monomials of tree + loop
+  (weights the monomials of beta), the counterterm shapes (c0, c2, c4), the constant shot noise (N (1 + alpha0)) and
+  the k^2 mu^2 stochastic shape (N alpha2). The response r, the noise g and the norms n are then bilinear / linear in
+  the pieces, and their columns are the symmetric products of the pieces (``product_blocks``), the response ones with
+  the stochastic pieces times Z1(K) (degree 1 in beta):
+
+      lambda_2 = [sum_{i<=j} w_i w_j (R_ij + (1 + a) G_ij)] / (sum_i w_i n_i)^2,
+
+  with no Fingers-of-God orders (the counterterms replace c_v in the short modes); ``s21m_layout`` tells the two S21m
+  layouts apart by their number of columns.
 - ``ap``: the columns repeated per term of the AP polynomial in (ln q_par, ln q_perp), alpha-major (``AP_TERMS``,
   ``ap_evaluate``).
 
@@ -64,6 +75,48 @@ FOG_KNL = 0.3
 FOG_S21_BLOCKS = (0, 1, 3, 4, 6)
 
 
+#: Pieces (name, degree in beta of the weight) of the one-loop short-mode spectrum of the S21m model: the degree-2
+#: monomials of tree + loop (weights ``bias.monomials(beta, 2)``), the counterterm shapes (weights c0, c2, c4), the
+#: constant shot noise (weight N (1 + alpha0)) and the k^2 mu^2 stochastic shape (weight N alpha2).
+S21_LOOP_PIECES = (("beta", 2), ("c0", 0), ("c2", 0), ("c4", 0), ("N", 0), ("alpha2", 0))
+
+
+#: Pieces of the modulus response r: those of the spectrum, the stochastic ones times Z1(K) (degree 1).
+S21_LOOP_RESPONSE_PIECES = (("beta", 2), ("c0", 0), ("c2", 0), ("c4", 0), ("N", 1), ("alpha2", 1))
+
+
+def product_blocks(pieces):
+    """Blocks ((i, j), degree, size) of the symmetric products of ``pieces`` ((name, degree) each), i <= j in the order of
+    the pieces: the columns of a quantity bilinear in the pieces (the cross terms carry the factor 2)."""
+    return [((i, j), di + dj, len(monomial_exponents(di + dj)))
+            for i, (_, di) in enumerate(pieces) for j, (_, dj) in enumerate(pieces) if j >= i]
+
+
+def s21_loop_blocks():
+    """Column blocks of the one-loop S21m terms, in order: the response products R_ij (times P_L(K)), the noise products
+    G_ij and the norms n_i; each a list of (key, degree, size), key = (i, j) or i into the pieces."""
+    return dict(response=product_blocks(S21_LOOP_RESPONSE_PIECES), noise=product_blocks(S21_LOOP_PIECES),
+                norms=[(i, d, len(monomial_exponents(d))) for i, (_, d) in enumerate(S21_LOOP_PIECES)])
+
+
+#: Number of columns of the one-loop S21m terms per entry (without AP terms): 266 + 160 + 20.
+S21_LOOP_COLUMNS = sum(size for blocks in s21_loop_blocks().values() for _, _, size in blocks)
+
+
+def s21m_layout(ncol: int):
+    """(loop, fog, nalpha) of S21m terms from their number of columns: whether the one-loop short-mode layout, whether
+    the tree layout holds the Fingers-of-God orders, and the number of AP-polynomial terms."""
+    tree = sum(S21_SIZES)
+    for nalpha in AP_TERMS:
+        if ncol == S21_LOOP_COLUMNS * nalpha:
+            return True, False, nalpha
+        if ncol == tree * nalpha:
+            return False, False, nalpha
+        if ncol == (tree + fog_sizes()["s21m"]) * nalpha:
+            return False, True, nalpha
+    raise ValueError(f"{ncol} S21m columns match no layout")
+
+
 def fog_sizes(cubic: bool = False):
     """Columns appended by ``fog`` (orders 1 and 2 of the counterterm) to the kappa, skewness and S21m outputs."""
     kappa = KAPPA_SIZES[0] + (sum(CUBIC_KAPPA_SIZES) if cubic else 0)
@@ -77,10 +130,25 @@ def split(values, sizes):
     return [values[..., a:b] for a, b in zip(edges[:-1], edges[1:])]
 
 
-def amplitude_scalings(ratio, cubic: bool = False, fog: bool = False, ap_terms: int = 1):
+#: Powers of A_s of the pieces of the one-loop short-mode spectrum (the loop part of the beta piece is A_s^2; the
+#: tree part sets the power).
+S21_LOOP_PIECE_POWERS = (1, 1, 1, 1, 0, 0)
+
+
+def s21_loop_powers():
+    """Powers of A_s / A_s,fid of the one-loop S21m columns (``s21_loop_blocks``): the products of the piece powers, the
+    response ones plus one for P_L(K)."""
+    blocks = s21_loop_blocks()
+    p = S21_LOOP_PIECE_POWERS
+    return ([(p[i] + p[j] + 1, size) for (i, j), _, size in blocks["response"]]
+            + [(p[i] + p[j], size) for (i, j), _, size in blocks["noise"]] + [(p[i], size) for i, _, size in blocks["norms"]])
+
+
+def amplitude_scalings(ratio, cubic: bool = False, fog: bool = False, ap_terms: int = 1, s21_loop: bool = False):
     """Powers of A_s / A_s,fid of every basis output (grid rows, kappa / skewness / S21m columns), so that a
     Taylor emulator is nearly exact in logA. ``cubic``: the kappa columns include CUBIC_KAPPA_SIZES (P^3, like the
-    tree trispectrum). ``fog``: with the counterterm orders of ``fog_sizes`` (the powers of the blocks they expand)."""
+    tree trispectrum). ``fog``: with the counterterm orders of ``fog_sizes`` (the powers of the blocks they expand).
+    ``s21_loop``: the S21m columns of the one-loop short-mode layout (no Fingers-of-God orders)."""
     import jax.numpy as jnp
 
     xp = np if isinstance(ratio, (float, np.floating)) else jnp
@@ -88,12 +156,13 @@ def amplitude_scalings(ratio, cubic: bool = False, fog: bool = False, ap_terms: 
     clustering = [(3, KAPPA_SIZES[0])] + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else [])
     s21 = list(zip((3, 2, 1, 2, 1, 0, 1, 0), S21_SIZES))
     s21_fog = [s21[i] for i in FOG_S21_BLOCKS]
+    s21_columns = s21_loop_powers() if s21_loop else s21 + (2 * s21_fog if fog else [])
     # with ``ap_terms`` AP-polynomial terms the columns repeat per term (alpha-major)
     return dict(grid=powers([(1, len(TREE)), (2, len(LOOP)), (1, 3)]),
                 kappa=powers(ap_terms * (list(zip((3, 2, 1, 0), KAPPA_SIZES))
                                          + ([(3, sum(CUBIC_KAPPA_SIZES))] if cubic else []) + (2 * clustering if fog else []))),
                 skewness=powers(ap_terms * (list(zip((2, 1, 0), SKEW_SIZES)) + (2 * [(2, SKEW_SIZES[0])] if fog else []))),
-                s21m=powers(ap_terms * (s21 + (2 * s21_fog if fog else []))))
+                s21m=powers(ap_terms * s21_columns))
 
 
 #: Number of terms of an AP polynomial of total degree 0, 1, 2, 3, 4 in (ln q_par, ln q_perp) (``spectrum.APNodes``).
@@ -130,12 +199,11 @@ def ap_evaluate(values, nalpha: int, qpar=1.0, qperp=1.0):
 
 
 def is_fog(kappa=None, s21m=None) -> bool:
-    """Whether basis outputs hold the Fingers-of-God counterterm orders (from their number of columns)."""
+    """Whether basis outputs hold the Fingers-of-God counterterm orders (from their number of columns; S21m terms of the
+    one-loop layout hold none)."""
     if kappa is not None:
         return basis_layout(kappa.shape[-1])[1]
-    n = s21m.shape[-1]
-    base = sum(S21_SIZES) + fog_sizes()["s21m"]
-    return n % base == 0 and n // base in AP_TERMS
+    return s21m_layout(s21m.shape[-1])[1]
 
 
 def _collapse(values, base, blocks, c, order):
@@ -178,18 +246,23 @@ def collapse_fog(kappa=None, skewness=None, s21m=None, c_s1=0.0, c_s21=0.0, orde
     return tuple(out)
 
 
-def s21m_lambda_mask(fog: bool):
+def s21m_lambda_mask(fog: bool, loop: bool = False):
     """Boolean mask of the lambda_2 columns (the second-layer sums, which carry the AP volume factor) in the S21m column
     layout of ``s21m_assemble``; the others are the first-layer norms."""
-    nlam = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
-    nnorm = sum(S21_SIZES[6:]) + (2 * S21_SIZES[6] if fog else 0)
+    if loop:
+        blocks = s21_loop_blocks()
+        nlam = sum(size for _, _, size in blocks["response"] + blocks["noise"])
+        nnorm = sum(size for _, _, size in blocks["norms"])
+    else:
+        nlam = sum(S21_SIZES[:6]) + (2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)) if fog else 0)
+        nnorm = sum(S21_SIZES[6:]) + (2 * S21_SIZES[6] if fog else 0)
     return s21m_assemble(np.ones((1, nlam)), np.zeros((1, nnorm)), fog)[0] > 0.5
 
 
 def s21m_assemble(lam, norms, fog: bool):
     """S21m terms in the column layout of ``second_layer.S21mBasis`` from the projected grid columns ``lam`` (..., ncol) and
-    the first-layer norms of each entry (..., nnorm): [lam | norms], or with ``fog`` the base blocks followed by the
-    orders 1 and 2 of both. NumPy or JAX."""
+    the first-layer norms of each entry (..., nnorm): [lam | norms] (also the one-loop layout), or with ``fog`` the base
+    blocks followed by the orders 1 and 2 of both. NumPy or JAX."""
     import jax.numpy as jnp
 
     xp = np if isinstance(lam, np.ndarray) and isinstance(norms, np.ndarray) else jnp
@@ -203,10 +276,13 @@ def s21m_assemble(lam, norms, fog: bool):
     return xp.concatenate(base + orders[0] + orders[1], axis=-1)
 
 
-def s21m_field_powers(fog: bool):
+def s21m_field_powers(fog: bool, loop: bool = False):
     """Powers of A_s / A_s,fid of the grid columns and of the norm columns of ``second_layer.S21mBasis.field_grids`` (those of
     ``amplitude_scalings``'s s21m columns, mapped back through ``s21m_assemble``)."""
-    final = np.log(np.asarray(amplitude_scalings(np.e, fog=fog)["s21m"]))
+    final = np.log(np.asarray(amplitude_scalings(np.e, fog=fog, s21_loop=loop)["s21m"]))
+    if loop:
+        nnorm = sum(size for _, _, size in s21_loop_blocks()["norms"])
+        return final[:-nnorm], final[-nnorm:]
     nlam, nnorm = (sum(S21_SIZES[:6]), sum(S21_SIZES[6:])) if not fog else (
         sum(S21_SIZES[:6]) + 2 * sum(S21_SIZES[i] for i in (0, 1, 3, 4)), S21_SIZES[6] + S21_SIZES[7] + 2 * S21_SIZES[6])
     source = s21m_assemble(np.arange(nlam, dtype=float), nlam + np.arange(nnorm, dtype=float), fog).astype(int)

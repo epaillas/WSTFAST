@@ -147,13 +147,14 @@ def train_rsd(args):
                     s1_ells=list(args.s1_ells), kmax=args.kmax, damping="linear", ir=args.ir, vary=list(args.vary),
                     bounds=bounds, tracer=args.tracer, s21_damping=args.s21_damping, cubic_biases=args.cubic_biases,
                     fog=args.fog, fiducial=args.fiducial, lattice=list(args.lattice), s21_cellsize=args.s21_cellsize,
-                    s21_projected=not args.s21_unprojected, ap_order=args.ap_order)
+                    s21_projected=not args.s21_unprojected, ap_order=args.ap_order, s21_loop=args.s21_loop,
+                    s21_reference_b1=args.s21_reference_b1)
     basis = Basis(cosmo=build_cosmology(args.vary, fiducial=args.fiducial), config=config, coefficients=coefficients,
                      z=meta["redshift"], kmax=args.kmax, ir=args.ir, s21_coefficients=s21, tracer=args.tracer,
                      space=args.space,
                      s21_damping=args.s21_damping, cubic_biases=args.cubic_biases, fog=args.fog,
                      s21_lattice=args.lattice, s21_cellsize=args.s21_cellsize, s21_projected=not args.s21_unprojected,
-                     ap_order=args.ap_order)
+                     ap_order=args.ap_order, s21_loop=args.s21_loop, s21_reference_b1=args.s21_reference_b1)
     settings["model"] = basis.spec.to_dict()
     emulator = Emulator(basis, Space(bounds=bounds))
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +266,12 @@ def main():
     parser.add_argument("--ap-order", type=int, default=0,
                         help="rsd, biased, --fog: emulate the observed-frame S1m cumulants and S21m terms as AP polynomials "
                              "of this order in ln q (the first-layer filters in the observed frame; projected S21m only)")
+    parser.add_argument("--s21-loop", action="store_true",
+                        help="rsd, biased, --fog: one-loop short modes of the S21m modulus spectra (the P_s grid with its "
+                             "counterterms and stochastic terms in place of the tree spectrum with Fingers-of-God legs; "
+                             "second_layer.LoopModulusSpectra)")
+    parser.add_argument("--s21-reference-b1", type=float, default=2.0,
+                        help="--s21-loop: b1 of the tree response function of the loop and counterterm pieces")
     parser.add_argument("--s21-unprojected", action="store_true",
                         help="rsd, biased: emulate the S21m modulus-spectrum grids per first-layer field instead of the "
                              "projected lambda_2, so that the projection (and AP) is applied at assembly")
