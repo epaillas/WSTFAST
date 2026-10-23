@@ -1389,3 +1389,23 @@ and bGamma3 ~ 1.0, far from P_l alone at the truth (+0.07, -0.3). So the b1 / al
 not what carries the bias; the remaining channels are the S21m bG2 / bGamma3 responses and the ridge itself. Decoupling
 bG2 and bGamma3 does not remove it either (0.1165 / 3.131 / 0.989 with the one-loop X). The code stays (`--s21-loop`,
 off by default); the baseline emulator and fits are unchanged.
+
+**Which shared nuisance carries the slide (one-loop S21m, tree X, AP; S21m given its own copies, suffix _s21).**
+Profile best fits, shift in units of the P_l AP chain sigma:
+
+| S21m's own copies | omega_cdm | ln A_s | n_s | h | chi2 / 236 | S21m's own values |
+|---|---|---|---|---|---|---|
+| none | 0.1166 (-1.1) | 3.114 (+0.9) | 1.004 (+1.6) | 0.6709 (0.0) | 71.3 | |
+| bG2, bGamma3 | 0.1169 (-1.0) | 3.109 (+0.8) | 1.000 (+1.4) | 0.6712 (0.0) | 70.5 | bG2 -0.37, bGamma3 1.05 |
+| bG2, bGamma3, c0, c2, c4 | 0.1179 (-0.8) | 3.103 (+0.7) | 0.995 (+1.2) | 0.6717 (+0.1) | 65.9 | c0 69 +- 28, c2 38 +- 17 |
+| b1, b2, alpha0, alpha2 | 0.1153 (-1.4) | 3.148 (+1.5) | 1.010 (+1.8) | 0.6691 (-0.5) | 59.1 | b1 2.45 +- 0.23 |
+| all (biases, alphas, counterterms) | 0.1191 (-0.45) | 3.102 (+0.7) | 0.980 (+0.7) | 0.6718 (+0.2) | 55.6 | b1 2.34 +- 0.24, c0 46 +- 44 |
+
+No single channel: whichever subset stays shared transmits the slide, and only full decoupling removes it (to the
+level of the old fully decoupled chain, 0.1201 / 3.082 / 0.974, profile widths 0.0040 / 0.061 / 0.026 = P_l + X: no
+gain). Even fully decoupled, S21m asks for nuisances P_l rejects (b1 2.34 against 1.93, counterterms 5-10x P_l's),
+as it did at the truth (b1 2.27, bGamma3 1.3). So the one-loop S21m at sigma1 = 17.7 still needs a short-mode /
+response region inconsistent with P_l's at the true cosmology; its 30 noise amplitudes and W absorb the rest. The
+inconsistency is not in the short-mode spectrum any more (that is P_l's own now) but in what multiplies it: the
+response kernel (tree long-mode coupling, approximate loop response), the Gaussian-chaos noise (no connected
+noise), or the Gaussian second layer. Every gain of S21m(17.7) over P_l + X with AP runs through that inconsistency.
