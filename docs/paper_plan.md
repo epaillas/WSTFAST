@@ -1307,3 +1307,11 @@ biases enter through P_s, quadratic in beta, plus the counterterm and stochastic
 response (`covariance_rsd.ModulusCrossRSD`) has the same short-mode model but survives through its marginalised cU / eU
 (eU at sigma = 17.7 is 14-23 sigma from zero, of order N -- the same mismatch). Until then the sigma1 = 17.7 S21m cannot
 be used with shared b1 / alpha0: the AP options are P_l + X (unbiased, -4 / -7 / -10 / 0%) or the decoupled S21m (no gain).
+
+Confirmation (same day): the no-AP baseline with S21m's own alpha0 lands at P_l's own no-AP spot (0.1231 / 3.058 / 0.958 /
+0.6744, widths 0.0042 / 0.057 / 0.027 / 0.0052 against P_l 0.0045 / 0.061 / 0.028 / 0.0055; alpha0_s21 = 0.11 +- 0.12):
+the no-AP gain of 14-23% also ran through alpha0, and its unbiasedness was the cancellation. Chain of the fully decoupled
+AP variant (`pud/sx05mns_dec_ap_chain_n5000_V60`, R - 1 < 0.03, ESS 327): omega_cdm 0.1201 +- 0.0041 (-0.19 sigma),
+ln A_s 3.082 +- 0.060 (+0.35), n_s 0.974 +- 0.026 (+0.46), h 0.6726 +- 0.0041 (+0.36); widths within 2-6% of P_l with
+AP, i.e. no gain; S21m's own nuisances b1 1.79 +- 0.15, b2 -0.15 +- 0.25, bG2 -0.24 +- 0.11, alpha0 +0.30 +- 0.16
+against P_l + X's b1 1.945 +- 0.044, bG2 -0.44 +- 0.08, alpha0 -0.06 +- 0.20.
