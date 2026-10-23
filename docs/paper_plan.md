@@ -1315,3 +1315,77 @@ AP variant (`pud/sx05mns_dec_ap_chain_n5000_V60`, R - 1 < 0.03, ESS 327): omega_
 ln A_s 3.082 +- 0.060 (+0.35), n_s 0.974 +- 0.026 (+0.46), h 0.6726 +- 0.0041 (+0.36); widths within 2-6% of P_l with
 AP, i.e. no gain; S21m's own nuisances b1 1.79 +- 0.15, b2 -0.15 +- 0.25, bG2 -0.24 +- 0.11, alpha0 +0.30 +- 0.16
 against P_l + X's b1 1.945 +- 0.044, bG2 -0.44 +- 0.08, alpha0 -0.06 +- 0.20.
+
+### One-loop short modes inside S21m: model, validation at the truth, AP chains (2026-10-23)
+
+The fix proposed above, implemented (commit 4aa0a79): `second_layer.LoopModulusSpectra` (`S21mBasis(loop=grid)`,
+`Basis(s21_loop=True)`, `ModelSpec.s21_loop`, `train_emulator.py --s21-loop`). The short-mode spectrum of every leg
+of the modulus response, of the Gaussian-chaos noise and of the first-layer norms is the one-loop P_s of the P_l model,
+interpolated from the basis's P_s grid (linear in ln k, Lagrange in mu^2 through its Gauss nodes; clamped at the
+grid's kmax = 0.3, where the sigma >= 17.6 filters are < 1e-6 of their peak), written as a sum of pieces with
+nuisance weights: the 15 degree-2 bias monomials of tree + loop, the counterterm shapes (c0, c2, c4), 1 (N (1 +
+alpha0)) and k^2 mu^2 (N alpha2). The noise (products of two spectra) and the norms are exact in the pieces. The
+response keeps the tree long-mode coupling: the tree part of the beta piece responds exactly (2 Z2 Z1 P_L, P_L the
+IR-resummed tree row), the loop and counterterm pieces through the response-function approximation dP/d delta_L ~
+R0(q, K) P(q) with R0 = 2 Z2/Z1 of a *linearly* biased tracer at a reference b1 (= 2; a ratio, weakly dependent on b1:
+exact kernels would make the response columns a degree-3 polynomial divided by Z1(q), not separable; the b2 / bG2
+responses of these next-to-leading pieces are dropped), and the stochastic pieces as the Poisson term, Z1(K) times the
+pair's stochastic power. Columns: the symmetric products of 6 response pieces (266, times P_L(K)) + of 6 spectrum
+pieces (160) + 20 norms = 446 per entry (`layout.s21_loop_blocks`), contracted by `calculators.s21m_loop_terms` with
+P_l's counterterms (`c0_pk`... when P_l is fitted, else the S1m ones) and alpha0, alpha2. **c_v is dropped from S21m**
+(the one-loop counterterms play its role; it stays for the S1m cumulants). The X response is mirrored
+(`ModulusCrossRSD.loop_spectra`; `response_taylor(loop=)` is a table in the biases, c0, c2, c4, alpha0, alpha2, no
+sigma_v; `ResponseTheory` reads them). Cost: one exact AP basis (ap_order 3) 42 s locally, about the old one.
+
+**Validation at the true cosmology (exact basis, no emulator; S21m(17.7, 25 -> 70.7, q = 2) alone, V = 60 errors of
+the 5000 boxes, 108 entries, free noise amplitudes and W; scratch `validate_truth.py`).** Control: the old model at
+the AP chain's own best fit (cosmology and nuisances) reproduces its S21m fit, chi2 = 19 / 108. With the shared
+nuisances fixed at P_l's profile at the truth (b1 1.948 +- 0.012, b2 -0.46 +- 0.5, bG2 0.07 +- 0.4, bGamma3 -0.3 +-
+1.1, alpha0 0.02 +- 0.17, alpha2 -13.2, c0 / c2 / c4 = 1.2 / -2.3 / 4.0) neither model fits (old chi2 136, one-loop
+225): S21m wants bG2 ~ -0.35 +- 0.1, which P_l leaves free (the P_l-only AP chain's bG2 = +0.07, bGamma3 = -0.4 are far
+from the joint values -0.42, +1.0). The decoupling test proper, S21m alone with its own b1, b2, bG2, bGamma3, alpha0,
+alpha2 (c at P_l's):
+
+| model | b1 | b2 | bG2 | bGamma3 | alpha0 | chi2 | dchi2 of pinning b1, alpha0 at P_l's |
+|---|---|---|---|---|---|---|---|
+| old (tree + c_v) | 1.58 +- 0.13 (-2.8 sigma from 1.948) | -0.16 +- 0.21 | -0.31 +- 0.10 | 0.09 +- 1.0 (prior) | -0.02 +- 0.13 | 12.4 | 6.0 (bG2 -> -0.41) |
+| one-loop | 2.27 +- 0.26 (+1.2 sigma) | -0.18 +- 0.24 | -0.36 +- 0.11 | 1.30 +- 0.32 | 0.04 +- 0.25 | 11.9 | 2.2 (bG2 -> -0.31, bGamma3 1.1) |
+
+So at the truth the one-loop short modes bring S21m's own b1 from 2.8 sigma below P_l's to 1.2 sigma above (with a
+twice larger error: bGamma3 now enters through P13 and is degenerate with b1), alpha0 agrees in both, and the cost of
+sharing (b1, alpha0) drops from 6.0 to 2.2. The reference b1 of the response kernel does not matter (1.5 / 2 / 2.5:
+b1 = 2.25 / 2.27 / 2.28, chi2 11.3 / 11.9 / 12.3). Direct check of the response on the box X = P_Ud / <U> at the AP
+chain's best fit (scratch `x_check.py`, 80 points, diagonal chi2 with a free constant and k^2 P_L per field as the
+fit marginalises): old (sigma_v damping) 59 -> 9, one-loop 194 -> 5; the one-loop response needs a constant eU ~
++0.2 to +0.85 N at sigma = 17.7 (+0.05 N at 25), i.e. a missing white term in P_Ud of order the Poisson three-point
+pieces N [P(p) + P(q)] (neither model has them; marginalised in the fits).
+
+**Fits of the v5 baseline with the one-loop short modes (emulator `rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_v5loop.h5`,
+trained on Perlmutter, S21m validation 5e-4 max; n_s free, V = 60, 5000 boxes).** The chains were stopped once the
+profiles showed the slide; profile best fits (shift in units of the P_l chain sigma, AP or no AP; truth 0.1209 / 3.061
+/ 0.962 / 0.6711). X is the one-loop mirror unless noted:
+
+| variant | omega_cdm | ln A_s | n_s | h | b1 | bG2 | bGamma3 | alpha0 | chi2 / 236 |
+|---|---|---|---|---|---|---|---|---|---|
+| old model, AP (chain mean, for reference) | 0.1164 (-1.1) | 3.126 (+1.1) | 0.998 (+1.3) | 0.6705 (-0.2) | 1.92 | -0.42 | 1.02 | 0.10 | 58.7 |
+| one-loop S21m + X, AP | 0.1131 (-1.9) | 3.165 (+1.7) | 1.024 (+2.3) | 0.6681 (-0.8) | 1.92 | -0.25 | 0.72 | 0.21 | 55.8 |
+| one-loop S21m + X, no AP | 0.1152 (-1.3) | 3.132 (+1.2) | 1.013 (+1.8) | 0.6654 (-1.0) | 1.94 | -0.26 | 0.78 | 0.15 | 59.8 |
+| own bGamma3 in S21m, AP | 0.1130 | 3.165 | 1.024 | 0.6681 | 1.92 | -0.24 | 0.69 (0.73) | 0.21 | 56.1 |
+| own bGamma3 in S21m and X, AP | 0.1150 | 3.138 | 1.008 | 0.6696 | 1.94 | -0.24 | 0.61 (0.92) | 0.06 | 55.0 |
+| own bG2, bGamma3 in S21m and X, AP | 0.1165 | 3.131 | 0.989 | 0.6689 | 1.91 | 0.17 (-0.25) | -0.58 (0.91) | 0.17 | 49.8 |
+| P_l + one-loop X only, AP (128 points) | 0.1150 | 3.163 | 1.004 | 0.6690 | 1.90 | -0.30 | 0.69 | 0.16 | 34.3 / 128 |
+| one-loop S21m + **tree X**, AP | 0.1166 (-1.1) | 3.114 (+0.9) | 1.004 (+1.6) | 0.6709 (0.0) | 1.95 | -0.37 | 0.96 | -0.00 | 71.3 |
+| one-loop S21m + **tree X**, no AP | 0.1196 (-0.3) | 3.072 (+0.2) | 0.988 (+0.9) | 0.6705 (-0.1) | 1.97 | -0.38 | 1.03 | -0.06 | 74.0 |
+
+(own copies in parentheses.) **Result: the one-loop short modes do not remove the AP bias.** (1) The one-loop X mirror
+is itself biased: P_l + one-loop X alone slides to 0.1150 / 3.163 / 1.004, where P_l + tree X was unbiased (0.1202 /
+3.095 / 0.970, chain). Its Taylor table is accurate (quadratic terms < 8% of the linear ones over 5 steps), so this is
+the model: the response needs a constant eU of +0.2 to +0.85 N at sigma = 17.7 (above), and the marginalised eU, cU
+cannot absorb a response that now moves with P_l's bG2, bGamma3, counterterms and alpha0. Keep the tree X
+(`response_taylor` without `loop`) with any S21m model. (2) With the tree X, the one-loop S21m makes the shared b1 and
+alpha0 agree with P_l (1.95, 0.00, as the validation at the truth predicted), but the AP slide is the old one (-1.1 /
++0.9 / +1.6 sigma; chi2 +15 against the one-loop X, the two blocks now disagreeing), and S21m still pins bG2 ~ -0.37
+and bGamma3 ~ 1.0, far from P_l alone at the truth (+0.07, -0.3). So the b1 / alpha0 inconsistency was real but was
+not what carries the bias; the remaining channels are the S21m bG2 / bGamma3 responses and the ridge itself. Decoupling
+bG2 and bGamma3 does not remove it either (0.1165 / 3.131 / 0.989 with the one-loop X). The code stays (`--s21-loop`,
+off by default); the baseline emulator and fits are unchanged.
