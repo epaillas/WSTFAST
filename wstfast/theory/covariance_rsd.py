@@ -94,6 +94,10 @@ class ModulusCrossRSD(LoopModulusSpectra):
                 z2q = galaxy_kernel(np.stack([qvec, minus], axis=-2), f)
                 z2p = galaxy_kernel(np.stack([minus, self.pvec], axis=-2), f)
                 r0q, r0p = 2 * (z2q @ beta_ref) / (z1q @ beta_ref), 2 * (z2p @ beta_ref) / (z1p @ beta_ref)
+                if self.loop_growth_order != 1:  # the D^4 pieces: the growth part of the response once more
+                    extra = self.loop_growth_order - 1
+                    r0q = r0q + extra * self.growth_response(qvec, kvec, self.mup**2, f)
+                    r0p = r0p + extra * self.growth_response(self.pvec, kvec, (qvec[:, 2] / np.maximum(qn, 1e-30)) ** 2, f)
                 correction_q = loopq @ m2 + sum(wt * uq[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
                 correction_p = loopp @ m2 + sum(wt * up[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
                 long = (2 * (plinq * (z2q @ beta) * (z1q @ beta) + plinp * (z2p @ beta) * (z1p @ beta))

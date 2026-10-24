@@ -256,6 +256,14 @@ class LoopModulusSpectra(ModulusSpectra):
     #: R0 P. 1 is the response-function approximation (the tree part responds as R0 Z1^2 P_L per leg). The first
     #: implementation (commit 4aa0a79; the v5loop emulator of 2026-10-23 and its fits) had 2 by mistake.
     loop_response = 1.0
+    #: Growth order of the loop and counterterm pieces: the part of the response that comes from the growth and tidal
+    #: terms of F2 and G2 (5/7 + 2/7 c^2 and 3/7 + 4/7 c^2, c the cosine between the legs) scales with the number of
+    #: growth factors of the piece (the loop and the counterterm go as D^4, the tree spectrum as D^2), so these
+    #: pieces respond with (growth_order - 1) x that part on top of R0; the displacement terms (the dipoles of F2, G2
+    #: and the redshift-space velocity term) act once on any piece. 1 is the plain response-function approximation.
+    #: Tested 2026-10-24 (docs/paper_plan.md): 2 changes the response by +-2-3% per field, in both directions, and does
+    #: not close the 15-30% deficit against the measured P_Ud at P_l's biases (which bG2 ~ -0.5 does); kept at 1.
+    loop_growth_order = 1.0
 
     def __init__(self, fields, k, mu, grid=None, reference_b1: float = 2.0, **kwargs):
         super().__init__(fields, k, mu, **kwargs)
@@ -280,6 +288,16 @@ class LoopModulusSpectra(ModulusSpectra):
         i = np.clip(np.searchsorted(logk, lk) - 1, 0, logk.size - 2)
         t = (lk - logk[i]) / (logk[i + 1] - logk[i])
         return i, t, lagrange_matrix(self.grid_mu**2, np.abs(mu) ** 2)
+
+    def growth_response(self, leg, kvec, mu2_total, f):
+        """2 Z2_growth(leg, -K) / Z1_ref(leg): the growth and tidal part of the reference response function of a leg
+        (the terms of F2 and G2 without the displacement dipoles), with ``mu2_total`` the squared line-of-sight cosine
+        of leg - K (the total momentum of the coupling)."""
+        norm = np.sqrt(np.sum(leg**2, axis=-1))
+        c = -(leg @ kvec) / np.maximum(norm * np.sqrt(kvec @ kvec), 1e-30)
+        z2 = self.reference_b1 * (5.0 / 7.0 + 2.0 / 7.0 * c**2) + f * mu2_total * (3.0 / 7.0 + 4.0 / 7.0 * c**2)
+        mu2 = np.divide(leg[:, 2] ** 2, norm**2, out=np.zeros_like(norm), where=norm > 0)
+        return 2 * z2 / (self.reference_b1 + f * mu2)
 
     @staticmethod
     def _rows_at(rows, interp):
@@ -352,6 +370,10 @@ class LoopModulusSpectra(ModulusSpectra):
                 # tree response function of the reference tracer, 2 Z2 / Z1, of each leg
                 r0q = 2 * (z2q @ beta_ref) / (z1q @ beta_ref)
                 r0p = 2 * (z2p @ beta_ref) / z1p_ref
+                if self.loop_growth_order != 1:  # the D^4 pieces: the growth part of the response once more
+                    extra = self.loop_growth_order - 1
+                    r0q = r0q + extra * self.growth_response(qvec, kvec, self.mup**2, f)
+                    r0p = r0p + extra * self.growth_response(self.pvec, kvec, (qvec[:, 2] / np.maximum(qn, 1e-30)) ** 2, f)
                 long_beta = (2 * (plinq[:, None] * product_coefficients(z2q, z1q) + plinp[:, None] * product_coefficients(z2p, z1p))
                              + self.loop_response * (r0q[:, None] * loopq + r0p[:, None] * loopp))
                 longs = [long_beta] + [self.loop_response * (r0q[:, None] * uq[m] + r0p[:, None] * up[m]) for m in (1, 2, 3)]

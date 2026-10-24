@@ -1486,3 +1486,16 @@ residual slide along the old ridge, n_s high), but it gains only 3-9% over P_l: 
 data want (cf. the 15-30% response deficit at P_l's nuisances above, absorbed in the joint fits by bG2 and the
 cosmology). Open: a better nonlinear response of the short modes (beyond the response-function approximation at a fixed
 reference bias), which is where the S21m(17.7) gain appears to live.
+
+#### Growth-aware response of the loop pieces: no (2026-10-24)
+
+`LoopModulusSpectra.loop_growth_order` (`growth_response`): the growth and tidal part of the reference response
+function (5/7 + 2/7 c^2 of F2, 3/7 + 4/7 c^2 of G2) counted twice for the D^4 pieces (loop, counterterm), the
+displacement dipoles and the redshift-space velocity term once, as a separate-universe argument suggests and as the
+factor-2 bug did crudely. Against the measured X = P_Ud / <U> (scratch `growth_test.py`): it changes the response by
++-2-3% per field, up for the sigma1 = 25 m = 0 fields and down for the sigma1 = 17.7 l = 4 ones, and leaves the
+data / model ratio at P_l's truth-profile biases (bG2 +0.07, bGamma3 -0.3) at 1.07-1.30 for every model (tree,
+one-loop, growth-aware); at the corrected no-AP chain's biases (bG2 -0.53, b2 -0.78, bGamma3 1.27) all three sit at
+0.95-1.12. The P_UU shape check (free a, W, K^2, K^2 mu^2 per field) is not better either (chi2 3175 vs 3065). So the
+response amplitude the data want is a *bias* statement, mostly bG2 through the tidal term (largest for the transverse
+|m| = l fields), not a loop-growth one; the bug's success was not the growth doubling. Default left at 1 (no retrain).
