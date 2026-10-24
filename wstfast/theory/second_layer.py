@@ -252,6 +252,11 @@ class LoopModulusSpectra(ModulusSpectra):
     u_i(p) u_j(q) (+ i <-> j) under F^2 / 2, in the order of ``layout.product_blocks``.
     """
 
+    #: Response of the loop and counterterm pieces in units of the response function: dP/d delta_L = loop_response x
+    #: R0 P. 1 is the response-function approximation (the tree part responds as R0 Z1^2 P_L per leg). The first
+    #: implementation (commit 4aa0a79; the v5loop emulator of 2026-10-23 and its fits) had 2 by mistake.
+    loop_response = 1.0
+
     def __init__(self, fields, k, mu, grid=None, reference_b1: float = 2.0, **kwargs):
         super().__init__(fields, k, mu, **kwargs)
         #: b1 of the tree response function of the loop and counterterm pieces (see the class docstring).
@@ -348,8 +353,8 @@ class LoopModulusSpectra(ModulusSpectra):
                 r0q = 2 * (z2q @ beta_ref) / (z1q @ beta_ref)
                 r0p = 2 * (z2p @ beta_ref) / z1p_ref
                 long_beta = (2 * (plinq[:, None] * product_coefficients(z2q, z1q) + plinp[:, None] * product_coefficients(z2p, z1p))
-                             + 2 * (r0q[:, None] * loopq + r0p[:, None] * loopp))
-                longs = [long_beta] + [2 * (r0q[:, None] * uq[m] + r0p[:, None] * up[m]) for m in (1, 2, 3)]
+                             + self.loop_response * (r0q[:, None] * loopq + r0p[:, None] * loopp))
+                longs = [long_beta] + [self.loop_response * (r0q[:, None] * uq[m] + r0p[:, None] * up[m]) for m in (1, 2, 3)]
                 stochastic = [0.5 * (up[m] + uq[m]) for m in (4, 5)]  # the pair's stochastic power, times Z1(K) below
                 z1k = linear_components(kvec, f)  # (5,)
                 quads = []

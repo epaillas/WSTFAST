@@ -97,7 +97,7 @@ class ModulusCrossRSD(LoopModulusSpectra):
                 correction_q = loopq @ m2 + sum(wt * uq[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
                 correction_p = loopp @ m2 + sum(wt * up[m][:, 0] for m, wt in zip((1, 2, 3), counterterms))
                 long = (2 * (plinq * (z2q @ beta) * (z1q @ beta) + plinp * (z2p @ beta) * (z1p @ beta))
-                        + 2 * (r0q * correction_q + r0p * correction_p))
+                        + self.loop_response * (r0q * correction_q + r0p * correction_p))
                 stochastic = 0.5 * (2 * weights[4] + weights[5] * (up[5][:, 0] + uq[5][:, 0]))  # the pair's stochastic power
                 z1k = linear_components(kvec, f) @ beta
                 pair = w * psp * psq
