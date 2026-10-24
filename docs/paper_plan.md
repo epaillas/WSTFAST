@@ -1449,3 +1449,40 @@ sigma bias). Proposed new baseline: `fit.py --emulator ..._ap3_v5loop.h5 --stats
 --s21-min-scale 17.6 --s21-white --s21-k2 --pud-x 0.5 --pud-marg --cubic-biases relation --vary omega_cdm logA n_s h`
 (+ `--ap`). Open: the physical origin of the K^2 noise (halo connected noise of the moduli) and of the X response
 amplitude; the paper text and the survey pipeline still use the old model.
+
+#### Correction (2026-10-24): the one-loop response had a factor-2 bug; K^2 noise terms; converged chains
+
+**Bug.** In `LoopModulusSpectra` (4aa0a79) the loop and counterterm pieces of the short-mode spectrum responded as
+2 R0 P instead of R0 P (R0 = 2 Z2/Z1, the response-function approximation, as the tree part does), in S21m and in the X
+mirror. Fixed in d6fa9fc (`LoopModulusSpectra.loop_response = 1`). Everything above run with `--s21-loop` (the
+validation at the truth, the v5loop emulator, the profiles and the decoupling tests) has the factor 2; the old baseline,
+P_l and P_l + X are unaffected. At the no-AP best fit the fix moves S21m by 11 sigma whitened (up to 3.3 sigma per
+entry, V = 60), but refitting the S21m-only noise terms at fixed cosmology leaves dchi2 = 2.3.
+
+**K^2 noise terms (scratch wrapper `k2noise.py`, not in the package yet).** The measured modulus spectra P_UU of the
+5000 boxes exceed the model with (1 + a) g + W by a residual growing with K over 0.02-0.05 h/Mpc for |m| >= 1 (shape
+check with free a, W per field: chi2 3772 / 756 at the joint fit's nuisances; with per-field K^2 and K^2 mu^2 terms 2538),
+which mimics a tilt across the l = 1-4 second-layer filters. Per first-layer scale W2_j K^2 + W3_j K^2 mu_K^2 in
+P_UU / <U>^2 (lattice sums at q = 1, like W). With the buggy one-loop S21m they gave an unbiased, 15-25% tighter
+posterior; the old tree S21m with the same terms stays biased (-1.0 / +1.2 / +1.1 sigma, AP profile).
+
+**Converged chains with the corrected emulator** (`rsd_biased_basis_taylor_4p_ir_fog_cubic_ap3_v5loopfix.h5`, S21m
+validation 2.3e-4; one-loop S21m + K^2 noise, tree X; `pud/lk2{_ap,}_chain_n5000_V60`, R - 1 <= 0.01, ESS 333 / 385;
+plots `outputs/plots/triangle_lk2_{ap,noap}_n5000_V60.png`). Mean +- sigma (shift; change of sigma vs P_l):
+
+| vector | omega_cdm | ln A_s | n_s | h | chi2 / ndata |
+|---|---|---|---|---|---|
+| P_l, AP | 0.1204 +- 0.0040 (-0.12) | 3.092 +- 0.060 (+0.52) | 0.956 +- 0.027 (-0.23) | 0.6713 +- 0.0040 (+0.05) | 17.0 / 48 |
+| P_l + X, AP | 0.1202 +- 0.0039 (-0.20; -4%) | 3.095 +- 0.056 (+0.60; -7%) | 0.970 +- 0.025 (+0.31; -10%) | 0.6726 +- 0.0040 (+0.37; 0%) | 37.2 / 128 |
+| old baseline, AP | 0.1164 +- 0.0032 (-1.40; -20%) | 3.126 +- 0.055 (+1.19; -9%) | 0.998 +- 0.023 (+1.56; -17%) | 0.6705 +- 0.0036 (-0.17; -10%) | 58.7 / 236 |
+| **one-loop S21m + K^2, AP** | 0.1180 +- 0.0037 (-0.79; -7%) | 3.099 +- 0.058 (+0.64; -3%) | 0.986 +- 0.025 (+0.93; -8%) | 0.6712 +- 0.0038 (+0.03; -3%) | 62.5 / 236 |
+| P_l, no AP | 0.1239 +- 0.0045 (+0.66) | 3.052 +- 0.061 (-0.16) | 0.935 +- 0.028 (-0.96) | 0.6741 +- 0.0055 (+0.55) | 17.1 / 48 |
+| old baseline, no AP | 0.1203 +- 0.0034 (-0.19; -23%) | 3.072 +- 0.053 (+0.21; -14%) | 0.974 +- 0.023 (+0.53; -21%) | 0.6709 +- 0.0043 (-0.05; -20%) | 61.5 / 236 |
+| **one-loop S21m + K^2, no AP** | 0.1228 +- 0.0041 (+0.46; -8%) | 3.039 +- 0.058 (-0.38; -5%) | 0.957 +- 0.026 (-0.20; -9%) | 0.6737 +- 0.0051 (+0.51; -7%) | 64.4 / 236 |
+
+**Reading.** With the corrected response the full vector is unbiased without AP and within 0.93 sigma with AP (the
+residual slide along the old ridge, n_s high), but it gains only 3-9% over P_l: about what P_l + X alone gives with AP
+(0-10%). The 15-25% gain of the buggy chains came from the doubled loop response, which supplied response amplitude the
+data want (cf. the 15-30% response deficit at P_l's nuisances above, absorbed in the joint fits by bG2 and the
+cosmology). Open: a better nonlinear response of the short modes (beyond the response-function approximation at a fixed
+reference bias), which is where the S21m(17.7) gain appears to live.
