@@ -502,6 +502,12 @@ class FitOptions:
     gaussian_prior: tuple = ()
     #: Free white term W_j of the S21m modulus spectra per first-layer scale.
     s21_white: bool = False
+    #: With ``s21_white``, also W2_j K^2 + W3_j K^2 mu^2 per first-layer scale (the analytic noise of the moduli beyond the
+    #: white term; needed with the one-loop short modes to remove the AP bias of the halo baseline, docs/paper_plan.md).
+    s21_k2: bool = False
+    #: The modulus cross-spectra X with the one-loop short modes of a ``s21_loop`` emulator (``response_taylor(loop=)``);
+    #: off by default, the tree response (that mirror is itself biased, docs/paper_plan.md).
+    pud_loop: bool = False
     #: Layer-2 template (scripts/layer2/template_rsd.py): S21m x (1 + d0 + R_l d2), R_l = 1 / (1 + c_l n s_lin^2).
     s21_layer2: Path | None = None
     #: c_l calibrated on the halo pairs outside the data vector ("halo") or transferred from matter.
@@ -869,7 +875,8 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
         files = s21m.files
         s21m_kwargs = dict(basis=basis, nuisance=nuisance, entry_index=entry_index,
                            cumulant_index=[emulated.index(c.label) for c in first_layer], shotnoise=s21m.shotnoise,
-                           white_noise=options.s21_white, config=config, window=window)
+                           white_noise=options.s21_white, config=config, window=window,
+                           white_k2=getattr(options, "s21_k2", False))
         if spec.ap_order and options.ap:  # AP-polynomial terms of the basis, at the trial AP ratios
             s21m_kwargs.update(ap=ap, first_ap=APPolynomial(s1m_ap_projection(config, first_layer, grid, **lattice)))
         if unprojected and settings.get("prepared") is not None:  # emulator contracted at load (contract_s21m)
@@ -957,7 +964,7 @@ def build_problem(options, basis=None, settings=None, space=None, window=None, p
             raise SystemExit("the survey modulus cross-spectra have no AP model yet")
         if window is None:
             loop = (dict(ir=settings["ir"], kmax=settings["kmax"], reference_b1=settings.get("s21_reference_b1", 2.0))
-                    if spec.s21_loop else None)  # the short-mode model of S21m, shared nuisances
+                    if spec.s21_loop and getattr(options, "pud_loop", False) else None)  # S21m's short modes
             table = response_taylor(config, fields, response.k, shot, settings["z"], real=spec.space == "real",
                                     ap_omega_b=fiducial_omega_b(settings) if options.ap else None, loop=loop)
         else:  # survey: the tree response through the cap's cross-spectrum window, about the emulator's fiducial

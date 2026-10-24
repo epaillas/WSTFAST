@@ -1409,3 +1409,43 @@ response region inconsistent with P_l's at the true cosmology; its 30 noise ampl
 inconsistency is not in the short-mode spectrum any more (that is P_l's own now) but in what multiplies it: the
 response kernel (tree long-mode coupling, approximate loop response), the Gaussian-chaos noise (no connected
 noise), or the Gaussian second layer. Every gain of S21m(17.7) over P_l + X with AP runs through that inconsistency.
+
+### The fix: one-loop short modes + K^2 noise of the moduli; unbiased AP baseline with the gain (2026-10-23, night)
+
+**Diagnosis from the measured modulus spectra** (P_UU_m, P_Ud_m of the 5000 boxes, scratch `puu_shape.py`,
+`pud_ratio.py`). (1) At P_l's nuisances the model response is 15-30% below the measured P_Ud, flat in K (|m| = 0:
+x1.15, |m| = l: x1.25-1.40), tree and one-loop alike; at the joint fit's nuisances (bG2 -0.37, shared by S21m and
+X, weakly constrained by P_l) it matches to 1-3%. X hides such an amplitude in its marginalised k^2 P_L and constant
+terms over its 2-4 K bins; a per-field response amplitude (S21m only, or shared with X) does not remove the bias. (2)
+The **shape** of P_UU / <U>^2 is not described even at the joint fit's nuisances with a free (1 + a) g + W per field:
+for |m| >= 1 the monopole of the data rises above the model with K over 0.02-0.05 h/Mpc and the quadrupole falls below
+it. Across the l = 1-4 second-layer filters (peaks at K = sqrt(l) / 70.7) this acts as a tilt in K, which the fit
+produces by raising n_s along the ln A_s - n_s - omega_cdm ridge. The connected noise of the moduli is analytic at low
+K: adding W2 K^2 + W3 K^2 mu^2 per field absorbs a third of the shape residual (chi2 3772 -> 2538 / 756).
+
+**Model:** `--s21-k2` (with `--s21-white`): W2_j K^2 + W3_j K^2 mu_K^2 per first-layer scale in P_UU / <U>^2, next to
+W_j (`NuisanceParameters.white(k2=True)`, `S21mTheory(white_k2=True)`; lattice sums at q = 1 like W; 4 parameters).
+With the one-loop S21m emulator (`ap3_v5loop`, `--s21-loop` training) and the **tree X** (`--pud-loop` off, the
+default: the one-loop X is itself biased). Profiles: the old tree S21m with the same K^2 terms stays biased (-1.0 /
++1.2 / +1.1 sigma with AP), so both pieces are needed. W3_j6 is 2.7 sigma from zero.
+
+**Chains** (NUTS, n_s free, V = 60, 5000 boxes, R - 1 = 0.01; `pud/lsx05k2ns_{ap,}_chain_n5000_V60`; plots
+`outputs/plots/triangle_k2noise_{ap,noap}_n5000_V60.png`). Mean +- sigma (shift from the truth in sigma; change of
+sigma against P_l with the same AP setting):
+
+| vector | omega_cdm | ln A_s | n_s | h | chi2 / ndata |
+|---|---|---|---|---|---|
+| P_l (AP) | 0.1204 +- 0.0040 (-0.12) | 3.092 +- 0.060 (+0.52) | 0.956 +- 0.027 (-0.23) | 0.6713 +- 0.0040 (+0.05) | 17.0 / 48 |
+| P_l + X (AP) | 0.1202 +- 0.0039 (-0.20; -4%) | 3.095 +- 0.056 (+0.60; -7%) | 0.970 +- 0.025 (+0.31; -10%) | 0.6726 +- 0.0040 (+0.37; 0%) | 37.2 / 128 |
+| old baseline (AP) | 0.1164 +- 0.0032 (-1.40; -20%) | 3.126 +- 0.055 (+1.19; -9%) | 0.998 +- 0.023 (+1.56; -17%) | 0.6705 +- 0.0036 (-0.17; -10%) | 58.7 / 236 |
+| **new (AP)** | **0.1195 +- 0.0032 (-0.44; -20%)** | **3.080 +- 0.051 (+0.38; -15%)** | **0.976 +- 0.021 (+0.66; -22%)** | **0.6727 +- 0.0035 (+0.46; -11%)** | 58.4 / 236 |
+| P_l (no AP) | 0.1239 +- 0.0045 (+0.66) | 3.052 +- 0.061 (-0.16) | 0.935 +- 0.028 (-0.96) | 0.6741 +- 0.0055 (+0.55) | 17.1 / 48 |
+| old baseline (no AP) | 0.1203 +- 0.0034 (-0.19; -23%) | 3.072 +- 0.053 (+0.21; -14%) | 0.974 +- 0.023 (+0.53; -21%) | 0.6709 +- 0.0043 (-0.05; -20%) | 61.5 / 236 |
+| **new (no AP)** | **0.1232 +- 0.0034 (+0.67; -24%)** | **3.034 +- 0.050 (-0.54; -18%)** | **0.956 +- 0.022 (-0.31; -24%)** | **0.6744 +- 0.0043 (+0.77; -21%)** | 59.2 / 236 |
+
+**Result: the AP baseline is unbiased (all shifts <= 0.77 sigma, at the level of P_l alone) and keeps the gain over P_l:
+-20 / -15 / -22 / -11% with AP, -24 / -18 / -24 / -21% without** (the old baseline's 9-20% with AP came with a 1.4-1.6
+sigma bias). Proposed new baseline: `fit.py --emulator ..._ap3_v5loop.h5 --stats pk s21m pud --kmax 0.2 --q 2.0
+--s21-min-scale 17.6 --s21-white --s21-k2 --pud-x 0.5 --pud-marg --cubic-biases relation --vary omega_cdm logA n_s h`
+(+ `--ap`). Open: the physical origin of the K^2 noise (halo connected noise of the moduli) and of the X response
+amplitude; the paper text and the survey pipeline still use the old model.

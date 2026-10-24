@@ -557,10 +557,18 @@ class NuisanceParameters:
         return params
 
     @staticmethod
-    def white(scales) -> dict:
-        return {f"W_j{j}": Parameter(f"W_j{j}", value=0.0, prior=dict(limits=[-1e5, 1e5]),
-                                     ref=dict(dist="norm", loc=0.0, scale=10.0), latex=rf"W_{{{j}}}")
-                for j in sorted(set(scales))}
+    def white(scales, k2: bool = False) -> dict:
+        """W_j per first-layer scale; with ``k2`` also W2_j K^2 + W3_j K^2 mu_K^2 [(Mpc/h)^5], the next terms of the
+        analytic (non-Gaussian) noise of the moduli at low K."""
+        params = {f"W_j{j}": Parameter(f"W_j{j}", value=0.0, prior=dict(limits=[-1e5, 1e5]),
+                                       ref=dict(dist="norm", loc=0.0, scale=10.0), latex=rf"W_{{{j}}}")
+                  for j in sorted(set(scales))}
+        if k2:
+            for name, latex in (("W2", "W^{(2)}"), ("W3", r"W^{(2)}_{\mu}")):
+                params.update({f"{name}_j{j}": Parameter(f"{name}_j{j}", value=0.0, prior=dict(limits=[-1e8, 1e8]),
+                                                         ref=dict(dist="norm", loc=0.0, scale=1e4), latex=rf"{latex}_{{{j}}}")
+                               for j in sorted(set(scales))})
+        return params
 
 
 def cubic_values(params):
@@ -872,7 +880,8 @@ class S21mTheory(Calculator):
     ``Basis`` (``wstfast.theory.second_layer``).
 
     Nuisance parameters (``nuisance``): the biases, the Fingers-of-God counterterm c_v, one noise amplitude per
-    first-layer field and, with ``white_noise``, one white term W per first-layer scale (needs ``config``); with the
+    first-layer field and, with ``white_noise``, one white term W per first-layer scale (needs ``config``; with
+    ``white_k2`` also W2 K^2 + W3 K^2 mu_K^2 per scale, the analytic noise beyond the white term); with the
     one-loop short modes (``ModelSpec.s21_loop``), also the counterterms of suffix ``counterterms`` ("_pk": those of
     the P(k) multipoles, the default; "": the S1m ones) and the stochastic terms alpha0, alpha2 of the short-mode
     spectrum (``s21m_loop_terms``; c_v then acts on the S1m cumulants only). The
@@ -891,7 +900,7 @@ class S21mTheory(Calculator):
     def __init__(self, projection, coefficients, first_layer, basis=None, nuisance=None, q: float = 0.8,
                  shotnoise: float = 0.0, entry_index=None, cumulant_index=None, white_noise: bool = False,
                  config: WSTConfig | None = None, layer2=None, s21_projection=None, s21_field_rows=None, ap=None,
-                 first_ap=None, window=None, counterterms: str = "_pk"):
+                 first_ap=None, window=None, counterterms: str = "_pk", white_k2: bool = False):
         from .theory.second_layer import first_layer_fields
 
         self.basis = basis
@@ -902,12 +911,14 @@ class S21mTheory(Calculator):
         self.bias_params = nuisance.bias()
         self.counterterms = nuisance.counterterms(counterterms) if nuisance.spec.s21_loop else {}
         self.noise = nuisance.noise(first_layer_fields(coefficients))
-        self.white_params = nuisance.white([c.j for c in coefficients]) if white_noise else {}
+        if white_k2 and not white_noise:
+            raise ValueError("white_k2 needs white_noise")
+        self.white_params = nuisance.white([c.j for c in coefficients], k2=white_k2) if white_noise else {}
 
     def __post_init__(self, projection, coefficients, first_layer, basis=None, nuisance=None, q: float = 0.8,
                       shotnoise: float = 0.0, entry_index=None, cumulant_index=None, white_noise: bool = False,
                       config: WSTConfig | None = None, layer2=None, s21_projection=None, s21_field_rows=None, ap=None,
-                      first_ap=None, window=None, counterterms: str = "_pk"):
+                      first_ap=None, window=None, counterterms: str = "_pk", white_k2: bool = False):
         from .theory.second_layer import first_layer_fields, s21m_entries
 
         # Survey window (survey.SurveyWindow of one cap): S21m x K / (delta W) of the entry's first-layer block, W the
@@ -974,6 +985,10 @@ class S21mTheory(Calculator):
                 matrix = S21mProjection(config, list(coefficients), first_layer_fields(coefficients),
                                         kgrid, x[6:]).matrix
             self.white_column = jnp.asarray(matrix.sum(axis=1))
+            # K^2 and K^2 mu^2 on the (K, mu_K) grid of the projection (S21mBasis: 24 log K to 0.12, 6 Gauss mu)
+            k2 = (kgrid[:, None] ** 2 * np.ones(6)[None, :]).ravel()
+            k2mu2 = (kgrid[:, None] ** 2 * x[6:][None, :] ** 2).ravel()
+            self.white_k2_columns = (jnp.asarray(matrix @ k2), jnp.asarray(matrix @ k2mu2)) if white_k2 else None
         self.entry_j = np.array([coefficients[i].j for i, _, _ in s21m_entries(coefficients)])
         self.shot = jnp.asarray(projection.shot)
         entries = s21m_entries(coefficients)
@@ -1040,6 +1055,9 @@ class S21mTheory(Calculator):
         amplitudes = jnp.stack([self.noise[key].value for key in self.keys])[self.field_index]
         if self.white_params:
             white = jnp.stack([self.white_params[f"W_j{j}"].value for j in self.entry_j]) * self.white_column
+            if self.white_k2_columns is not None:
+                for name, column in zip(("W2", "W3"), self.white_k2_columns):
+                    white = white + jnp.stack([self.white_params[f"{name}_j{j}"].value for j in self.entry_j]) * column
             terms = jnp.stack([terms[:, 0] + white, terms[:, 1]], axis=1)
         self.flattheory = s21m_from_terms(terms, amplitudes, self.n1, self.n2, self.q, e_q, e_1)
         if self.layer2:

@@ -132,6 +132,11 @@ def parse_args(argv=None):
     parser.add_argument("--s21-white", action="store_true",
                         help="free K-independent term W_j of the S21m modulus spectra per first-layer scale "
                              "(connected noise of the moduli)")
+    parser.add_argument("--s21-k2", action="store_true",
+                        help="with --s21-white: also W2_j K^2 + W3_j K^2 mu^2 per first-layer scale (analytic noise of the "
+                             "moduli beyond the white term)")
+    parser.add_argument("--pud-loop", action="store_true",
+                        help="X with the one-loop short modes of a --s21-loop emulator (default: the tree response)")
     parser.add_argument("--s21-layer2", type=Path, default=None,
                         help="template_rsd.json (scripts/layer2/template_rsd.py): non-Gaussian second layer, S21m x "
                              "(1 + d0 + R_l d2), R_l = 1 / (1 + c_l n s_lin^2)")
