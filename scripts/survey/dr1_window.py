@@ -100,6 +100,8 @@ def get_args():
     parser.add_argument("--test", choices=("ric", "lambda", "s21m", "vector", "products", "measure", "covariance",
                                            "halos", "denominator", "exact"), required=True)
     parser.add_argument("--zrange", type=float, nargs=2, default=[0.4, 0.6])
+    parser.add_argument("--caps", nargs="+", default=list(survey.DESI_CAPS),
+                        help="caps to run (the geometries of both still set the shared mesh size)")
     parser.add_argument("--cellsize", type=float, default=10.0)
     parser.add_argument("--mocks", type=int, nargs="+", default=[0, 1, 2], help="data for n(r)")
     parser.add_argument("--randoms", type=int, nargs="+", default=[0, 1], help="random files for the mask")
@@ -1094,7 +1096,7 @@ def plot_vector(vectors, caps, path):
 def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    geometries = build_geometries(args)
+    geometries = {cap: g for cap, g in build_geometries(args).items() if cap in args.caps}
     if args.nbar_from is not None:
         for cap, g in geometries.items():
             stack = np.load(args.nbar_from / f"expected_{cap}.npy").astype(np.float64)
