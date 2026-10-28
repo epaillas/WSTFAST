@@ -105,6 +105,7 @@ def get_args():
     parser.add_argument("--randoms", type=int, nargs="+", default=[0, 1], help="random files for the mask")
     parser.add_argument("--width", type=float, nargs="+", default=[5.0], help="RIC shell widths [Mpc/h]")
     parser.add_argument("--L", type=int, default=4)
+    parser.add_argument("--L2", type=int, default=None, help="largest l of the second layer (default --L)")
     parser.add_argument("--sigma-min", type=float, default=25.0,
                         help="smallest wavelet scale [Mpc/h]: J and sigma0 of the survey config so that sigma runs from it to "
                              "70.7 in steps of sqrt(2) (17.7 needs cells <= 7 Mpc/h)")
@@ -410,7 +411,7 @@ def run_s21m(args, geometries, setups, pk):
     def s21m(s1m, s2m, ratio=None):
         return np.array([s2m[j1, j2, ell, m1, m2] * (1.0 if ratio is None else ratio[j1, j2, ell, m1][m2])
                          / s1m[j1, ell, m1] for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
-                         for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)])
+                         for ell in range(setups[caps[0]]["config"].lmax2 + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)])
 
     results = {}
     for name in args.variants:
@@ -499,7 +500,7 @@ def run_products(args, geometries, setups, pk):
             measured = np.concatenate([pick(x, "measured") for x in files])
             box = np.concatenate([pick(x, "none") for x in files])  # S2m_box / S1m_survey: the ratio is S2m_s / S2m_b
             config = s["config"]
-            entries = [(j1, j2, ell, m1, m2) for j1, j2 in config.second_layer_pairs() for ell in range(args.L + 1)
+            entries = [(j1, j2, ell, m1, m2) for j1, j2 in config.second_layer_pairs() for ell in range(config.lmax2 + 1)
                        for m1 in range(ell + 1) for m2 in range(ell + 1)]
             for n, (j1, j2, ell, m1, m2) in enumerate(entries):
                 key = (SurveyWindow.key(config.sigma(j1)), SurveyWindow.key(config.sigma(j2)), ell, m1, m2)
@@ -799,7 +800,7 @@ def run_covariance(args, geometries, setups, pk):
             files = [np.load(p) for p in args.s21m_mocks]
             pick = lambda x: x[f"{cap}_measured"] if f"{cap}_measured" in x.files else x[f"fiducial_{cap}_measured"]  # noqa: E731
             arr = np.concatenate([pick(x) for x in files])
-            order = [(ell, m1, m2) for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+            order = [(ell, m1, m2) for ell in range(config.lmax2 + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
             idx = [order.index(tuple(int(p[1:]) for p in label.split("_")[3:])) for label in cov.labels[cov.ns1m:n]]
             measured["S21m"] = (np.log(arr[:, idx]), slice(cov.ns1m, n))
         summary[cap] = {}
@@ -840,7 +841,7 @@ def run_halos(args, geometries, setups, pk):
     caps = list(geometries)
     ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
     keys21 = [(j1, j2, ell, m1, m2) for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
-              for ell in range(args.L + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
+              for ell in range(setups[caps[0]]["config"].lmax2 + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
     suffixes = ("_box", "_none") + (("_boxz", "_nonez") if args.box_los_z else ()) + (() if args.box_only else ("", "_measured"))
     rows = {f"{cap}{suffix}": [] for cap in caps for suffix in suffixes}
     for r in range(args.realizations):
@@ -1116,7 +1117,7 @@ def main():
               f" (Gpc/h)^3, regions {np.bincount(g.region[g.support])}", flush=True)
         # sigma = --sigma-min ... 70.7 Mpc/h (25, 35, 50, 71 by default); with --test ric, S21m at (25, 71)
         nscale = int(round(2 * np.log2(70.71 / args.sigma_min)))  # sigma_min = 25 x 2^((3 - J) / 2) exactly (the box scales)
-        config = WSTConfig(J=nscale, L=args.L, L2=args.L, sigma0=25.0 * 2 ** ((3 - nscale) / 2) / g.cellsize, step=2**0.5,
+        config = WSTConfig(J=nscale, L=args.L, L2=args.L if args.L2 is None else args.L2, sigma0=25.0 * 2 ** ((3 - nscale) / 2) / g.cellsize, step=2**0.5,
                            cellsize=g.cellsize,
                            min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q)
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
