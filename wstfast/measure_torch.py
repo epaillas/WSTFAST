@@ -154,9 +154,11 @@ def measure_wst_torch(delta, config: WSTConfig, qs=None, lattice: TorchLattice |
 
 
 def survey_components(fk, lattice: TorchLattice, sigma: float, ell: int, index) -> torch.Tensor:
-    """Real components X_m (m = -l..l) of the field with rfft ``fk`` on the cells ``index``: (2l + 1, ncells)."""
-    filtered = fk * (lattice.radial(sigma, ell) * lattice.harmonics(ell)) * (-1j) ** ell
-    return torch.fft.irfftn(filtered, s=(lattice.n,) * 3, dim=(-3, -2, -1)).reshape(2 * ell + 1, -1)[:, index]
+    """Real components X_m (m = -l..l) of the field with rfft ``fk`` on the cells ``index``: (2l + 1, ncells).
+    One component at a time, so that the peak memory is one mesh rather than 2l + 1 (688^3 at l = 6 overflows 80 GB)."""
+    filtered = fk * lattice.radial(sigma, ell) * (-1j) ** ell
+    return torch.stack([torch.fft.irfftn(filtered * y, s=(lattice.n,) * 3).reshape(-1)[index]
+                        for y in lattice.harmonics(ell)])
 
 
 def squared_kernel(lattice: TorchLattice, sigma: float, ell: int) -> np.ndarray:
