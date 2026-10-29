@@ -39,6 +39,7 @@ class TorchLattice:
         self._harmonics = {}
         for ell in range(lmax + 1 if lmax is not None else 0):
             self.harmonics(ell)
+        self.numpy.__dict__.pop("_harmonics", None)  # the host copies (30 GB at 688^3, l <= 6), rebuilt if released
 
     def harmonics(self, ell: int) -> torch.Tensor:
         """Real spherical harmonics of degree l, shape (2l+1, n, n, n//2+1), sum_m Y^2 = 1."""

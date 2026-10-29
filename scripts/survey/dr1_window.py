@@ -679,7 +679,9 @@ def run_measure(args, geometries, setups, pk):
                 if args.device != "numpy":  # jaxpower in a fresh process: it never shares the device with torch
                     import multiprocessing
 
-                    s["lattice"].release()
+                    import torch
+
+                    torch.cuda.empty_cache()  # the cached harmonics stay (30 GB at 688^3): the child needs ~33 GB
                     with multiprocessing.get_context("spawn").Pool(1) as pool:
                         extra = pool.apply(measure_spectra, (args, g, config, mock, cap, positions, rpositions),
                                            dict(delta=delta, pending=spectra.pending, keep=keep))
