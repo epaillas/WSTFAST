@@ -116,6 +116,12 @@ def get_args():
                              "first-layer moduli at sigma <= --spectra-max-scale with the density (survey.SurveySpectra), "
                              "and the window matrices of both (once per cap, <output>/spectra_window_<cap>.npz)")
     parser.add_argument("--spectra-max-scale", type=float, default=25.0)
+    parser.add_argument("--layer2-min-scale", type=float, default=0.0,
+                        help="smallest sigma_j1 [Mpc/h] of the second layer (e.g. 25: only the S21m(25) pairs of the "
+                             "fit, ~2.5x cheaper at sigma_min = 12.5)")
+    parser.add_argument("--gaussian", action="store_true",
+                        help="halos: paired Gaussian fiducial mocks (noisy, at the geometry's nbar) instead of the halo "
+                             "boxes, same outputs (delta and K of the window products from Gaussian mocks)")
     parser.add_argument("--layer2-mean", choices=("binned", "global"), default="binned",
                         help="mean subtracted from the first-layer modulus before the second layer of the survey "
                              "measurement: per bin of first-layer coverage and nbar (survey.second_layer_bins), or "
@@ -873,11 +879,15 @@ def run_halos(args, geometries, setups, pk):
               for ell in range(setups[caps[0]]["config"].lmax2 + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
     suffixes = ("_box", "_none") + (("_boxz", "_nonez") if args.box_los_z else ()) + (() if args.box_only else ("", "_measured"))
     rows = {f"{cap}{suffix}": [] for cap in caps for suffix in suffixes}
+    gaussian = mocks_of(args.geometries, pk, "fiducial") if args.gaussian else None
     for r in range(args.realizations):
         i = args.seed_offset + r
         t0 = time.time()
         fields, fields_z = [], []
         for k, (cap, g) in enumerate(args.geometries.items()):  # every cap for the RIC; the --caps are measured
+            if gaussian is not None:
+                fields.append(gaussian[cap](seed=[600 + i, k]))
+                continue
             halos = np.load(args.halo_dir / f"r{2 * i + k:04d}.npz")
             fields.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
                                         los="local", seed=[i, k]))
@@ -912,7 +922,7 @@ def run_halos(args, geometries, setups, pk):
             if args.box_only:
                 continue
             metadata = dict(redshift=0.5, boxsize=g.boxsize, nmesh=g.nmesh, space=cap, nparticles=1,
-                            shotnoise=g.shotnoise, tracer="quijote_halos_m13_cutsky", realization=i, cap=cap,
+                            shotnoise=g.shotnoise, tracer="gaussian_fiducial_cutsky" if args.gaussian else "quijote_halos_m13_cutsky", realization=i, cap=cap,
                             nbar_scale=args.nbar_scale)
             save_measurement(args.output / "data" / cap / f"wst_r{i:04d}.npz", masked, s["config"], metadata)
         print(f"halos {i}: {time.time() - t0:.0f} s", flush=True)
@@ -1151,7 +1161,8 @@ def main():
         nscale = int(round(2 * np.log2(70.71 / args.sigma_min)))  # sigma_min = 25 x 2^((3 - J) / 2) exactly (the box scales)
         config = WSTConfig(J=nscale, L=args.L, L2=args.L if args.L2 is None else args.L2, sigma0=25.0 * 2 ** ((3 - nscale) / 2) / g.cellsize, step=2**0.5,
                            cellsize=g.cellsize,
-                           min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q)
+                           min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q,
+                           min_j1=int(np.sum(25.0 * 2 ** ((np.arange(nscale + 1) + 3 - nscale) / 2) < args.layer2_min_scale - 1e-3)))
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
         if args.layer2_mean == "binned" and config.second_layer_pairs():
             setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice)

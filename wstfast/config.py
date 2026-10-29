@@ -22,7 +22,7 @@ class WSTConfig:
     but with c_l = sqrt(4 pi / (2l + 1)) so that sum_m |psi_{j,l}^m|^2 = (sigma_j k)^{2l} exp(-sigma_j^2 k^2).
     This only rescales each l by a constant with respect to kymatio, whose scales are dyadic (step = 2).
     Coefficients are lattice means: S0 = <|delta|^q>, S1(j, l) = <U_{j,l}^q> for l <= L, and
-    S2(j1, j2, l) = <|U_{j1,l} * psi_{j2,l}|^q> for l <= L2 and j2 >= j1 + min_dj.
+    S2(j1, j2, l) = <|U_{j1,l} * psi_{j2,l}|^q> for l <= L2, j1 >= min_j1 and j2 >= j1 + min_dj.
     """
 
     J: int = 4
@@ -33,6 +33,7 @@ class WSTConfig:
     step: float = 2.0  # ratio of consecutive scales
     L2: int | None = None  # largest l of the second layer (default L)
     min_dj: int = 1  # smallest j2 - j1 of the second layer
+    min_j1: int = 0  # smallest j1 of the second layer
 
     @property
     def lmax2(self) -> int:
@@ -44,7 +45,7 @@ class WSTConfig:
 
     def second_layer_pairs(self):
         """(j1, j2) pairs of the second layer."""
-        return [(j1, j2) for j1 in range(self.J + 1) for j2 in range(j1 + self.min_dj, self.J + 1)]
+        return [(j1, j2) for j1 in range(self.min_j1, self.J + 1) for j2 in range(j1 + self.min_dj, self.J + 1)]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -59,6 +60,8 @@ class WSTConfig:
             tag += f"_L2-{self.L2}"
         if self.min_dj != 1:
             tag += f"_dj{self.min_dj}"
+        if self.min_j1:
+            tag += f"_j1-{self.min_j1}"
         tag += f"_sigma{self.sigma0:g}"
         if self.step != 2.0:
             tag += f"_step{self.step:.4g}"
