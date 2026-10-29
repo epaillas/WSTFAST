@@ -1261,6 +1261,13 @@ def survey_problem(options):
     theories = [t for _, _, p in caps for t in p["theories"]]
     vectors = np.concatenate([p["vectors"] for _, _, p in caps], axis=1)
     labels = [label for _, _, p in caps for label in p["labels"]]
+    templates, start = [], 0  # the analytically marginalised linear nuisances of each cap, at its place
+    for _, _, p in caps:
+        for vector, width in p.get("linear_templates", []):
+            full = np.zeros(len(labels))
+            full[start:start + len(vector)] = vector
+            templates.append((full, width))
+        start += len(p["labels"])
     blocks, nsims = [], None
     if options.covariance_file is not None:  # analytic ln covariance of one survey, in data units through the data mean
         analytic = np.load(options.covariance_file)
@@ -1295,10 +1302,11 @@ def survey_problem(options):
     combine = None
     if getattr(options, "combine_caps", False):
         theories, vectors, labels, covariance, combine = combine_survey_caps(caps, theories, vectors, labels, covariance)
+        templates = [(combine[0] @ vector, width) for vector, width in templates]
         meta["combined"] = "GCcomb"
     return dict(theories=theories, vectors=vectors, labels=labels, meta=meta, basis=basis, settings=settings,
                 spec=caps[0][2]["spec"], tracer=caps[0][2]["tracer"], covariance=covariance, nsims=nsims,
-                combine=combine)
+                combine=combine, linear_templates=templates)
 
 
 def first_layer_entries(base_labels):
@@ -1399,17 +1407,23 @@ def band_entries(labels, q=(0.8,)) -> np.ndarray:
     return np.array(out, dtype=bool)
 
 
-def band_compression(vectors, labels, cut: float, band=None):
+def band_compression(vectors, labels, cut: float, band=None, covariance=None):
     """Compression of the band-power entries (``band`` mask, default ``band_entries(labels)``: the ``S1q2_*`` labels)
-    onto the principal components of their sample correlation with eigenvalue above ``cut`` (standardized units); the
-    other entries pass through. Returns the matrix A (ncompressed, n) and the labels (``S1q2_pc{i}``, by decreasing
+    onto the principal components of their sample correlation (or of the correlation of ``covariance``) with eigenvalue
+    above ``cut`` (standardized units); the other entries pass through. Returns the matrix A (ncompressed, n) and the labels (``S1q2_pc{i}``, by decreasing
     eigenvalue), or (None, labels) when no entry is a band or none is dropped."""
     band = band_entries(labels) if band is None else np.asarray(band, dtype=bool)
     if not band.any():
         return None, list(labels)
-    values = vectors[:, band]
-    std = values.std(axis=0, ddof=1)
-    eigenvalues, eigenvectors = np.linalg.eigh(np.corrcoef(values, rowvar=False))
+    if covariance is None:
+        values = vectors[:, band]
+        std = values.std(axis=0, ddof=1)
+        correlation = np.corrcoef(values, rowvar=False)
+    else:
+        block = np.asarray(covariance)[np.ix_(band, band)]
+        std = np.sqrt(np.diag(block))
+        correlation = block / np.outer(std, std)
+    eigenvalues, eigenvectors = np.linalg.eigh(correlation)
     keep = np.flatnonzero(eigenvalues > cut)[::-1]  # decreasing eigenvalue
     if len(keep) == band.sum():
         return None, list(labels)
@@ -1529,6 +1543,14 @@ def build_fit(options: FitOptions) -> dict:
         else:
             covariance = covariance + covariance_terms(dataclasses.replace(options, s21_layer2=None), labels, mean,
                                                        ndata)
+        for vector, width in problem.get("linear_templates", []):  # analytically marginalised linear nuisances
+            covariance = covariance + width**2 * np.outer(vector, vector)
+        if options.band_cut > 0:  # the band components of the survey's own (box-rescaled) correlation
+            cut, labels = band_compression(None, labels, options.band_cut, band=band_entries(labels, options.q),
+                                           covariance=problem["covariance"])
+            if cut is not None:
+                vectors, covariance, theory = vectors @ cut.T, cut @ covariance @ cut.T, LinearCompression(theory, cut)
+                ndata = vectors.shape[1]
     else:  # on the uncompressed entries (the template is keyed by them), then compressed
         terms = covariance_terms(options, problem["labels"], mean, len(problem["labels"]))
         for vector, width in problem.get("linear_templates", []):  # analytically marginalised linear nuisances

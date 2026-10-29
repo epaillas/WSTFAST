@@ -260,6 +260,9 @@ def test_band_compression_keeps_leading_components():
     assert np.allclose(compressed[:, 0], vectors[:, 0])
     assert np.linalg.matrix_rank(np.cov(compressed, rowvar=False)) == 3
     assert band_compression(vectors, labels[:1], 1e-6)[0] is None
+    # from a covariance (survey fits) the same components as from the samples it is the covariance of
+    same, _ = band_compression(None, labels, 1e-6, covariance=np.cov(vectors, rowvar=False))
+    assert np.allclose(np.abs(same), np.abs(matrix))
     from wstfast.inference import band_entries
 
     assert band_entries(["S1m_j6_l0_m0", "S1q2_j5_l0", "q0.8:S1m_j6_l0_m0", "q2:S1m_j6_l0_m0"]).tolist() == [False, True, False, True]
