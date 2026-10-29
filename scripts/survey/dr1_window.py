@@ -303,21 +303,27 @@ def run_ric(args, geometries, setups, pk):
     return summary
 
 
+def constrained_caps(args, geometries):
+    """The RIC of the mocks: over every cap (a photometric region spans both), whichever --caps are measured."""
+    return RadialIntegralConstraint(*args.geometries.values(), width=args.width[0])
+
+
 def run_lambda(args, geometries, setups, pk):
     caps = list(geometries)
-    ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+    ric = constrained_caps(args, geometries)
     windows = {cap: LambdaWindow(s["config"], s["g"].support, s["los"], s["lattice"]) for cap, s in setups.items()}
     path = args.output / "correction.npz"
     if path.exists():
         f = np.load(path)
         correction = {cap: {b: f[f"{cap}_{b[0]}_{b[1]}"] for b in windows[cap].blocks} for cap in caps}
     else:
-        signal = mocks_of(geometries, pk, "fiducial", signal_only=True)
+        signal = mocks_of(args.geometries, pk, "fiducial", signal_only=True)
         for r in range(args.calibrate):
             t0 = time.time()
-            fields = [signal[cap](seed=[100 + r, k]) for k, cap in enumerate(caps)]
-            for cap, masked, field in zip(caps, ric(*fields), fields):
-                windows[cap].add(masked, field)
+            fields = [signal[cap](seed=[100 + r, k]) for k, cap in enumerate(args.geometries)]
+            for cap, masked, field in zip(args.geometries, ric(*fields), fields):
+                if cap in windows:
+                    windows[cap].add(masked, field)
             print(f"calibration {r}: {time.time() - t0:.0f} s", flush=True)
         correction = {cap: w.correction() for cap, w in windows.items()}
         np.savez(path, **{f"{cap}_{j}_{l}": c for cap, cc in correction.items() for (j, l), c in cc.items()})
@@ -329,13 +335,15 @@ def run_lambda(args, geometries, setups, pk):
     results = {}
     for name in args.variants:
         b, f, a, t = VARIANTS[name]
-        mocks = mocks_of(geometries, pk, name)
+        mocks = mocks_of(args.geometries, pk, name)
         measured = {cap: [] for cap in caps}
         boxes = {cap: [] for cap in caps}  # the same mock unmasked on the same cells: pairs the S-level calibration
         for r in range(args.realizations):
             t0 = time.time()
-            fields = [mocks[cap](seed=[200 + args.seed_offset + r, k]) for k, cap in enumerate(caps)]
-            for cap, survey, field in zip(caps, ric(*fields), fields):
+            fields = [mocks[cap](seed=[200 + args.seed_offset + r, k]) for k, cap in enumerate(args.geometries)]
+            for cap, survey, field in zip(args.geometries, ric(*fields), fields):
+                if cap not in setups:
+                    continue
                 s = setups[cap]
                 common = dict(weights=s["g"].weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
                 out = args.measure(survey, s["config"], support=s["g"].support, second_layer_bins=s["bins2"], **common)
@@ -860,7 +868,7 @@ def run_halos(args, geometries, setups, pk):
     from wstfast.survey import box_to_survey
 
     caps = list(geometries)
-    ric = RadialIntegralConstraint(*geometries.values(), width=args.width[0])
+    ric = constrained_caps(args, geometries)
     keys21 = [(j1, j2, ell, m1, m2) for j1, j2 in setups[caps[0]]["config"].second_layer_pairs()
               for ell in range(setups[caps[0]]["config"].lmax2 + 1) for m1 in range(ell + 1) for m2 in range(ell + 1)]
     suffixes = ("_box", "_none") + (("_boxz", "_nonez") if args.box_los_z else ()) + (() if args.box_only else ("", "_measured"))
@@ -869,15 +877,17 @@ def run_halos(args, geometries, setups, pk):
         i = args.seed_offset + r
         t0 = time.time()
         fields, fields_z = [], []
-        for k, (cap, g) in enumerate(geometries.items()):
+        for k, (cap, g) in enumerate(args.geometries.items()):  # every cap for the RIC; the --caps are measured
             halos = np.load(args.halo_dir / f"r{2 * i + k:04d}.npz")
             fields.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
                                         los="local", seed=[i, k]))
             if args.box_los_z:  # same thinning draws (same seed), RSD along z
                 fields_z.append(box_to_survey(halos["positions"], 1000.0, g, displacements=halos["displacements"],
                                               los="z", seed=[i, k]))
-        surveys = [None] * len(caps) if args.box_only else ric(*fields)
-        for n, (cap, survey, field) in enumerate(zip(caps, surveys, fields)):
+        surveys = [None] * len(fields) if args.box_only else ric(*fields)
+        for n, (cap, survey, field) in enumerate(zip(args.geometries, surveys, fields)):
+            if cap not in setups:
+                continue
             s, g = setups[cap], geometries[cap]
             common = dict(weights=g.weights, qs=[args.q], los=s["los"], lattice=s["lattice"])
             box = args.measure(field, s["config"], moment_support=g.support, **common)
@@ -1115,14 +1125,15 @@ def plot_vector(vectors, caps, path):
 def main():
     args = get_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    geometries = {cap: g for cap, g in build_geometries(args).items() if cap in args.caps}
+    args.geometries = build_geometries(args)  # both caps: the RIC of a region spans them (halos, lambda)
+    geometries = {cap: g for cap, g in args.geometries.items() if cap in args.caps}
     if args.nbar_from is not None:
-        for cap, g in geometries.items():
+        for cap, g in args.geometries.items():
             stack = np.load(args.nbar_from / f"expected_{cap}.npy").astype(np.float64)
             stack = np.where(g.support, stack, 0.0)
             g.nbar = np.where(g.support, g.nbar, 0.0).sum() / stack.sum() * stack
     if args.nbar_scale != 1.0:  # a sparser tracer in the same geometry (the cache keeps the survey's nbar)
-        for g in geometries.values():
+        for g in args.geometries.values():
             g.nbar = g.nbar * args.nbar_scale
     pk = linear_power(np.mean(args.zrange))  # CLASS before torch: their two OpenMP runtimes clash the other way round
     nmesh = next(iter(geometries.values())).nmesh
