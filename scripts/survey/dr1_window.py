@@ -596,6 +596,35 @@ SPECTRA_KEDGES = (0.5 + 2 * np.arange(17)) * 2 * np.pi / 1000.0
 WINDOW_EDGES = np.column_stack([np.arange(0.0, 0.3, 0.002)[:-1], np.arange(0.0, 0.3, 0.002)[1:]])
 
 
+def measure_spectra(args, g, config, mock, cap, positions, rpositions, spectra=None, delta=None, pending=None,
+                    keep=None) -> dict:
+    """P_l and the X spectra of one mock (and the geometry's windows if not saved yet). After a GPU WST it runs in a
+    spawned process (``spectra`` None: rebuilt from ``delta`` and the deferred fields ``pending``): in the WST's process
+    jaxpower ran out of device memory at 688^3 with 77 GB free, while a fresh process needs 33 GB."""
+    from wstfast.survey import desi_catalogue_path, read_desi_catalogue
+
+    if spectra is None:
+        spectra = survey.SurveySpectra(g, delta, SPECTRA_KEDGES, keep=keep, defer=True)
+        spectra.pending = pending
+    spectra.compute()
+    weights = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange,
+                                   columns=("Z", "WEIGHT", "WEIGHT_FKP")) for i in args.measure_randoms]
+    dweights = read_desi_catalogue(desi_catalogue_path(mock, cap, root=args.catalogue_root), args.zrange,
+                                   columns=("Z", "WEIGHT", "WEIGHT_FKP"))
+    window_path = args.output / f"spectra_window_{cap}.npz"
+    power = survey.survey_power(g, positions, rpositions, SPECTRA_KEDGES,
+                                data_weights=dweights["WEIGHT"] * dweights["WEIGHT_FKP"],
+                                random_weights=np.concatenate([w["WEIGHT"] * w["WEIGHT_FKP"] for w in weights]),
+                                window_edges=None if window_path.exists() else WINDOW_EDGES)
+    result = dict(k=power["k"], nmodes=power["nmodes"], Pdd=power["poles"], shotnoise_pk=power["shotnoise"],
+                  kx=spectra.k, PUd_m=spectra.array(config.J + 1, config.L + 1))
+    if not window_path.exists():  # the windows of the geometry (P_l: this mock's randoms)
+        wx = spectra.window(WINDOW_EDGES)
+        np.savez(window_path, pk=np.asarray(power["window"].value()), x=np.asarray(wx.value()),
+                 edgesin=WINDOW_EDGES, k=power["k"], kx=spectra.k, ells=(0, 2, 4))
+    return result
+
+
 def run_measure(args, geometries, setups, pk):
     from wstfast.data import save_measurement
     from wstfast.survey import desi_catalogue_path, read_desi_catalogue, sky_to_cartesian
@@ -646,42 +675,18 @@ def run_measure(args, geometries, setups, pk):
             out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=args.qs, los=s["los"],
                                lattice=s["lattice"], second_layer_bins=s["bins2"], fields=spectra)
             if args.spectra:
-                if args.device != "numpy":  # the WST's device memory (cached harmonics included) back to jaxpower
-                    import torch
-
-                    gb = 1024**3
-                    print(f"device before release: torch {torch.cuda.memory_allocated() / gb:.1f} GB allocated, "
-                          f"{torch.cuda.memory_reserved() / gb:.1f} GB reserved", flush=True)
-                    s["lattice"].release()
-                    import jax
-
-                    stats = jax.devices()[0].memory_stats() or {}
-                    free, total = torch.cuda.mem_get_info()
-                    print(f"device after release: torch {torch.cuda.memory_allocated() / gb:.1f} GB allocated, "
-                          f"{torch.cuda.memory_reserved() / gb:.1f} GB reserved; jax {stats.get('bytes_in_use', 0) / gb:.1f} "
-                          f"GB in use, {stats.get('bytes_reserved', stats.get('pool_bytes', 0)) / gb:.1f} GB pool, peak "
-                          f"{stats.get('peak_bytes_in_use', 0) / gb:.1f} GB; device free {free / gb:.1f} of {total / gb:.1f} GB",
-                          flush=True)
-                spectra.compute()
-                weights = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange,
-                                               columns=("Z", "WEIGHT", "WEIGHT_FKP")) for i in args.measure_randoms]
-                dweights = read_desi_catalogue(desi_catalogue_path(mock, cap, root=args.catalogue_root), args.zrange,
-                                               columns=("Z", "WEIGHT", "WEIGHT_FKP"))
-                window_path = args.output / f"spectra_window_{cap}.npz"
-                power = survey.survey_power(g, positions, rpositions, SPECTRA_KEDGES,
-                                            data_weights=dweights["WEIGHT"] * dweights["WEIGHT_FKP"],
-                                            random_weights=np.concatenate([w["WEIGHT"] * w["WEIGHT_FKP"] for w in weights]),
-                                            window_edges=None if window_path.exists() else WINDOW_EDGES)
                 config = s["config"]
-                out.update(k=power["k"], nmodes=power["nmodes"], Pdd=power["poles"], shotnoise_pk=power["shotnoise"],
-                           kx=spectra.k,
-                           PUd_m=spectra.array(config.J + 1, config.L + 1))
-                if not window_path.exists():  # the windows of the geometry (P_l: this mock's randoms)
-                    wx = spectra.window(WINDOW_EDGES)
-                    np.savez(window_path, pk=np.asarray(power["window"].value()), x=np.asarray(wx.value()),
-                             edgesin=WINDOW_EDGES, k=power["k"], kx=spectra.k, ells=(0, 2, 4))
-                    del wx
-                del spectra, power  # release jaxpower's device buffers before the next WST
+                if args.device != "numpy":  # jaxpower in a fresh process: it never shares the device with torch
+                    import multiprocessing
+
+                    s["lattice"].release()
+                    with multiprocessing.get_context("spawn").Pool(1) as pool:
+                        extra = pool.apply(measure_spectra, (args, g, config, mock, cap, positions, rpositions),
+                                           dict(delta=delta, pending=spectra.pending, keep=keep))
+                else:
+                    extra = measure_spectra(args, g, config, mock, cap, positions, rpositions, spectra=spectra)
+                out.update(extra)
+                del spectra
                 import gc
 
                 import jax
