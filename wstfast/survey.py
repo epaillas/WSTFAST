@@ -451,6 +451,7 @@ class SurveySpectra:
         #: ``defer``: keep the meshes (host memory) and compute every spectrum in ``compute()``, e.g. after a GPU WST
         #: has released the device memory jaxpower needs.
         self.defer, self.pending = defer, {}
+        self.cells = np.flatnonzero(support)
 
     @property
     def k(self) -> np.ndarray:
@@ -462,9 +463,13 @@ class SurveySpectra:
 
         if m1 is None or (self.keep is not None and (j1, ell) not in self.keep):
             return
-        if self.defer:
-            self.pending[j1, ell, m1] = (np.asarray(mesh) / mean).astype(np.float32)
+        if self.defer:  # the support cells only (the field vanishes outside it): ~4% of the mesh for a DR1 cap
+            self.pending[j1, ell, m1] = (np.asarray(mesh).reshape(-1)[self.cells] / mean).astype(np.float32)
             return
+        if np.ndim(mesh) == 1:
+            full = np.zeros(self.wu.size, dtype=np.float32)
+            full[self.cells] = mesh
+            mesh = full.reshape(self.wu.shape)
         u = RealMeshField((np.asarray(mesh) / mean).astype(np.float32), attrs=self.mattrs)
         poles = compute_mesh2_spectrum(u, self.dmesh, bin=self.bin, los=self.los)
         self.out[j1, ell, m1] = np.array([np.asarray(poles.get(e).values("value")) * np.asarray(poles.get(e).values("norm"))
