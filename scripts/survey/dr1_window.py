@@ -646,10 +646,8 @@ def run_measure(args, geometries, setups, pk):
             out = args.measure(delta, s["config"], support=g.support, weights=g.weights, qs=args.qs, los=s["los"],
                                lattice=s["lattice"], second_layer_bins=s["bins2"], fields=spectra)
             if args.spectra:
-                if args.device != "numpy":  # the WST's device memory back to jaxpower
-                    import torch
-
-                    torch.cuda.empty_cache()
+                if args.device != "numpy":  # the WST's device memory (cached harmonics included) back to jaxpower
+                    s["lattice"].release()
                 spectra.compute()
                 weights = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange,
                                                columns=("Z", "WEIGHT", "WEIGHT_FKP")) for i in args.measure_randoms]

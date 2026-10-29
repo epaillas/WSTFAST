@@ -46,6 +46,11 @@ class TorchLattice:
             self._harmonics[ell] = torch.from_numpy(np.stack(self.numpy.harmonics(ell))).to(self.device)
         return self._harmonics[ell]
 
+    def release(self):
+        """Drop the cached harmonics from the device (64 GB at 688^3, l <= 6); they are rebuilt on demand."""
+        self._harmonics.clear()
+        torch.cuda.empty_cache()
+
     def radial(self, sigma: float, ell: int) -> torch.Tensor:
         x = sigma * self.kmag
         return x**ell * torch.exp(-0.5 * x**2)
