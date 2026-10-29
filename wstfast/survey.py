@@ -457,6 +457,7 @@ class SurveySpectra:
         return np.asarray(self.bin.xavg)
 
     def __call__(self, j1, ell, m1, mesh, mean):
+        import jax
         from jaxpower import RealMeshField, compute_mesh2_spectrum
 
         if m1 is None or (self.keep is not None and (j1, ell) not in self.keep):
@@ -468,6 +469,8 @@ class SurveySpectra:
         poles = compute_mesh2_spectrum(u, self.dmesh, bin=self.bin, los=self.los)
         self.out[j1, ell, m1] = np.array([np.asarray(poles.get(e).values("value")) * np.asarray(poles.get(e).values("norm"))
                                           for e in self.ells]) / self.norm
+        del u, poles
+        jax.clear_caches()  # the local-LOS scan's traced closure keeps the mesh alive: one leaked mesh per spectrum
 
     def compute(self):
         """The deferred spectra (``defer``)."""
