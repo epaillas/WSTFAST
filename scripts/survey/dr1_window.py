@@ -653,8 +653,15 @@ def run_measure(args, geometries, setups, pk):
                     print(f"device before release: torch {torch.cuda.memory_allocated() / gb:.1f} GB allocated, "
                           f"{torch.cuda.memory_reserved() / gb:.1f} GB reserved", flush=True)
                     s["lattice"].release()
+                    import jax
+
+                    stats = jax.devices()[0].memory_stats() or {}
+                    free, total = torch.cuda.mem_get_info()
                     print(f"device after release: torch {torch.cuda.memory_allocated() / gb:.1f} GB allocated, "
-                          f"{torch.cuda.memory_reserved() / gb:.1f} GB reserved", flush=True)
+                          f"{torch.cuda.memory_reserved() / gb:.1f} GB reserved; jax {stats.get('bytes_in_use', 0) / gb:.1f} "
+                          f"GB in use, {stats.get('bytes_reserved', stats.get('pool_bytes', 0)) / gb:.1f} GB pool, peak "
+                          f"{stats.get('peak_bytes_in_use', 0) / gb:.1f} GB; device free {free / gb:.1f} of {total / gb:.1f} GB",
+                          flush=True)
                 spectra.compute()
                 weights = [read_desi_catalogue(desi_catalogue_path(mock, cap, i, root=args.catalogue_root), args.zrange,
                                                columns=("Z", "WEIGHT", "WEIGHT_FKP")) for i in args.measure_randoms]
