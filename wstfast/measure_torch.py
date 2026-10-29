@@ -47,8 +47,12 @@ class TorchLattice:
         return self._harmonics[ell]
 
     def release(self):
-        """Drop the cached harmonics from the device (64 GB at 688^3, l <= 6); they are rebuilt on demand."""
+        """Drop the cached harmonics (30 GB at 688^3, l <= 6) and any tensor only kept by reference cycles from the
+        device; the harmonics are rebuilt on demand."""
+        import gc
+
         self._harmonics.clear()
+        gc.collect()
         torch.cuda.empty_cache()
 
     def radial(self, sigma: float, ell: int) -> torch.Tensor:
