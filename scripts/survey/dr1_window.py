@@ -1164,8 +1164,11 @@ def main():
                            min_dj=10 if args.test in ("lambda", "exact") else 3, q=args.q,
                            min_j1=int(np.sum(25.0 * 2 ** ((np.arange(nscale + 1) + 3 - nscale) / 2) < args.layer2_min_scale - 1e-3)))
         setups[cap] = dict(config=config, lattice=lattice, los=g.line_of_sight(full=True), g=g, bins2=None)
-        if args.layer2_mean == "binned" and config.second_layer_pairs():
-            setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice)
+        scales = {j for j, _ in config.second_layer_pairs()}
+        if args.test == "measure" and args.spectra:  # the U of the X cross-spectra are mean-subtracted the same way
+            scales |= {j for j in range(config.J + 1) if config.sigma(j) <= args.spectra_max_scale + 1e-6}
+        if args.layer2_mean == "binned" and scales:
+            setups[cap]["bins2"] = survey.second_layer_bins(g.support, g.nbar, config, lattice, scales=sorted(scales))
         if args.test in ("lambda", "products"):
             sigma2 = np.where(g.nbar > 0, 1.0 / (np.where(g.nbar > 0, g.nbar, 1.0) * g.cellsize**3), 0.0)
             setups[cap]["noise"] = noise_variance_maps(sigma2, config, g.support, lattice)

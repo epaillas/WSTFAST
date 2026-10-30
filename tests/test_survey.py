@@ -287,6 +287,39 @@ def test_torch_survey_backend_matches_numpy():
         np.testing.assert_allclose(d[key], c[key], rtol=1e-4)
 
 
+def test_torch_min_j1_keeps_the_cross_spectra_fields():
+    """config.min_j1 restricts the second-layer pairs only: S1m and the kept S2m are unchanged, and the X cross-spectra
+    callback still receives the mean-subtracted U of every kept (j1, l), j1 < min_j1 included."""
+    torch = pytest.importorskip("torch")
+    from wstfast.measure_torch import TorchLattice, measure_wst_survey_torch
+
+    class Recorder:
+        def __init__(self, keep):
+            self.keep, self.calls = keep, {}
+
+        def __call__(self, j1, ell, m1, mesh, mean):
+            if m1 is not None and (j1, ell) in self.keep:
+                self.calls[j1, ell, m1] = (float(np.asarray(mesh, dtype=np.float64).sum()), float(mean))
+
+    geometry = _two_region_cone(32)
+    delta = anisotropic_field(32, seed=7)
+    lattice = TorchLattice(32, device=torch.device("cpu"))
+    keep = [(j, ell) for j in range(3) for ell in range(1, 3)]
+    runs = {}
+    for min_j1 in (0, 1):
+        config = WSTConfig(J=2, L=3, L2=2, sigma0=1.5, min_dj=1, cellsize=1.0, q=2.0, min_j1=min_j1)
+        fields = Recorder(keep)
+        runs[min_j1] = (measure_wst_survey_torch(delta, config, support=geometry.support, qs=[2.0], los="z",
+                                                 lattice=lattice, fields=fields), fields.calls, config)
+    (full, calls0, _), (cut, calls1, config) = runs[0], runs[1]
+    assert config.second_layer_pairs() == [(1, 2)]
+    np.testing.assert_allclose(cut["S1m"], full["S1m"], rtol=1e-6, equal_nan=True)
+    np.testing.assert_allclose(cut["S2m"][:, 1, 2], full["S2m"][:, 1, 2], rtol=1e-6, equal_nan=True)
+    assert set(calls1) == set(calls0) and {(j, ell) for j, ell, _ in calls1} == set(keep)
+    for key in calls0:
+        np.testing.assert_allclose(calls1[key], calls0[key], rtol=1e-6, err_msg=str(key))
+
+
 def test_lambda_window_second_layer_matches_the_estimator():
     from wstfast.survey import LambdaWindow
 

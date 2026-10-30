@@ -646,18 +646,19 @@ def coverage(support: np.ndarray, config: WSTConfig, lattice, j: int, ell: int) 
 
 
 def second_layer_bins(support: np.ndarray, nbar: np.ndarray, config: WSTConfig, lattice=None, ncoverage: int = 10,
-                      nnbar: int = 3, interior: float = 0.999) -> dict:
+                      nnbar: int = 3, interior: float = 0.999, scales=None) -> dict:
     """Bins of the support cells for the mean subtraction of the second layer (``measure_wst_survey``), {(j1, l):
     labels}, for every first-layer (j1, l) of the second layer: the coverage of the (sigma_j1, l) wavelet, in ``ncoverage``
     quantile bins of the edge cells (coverage < ``interior``) plus one interior bin, times ``nnbar`` quantile bins of
-    nbar (the noise level of U). They depend on the geometry only."""
+    nbar (the noise level of U). They depend on the geometry only. ``scales``: the j1 to bin instead of the second
+    layer's (e.g. also those of the X cross-spectra, whose U is mean-subtracted the same way)."""
     lattice = lattice or Lattice(support.shape[0])
     index = np.flatnonzero(support)
     density = np.asarray(nbar).ravel()[index]
     edges = np.unique(np.quantile(density, np.linspace(0, 1, nnbar + 1)[1:-1]))
     nbin = np.digitize(density, edges)
     out = {}
-    for j1 in sorted({j for j, _ in config.second_layer_pairs()}):
+    for j1 in sorted({j for j, _ in config.second_layer_pairs()} if scales is None else set(scales)):
         for ell in range(1, config.lmax2 + 1):
             f = coverage(support, config, lattice, j1, ell)
             edge = f < interior

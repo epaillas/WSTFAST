@@ -279,18 +279,26 @@ def measure_wst_survey_torch(delta, config: WSTConfig, support=None, weights=Non
 
         for j1 in range(nj):
             second_layer = ell <= config.lmax2 and any(pair[0] == j1 for pair in pairs)
-            u1, per_m = moduli(fk, config.sigma0 * config.step**j1, everywhere=second_layer)
+            # the X cross-spectra take the mean-subtracted U of their (j1, l) whether or not the second layer uses it
+            # (config.min_j1 restricts only the pairs)
+            wanted = fields is not None and 1 <= ell <= config.lmax2 and (getattr(fields, "keep", None) is None
+                                                                            or (j1, ell) in fields.keep)
+            u1, per_m = moduli(fk, config.sigma0 * config.step**j1, everywhere=second_layer or wanted)
             out["S1"][:, j1, ell] = average(u1, j1)
             for m1, u in enumerate(per_m):
                 out["S1m"][:, j1, ell, m1] = average(u, j1)
-            if not second_layer:
+            if not (second_layer or wanted):
                 continue
             for m1, u in [(None, u1)] + list(enumerate(per_m)):
+                if m1 is None and not second_layer:
+                    continue
                 second = torch.zeros(nmesh**3, dtype=torch.float32, device=device)
                 second[index] = u if ell == 0 else subtract_mean_torch(u, None if second_layer_bins is None
                                                                        else second_layer_bins[j1, ell])
-                if fields is not None and ell >= 1:
+                if wanted:
                     fields(j1, ell, m1, second.reshape((nmesh,) * 3).cpu().numpy(), float(u.to(torch.float64).mean()))
+                if not second_layer:
+                    continue
                 fu = torch.fft.rfftn(second.reshape((nmesh,) * 3))
                 for _, j2 in (pair for pair in pairs if pair[0] == j1):
                     u2, per_m2 = moduli(fu, config.sigma0 * config.step**j2, resolve_m=m1 is not None)
